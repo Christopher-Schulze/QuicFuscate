@@ -1544,3 +1544,89 @@ fn reorder_window_tick_arms_under_committed_wire_fec() {
         "repairs must never arm or extend the gather window"
     );
 }
+
+fn enqueue_dgrams(connection: &mut QuicFuscateConnection, n: usize) {
+    for _ in 0..n {
+        connection.conn.dgram_send_parts(b"", b"pressure-probe").expect("dgram enqueue");
+    }
+}
+
+#[test]
+fn deferral_window_skips_arm_under_dgram_pressure() {
+    let mut connection = test_connection();
+    connection.conn.set_external_pacing(false);
+    connection.conn.set_stealth_timing(true, 5_000);
+    let bulk = bulk_send_info();
+    let now = Instant::now();
+    connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
+        packet: fec_packet(10, &[0xDD; 8], None),
+        wire_meta: None,
+        send_info: test_send_info(),
+        congestion_controlled: true,
+        paired: false,
+    });
+    enqueue_dgrams(&mut connection, QuicFuscateConnection::WINDOW_PRESSURE_DEPTH);
+    assert!(connection.gather_pressure());
+
+    for _ in 0..64 {
+        connection.reorder_window_tick(&bulk, now);
+    }
+    assert!(
+        connection.bulk_window_release.get().is_none(),
+        "a gathered train must FIFO-drain instead of arming another stall"
+    );
+
+    connection.stealth_window_tick(Some(now + Duration::from_millis(2)), now);
+    assert!(
+        connection.stealth_window_release.get().is_none(),
+        "stealth jitter must not stall on top of an already-gathered train"
+    );
+}
+
+#[test]
+fn stealth_window_edge_opens_shared_quiet_phase() {
+    let connection = test_connection();
+    let now = Instant::now();
+    let edge = now + Duration::from_millis(2);
+
+    connection.stealth_window_tick(Some(edge), now);
+    assert_eq!(connection.stealth_window_release.get(), Some(edge));
+
+    connection.stealth_window_tick(Some(edge + Duration::from_millis(5)), edge);
+    assert!(connection.stealth_window_release.get().is_none());
+    assert!(connection.burst_draining.get());
+    let quiet_until =
+        connection.reorder_quiet_until.get().expect("stealth edge must share the quiet phase");
+    assert!(quiet_until >= edge);
+
+    connection.burst_draining.set(false);
+    let mid_quiet = edge + Duration::from_nanos(500);
+    assert!(mid_quiet < quiet_until);
+    connection.stealth_window_tick(Some(mid_quiet + Duration::from_millis(5)), mid_quiet);
+    assert!(
+        connection.stealth_window_release.get().is_none(),
+        "stealth must not punch through the shared quiet gap"
+    );
+}
+
+#[test]
+fn drain_budget_refills_under_dgram_pressure() {
+    let mut connection = test_connection();
+    connection.burst_draining.set(true);
+    connection.drain_budget.set(0);
+    enqueue_dgrams(&mut connection, 20);
+    connection.refresh_drain_budget();
+    assert_eq!(connection.drain_budget.get(), 20);
+}
+
+#[test]
+fn open_window_aborts_when_dgram_queue_hits_abort_depth() {
+    let mut connection = test_connection();
+    let now = Instant::now();
+    connection.bulk_window_release.set(Some(now + Duration::from_millis(5)));
+    enqueue_dgrams(&mut connection, QuicFuscateConnection::WINDOW_ABORT_DEPTH);
+    connection.maybe_abort_window_under_pressure(now);
+    assert!(connection.bulk_window_release.get().is_none());
+    assert!(connection.burst_draining.get());
+    assert!(connection.drain_budget.get() > 0);
+}

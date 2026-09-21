@@ -157,3 +157,30 @@ reorder-off recv 59.982 Mbit/s / 0% loss vs reorder-on
 cut is userspace `tun_drops` under the gather-window cadence.
 Window arming itself is proven (also under committed FEC,
 TODO-1022).
+
+## Pressure-aware arming (2026-09-21)
+
+Root cause of the 51% cut: after a 32-packet drain the next produce
+re-armed a 5 ms stealth window while `dgram_send_queue` still held
+the leftover train. Each stall parked more TUN frames into the
+userspace backlog until `tun_drops` matched iperf loss.
+
+Landed in `src/core/connection/send.rs`:
+
+- Skip a fresh reorder/stealth window while
+  `dgram_send_queue_len() >= WINDOW_PRESSURE_DEPTH` (16) or the
+  shared quiet phase is open.
+- Stealth window edges now call `open_quiet_phase` (same 0-20 ms
+  draw as reorder) so JITTER_US=5000 cannot punch through the FIFO
+  gap.
+- `DRAIN_BUDGET_MAX` 32 -> 128; `refresh_drain_budget` refills from
+  the remaining transport queue when pressure remains.
+- `maybe_abort_window_under_pressure` consumes an open window at
+  256 queued datagrams and arms the drain.
+
+Tests: `deferral_window_skips_arm_under_dgram_pressure`,
+`stealth_window_edge_opens_shared_quiet_phase`,
+`drain_budget_refills_under_dgram_pressure`,
+`open_window_aborts_when_dgram_queue_hits_abort_depth`.
+
+Omega 80% revalidation is still open.

@@ -112,3 +112,6 @@ Omega re-run that actually armed the window (see TODO-1015):
 30.602 / 59.982 Mbit/s (51%) with `qtun0 TX dropped=0`. The
 scheduler redesign itself is landed; the remaining cut is
 userspace `tun_drops` under gather-window cadence.
+
+Pressure-aware skip/refill/abort landed with TODO-1015
+(2026-09-21). The 80% gate still waits on Omega revalidation.

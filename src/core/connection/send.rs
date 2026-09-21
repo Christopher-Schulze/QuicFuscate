@@ -139,13 +139,11 @@ impl QuicFuscateConnection {
             // phase, and switch to the drain phase instead of opening a
             // new window for this packet.
             self.bulk_window_release.set(None);
-            let quiet_us =
-                crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_QUIET_MAX_US + 1);
-            self.reorder_quiet_until.set(Some(now + Duration::from_micros(quiet_us)));
+            self.open_quiet_phase(now);
             self.arm_burst_drain();
             return;
         }
-        if self.reorder_quiet_until.get().is_some_and(|until| now < until) {
+        if self.skip_fresh_window(now) {
             return;
         }
         let hold_us = crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_HOLD_MAX_US + 1);
@@ -442,35 +440,38 @@ impl QuicFuscateConnection {
             self.reorder_quiet_until.set(None);
             self.burst_draining.set(false);
             self.outbound_pacer.reset();
-        } else if !path_control_pending && self.deferral_window_open(now) {
-            self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
-            log::trace!(
-                "connection.send: deferral window open, production stalls until {:?}",
-                [self.bulk_window_release.get(), self.stealth_window_release.get()]
-                    .into_iter()
-                    .flatten()
-                    .min()
-            );
-            // TODO-1016: while the window is open nothing is
-            // produced - produced-but-held packets occupy QUIC's
-            // in-flight window and trigger spurious PTO loss
-            // (~38% measured on Omega), collapsing cwnd and the
-            // pacing rate. The transport's own datagram queue
-            // holds the backlog as honest backpressure; the drain
-            // phase after the edge materializes it exempt from
-            // new jitter draws. A queued drain leftover still emits.
-            return self.emit_ripe_or_yield(
-                buf,
-                now,
-                crate::transport::SendInfo {
-                    from: self.local_addr,
-                    to: self.peer_addr,
-                    at: now,
-                    congestion_controlled: false,
-                    path_control: false,
-                    bulk_only: false,
-                },
-            );
+        } else if !path_control_pending {
+            self.maybe_abort_window_under_pressure(now);
+            if self.deferral_window_open(now) {
+                self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
+                log::trace!(
+                    "connection.send: deferral window open, production stalls until {:?}",
+                    [self.bulk_window_release.get(), self.stealth_window_release.get()]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                );
+                // TODO-1016: while the window is open nothing is
+                // produced - produced-but-held packets occupy QUIC's
+                // in-flight window and trigger spurious PTO loss
+                // (~38% measured on Omega), collapsing cwnd and the
+                // pacing rate. The transport's own datagram queue
+                // holds the backlog as honest backpressure; the drain
+                // phase after the edge materializes it exempt from
+                // new jitter draws. A queued drain leftover still emits.
+                return self.emit_ripe_or_yield(
+                    buf,
+                    now,
+                    crate::transport::SendInfo {
+                        from: self.local_addr,
+                        to: self.peer_addr,
+                        at: now,
+                        congestion_controlled: false,
+                        path_control: false,
+                        bulk_only: false,
+                    },
+                );
+            }
         }
         // The budgeted burst drain bypasses the delivery-rate pacer: the
         // reorder window exists to emit the gathered backlog as one
@@ -670,10 +671,13 @@ impl QuicFuscateConnection {
             // stop materializing and let the tail emit down - still
             // unpaced while the flag stays armed.
             if self.burst_draining.get() && self.drain_budget.get() == 0 {
-                if self.outgoing_fec_packets.is_empty() {
-                    self.burst_draining.set(false);
-                } else {
-                    break;
+                self.refresh_drain_budget();
+                if self.drain_budget.get() == 0 {
+                    if self.outgoing_fec_packets.is_empty() {
+                        self.burst_draining.set(false);
+                    } else {
+                        break;
+                    }
                 }
             }
             match self.produce_one_queued(now, established, wire_profile)? {
@@ -698,8 +702,63 @@ impl QuicFuscateConnection {
     /// Upper bound on packets one drain epoch materializes (TODO-1016).
     /// Armed from the transport backlog at the window edge; under
     /// sustained load that backlog never reaches zero, so the cap is what
-    /// ends each burst train and re-opens the window cycle.
-    const DRAIN_BUDGET_MAX: usize = 32;
+    /// ends each burst train and re-opens the window cycle. Sized to the
+    /// TUN drain budget so a 5 ms gather plus 1-core drain time cannot
+    /// leave more packets parked than one epoch can emit (TODO-1015
+    /// tun_drops gate).
+    pub(crate) const DRAIN_BUDGET_MAX: usize = 128;
+
+    /// Transport datagrams already queued that count as a gathered train
+    /// (TODO-1015). Arming another stall on top of this just overflows
+    /// the TUN backlog; FIFO-drain until the queue falls back under the
+    /// mark, then the next quiet gap may shape again.
+    pub(crate) const WINDOW_PRESSURE_DEPTH: usize = 16;
+
+    /// Safety valve: an open gather window whose transport queue has
+    /// grown this deep is consumed immediately so production resumes
+    /// before `tun_drops` start (TODO-1015). 256 is a quarter of the
+    /// default dgram cap and far above a 5 ms 60 M gather (~27).
+    pub(crate) const WINDOW_ABORT_DEPTH: usize = 256;
+
+    pub(crate) fn gather_pressure(&self) -> bool {
+        self.conn.dgram_send_queue_len() >= Self::WINDOW_PRESSURE_DEPTH
+    }
+
+    pub(crate) fn skip_fresh_window(&self, now: Instant) -> bool {
+        self.gather_pressure() || self.reorder_quiet_until.get().is_some_and(|until| now < until)
+    }
+
+    fn open_quiet_phase(&self, now: Instant) {
+        let quiet_us =
+            crate::transport::rand::fast_rand_u64_uniform(Self::REORDER_QUIET_MAX_US + 1);
+        self.reorder_quiet_until.set(Some(now + Duration::from_micros(quiet_us)));
+    }
+
+    pub(crate) fn maybe_abort_window_under_pressure(&self, now: Instant) {
+        if !self.deferral_window_open(now) {
+            return;
+        }
+        if self.conn.dgram_send_queue_len() < Self::WINDOW_ABORT_DEPTH {
+            return;
+        }
+        self.bulk_window_release.set(None);
+        self.stealth_window_release.set(None);
+        self.open_quiet_phase(now);
+        self.arm_burst_drain();
+    }
+
+    pub(crate) fn refresh_drain_budget(&self) {
+        if !self.burst_draining.get() || self.drain_budget.get() > 0 {
+            return;
+        }
+        if !self.gather_pressure() {
+            return;
+        }
+        let refill = self.conn.dgram_send_queue_len().min(Self::DRAIN_BUDGET_MAX);
+        if refill > 0 {
+            self.drain_budget.set(refill);
+        }
+    }
 
     /// Arm the post-edge burst drain (TODO-1016). The budget mirrors the
     /// transport backlog gathered during the window (plus the triggering
@@ -738,10 +797,15 @@ impl QuicFuscateConnection {
             if now < open {
                 return;
             }
-            // The window edge just passed: consume it and switch to the
-            // drain phase instead of opening a new window for this packet.
+            // The window edge just passed: consume it, share the reorder
+            // quiet phase so a 5 ms stealth draw cannot punch through
+            // the FIFO gap, and switch to the drain phase.
             self.stealth_window_release.set(None);
+            self.open_quiet_phase(now);
             self.arm_burst_drain();
+            return;
+        }
+        if self.skip_fresh_window(now) {
             return;
         }
         self.stealth_window_release.set(Some(target));
@@ -1053,6 +1117,7 @@ impl QuicFuscateConnection {
         // An open deferral window gathers the transport backlog: producing
         // now would only queue a packet that has to sit held, inflating
         // QUIC's in-flight clock toward a spurious PTO loss (TODO-1016).
+        self.maybe_abort_window_under_pressure(now);
         if self.deferral_window_open(now) {
             self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
             return Ok((0, zero_send_info(now)));

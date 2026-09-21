@@ -4026,12 +4026,12 @@
 
 ### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams
 
-- PARTIAL (2026-09-20). Gather-timer + bounded swap landed. 2026-09-21 Omega: `--no-utls` now applies stealth knobs so the window actually arms (`yield_window=9440` / `drain_entries=1422` at UDP 60 M). Reorder-off recv 59.982 Mbit/s 0% loss; reorder-on (`JITTER_US=5000`) recv 30.602 Mbit/s 43.94% loss (`tun_drops=36381`, `qtun0 TX dropped=0`) - 51% of baseline, below the 80% gate.
+- PARTIAL (2026-09-21). Gather-timer + bounded swap + pressure-aware arming landed. A deep transport queue (`dgram >= 16`) refuses a fresh stall, drain budget is 128 and refills under pressure, stealth edges share the quiet phase, and a 256-deep queue aborts an open window. Unit tests cover skip/quiet/refill/abort. 2026-09-21 Omega before this: `--no-utls` armed the window (`yield_window=9440` / `drain_entries=1422` at UDP 60 M); reorder-off 59.982 Mbit/s 0% vs reorder-on (`JITTER_US=5000`) 30.602 Mbit/s 43.94% (`tun_drops=36381`) - 51%, below the 80% gate. Omega revalidation pending.
 - Detail: docs/todo/todo-1015-bulk-reorder-window.md
 
 ### TODO-1016 - Deferral drain serializes emission under per-packet stealth deferral
 
-- PARTIAL (2026-09-20). Scheduler redesign landed. 2026-09-21 Omega revalidation with the window actually armed: 30.602 / 59.982 Mbit/s (51%), `qtun0 TX dropped=0`, remaining cut is userspace `tun_drops` under gather-window cadence.
+- PARTIAL (2026-09-21). Scheduler redesign plus pressure-aware window skip / drain refill (see TODO-1015). Prior Omega armed-window cut was 30.602 / 59.982 Mbit/s (51%) from `tun_drops` under gather-window cadence. Revalidation pending.
 - Detail: docs/todo/todo-1016-deferral-drain-serialization.md
 
 ### TODO-1017 - Atomic pair emission for bounded bulk reorder swaps
