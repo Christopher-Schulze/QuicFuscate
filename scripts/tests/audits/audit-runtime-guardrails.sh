@@ -896,6 +896,41 @@ else
   append_item "crypto_lifecycle_contracts" "fail" "missing ring/libaegis owner, erasure path, or a removed first-party primitive resurfaced"
 fi
 
+# 4n-behavior) The owner check above is source text. These tests fail when the
+# live seal, the libaegis vector, or the RFC 9001 Retry tag stops matching.
+# A deleted test is also a failure: cargo --exact exits 0 when the filter
+# matches nothing, so each run must report exactly one passing test.
+# Filters: tests::ring_aes_gcm128_matches_nist_vector
+#           libaegis_aead::tests::libaegis_matches_pinned_cfrg_aegis128l_vector_1
+#           transport::packet::tests::retry_integrity_matches_rfc9001_appendix_a4
+# The unsafe-fn contract gate already lives in check 1c. Do not duplicate it.
+owner_behavior_ok=1
+nist_out=""
+cfrg_out=""
+retry_out=""
+if nist_out="$(cargo test -p qf-crypto --lib --offline tests::ring_aes_gcm128_matches_nist_vector -- --exact 2>&1)"; then
+  printf '%s\n' "$nist_out" | rg -q 'test result: ok\. 1 passed' || owner_behavior_ok=0
+else
+  owner_behavior_ok=0
+fi
+if cfrg_out="$(cargo test -p qf-crypto --lib --offline libaegis_aead::tests::libaegis_matches_pinned_cfrg_aegis128l_vector_1 -- --exact 2>&1)"; then
+  printf '%s\n' "$cfrg_out" | rg -q 'test result: ok\. 1 passed' || owner_behavior_ok=0
+else
+  owner_behavior_ok=0
+fi
+if retry_out="$(cargo test --offline --lib transport::packet::tests::retry_integrity_matches_rfc9001_appendix_a4 -- --exact 2>&1)"; then
+  printf '%s\n' "$retry_out" | rg -q 'test result: ok\. 1 passed' || owner_behavior_ok=0
+else
+  owner_behavior_ok=0
+fi
+if [[ "$owner_behavior_ok" -eq 1 ]]; then
+  pass "Crypto owner behavior matches NIST, CFRG, and RFC 9001 Retry vectors"
+  append_item "crypto_owner_behavior" "ok" "ring NIST AES-GCM, libaegis CFRG vector, and RFC 9001 A.4 Retry tag"
+else
+  fail_critical "Crypto owner behavior vector failed"
+  append_item "crypto_owner_behavior" "fail" "NIST, CFRG, or RFC 9001 Retry tag test failed"
+fi
+
 # 4o) Privilege identity and libc result contracts must remain opaque and
 #     fail-closed across Unix and non-Unix compilation paths.
 if rg -n --no-messages '^type CurrentIds =' crates/qf-privilege/src/drop.rs >/dev/null \

@@ -549,7 +549,7 @@
 - Detail: `docs/todo/todo-1067-stale-crypto-status-claims.md`
 
 ### TODO-1068 - Audit the crypto owner by behavior, not only by source strings
-- OPEN. Keep check 4n's name predicates. Add a run of the NIST AES-GCM test, the libaegis CFRG test, and the Retry RFC tag test. The unsafe-fn contract gate already exists; verify it, do not reimplement. Do not touch the unrelated AMX/Windows/Linux criticals.
+- DONE. Check 4n is unchanged. Check 4n-behavior runs the NIST AES-GCM test, the libaegis CFRG test, and the RFC 9001 A.4 Retry tag test, and fails if a filter matches zero tests. The existing crypto unsafe-fn inventory stays the only unsafe gate. Dry run: both crypto lines passed. Exit 1 from the six pre-existing AMX, Windows, and Linux criticals. Those checks were not edited.
 - Detail: `docs/todo/todo-1068-crypto-owner-behavior-audit.md`
 
 ### TODO-1069 - Remove the write-only DATA_AEAD_OVERRIDE_MODE selector residue

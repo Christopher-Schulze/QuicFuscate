@@ -4,7 +4,7 @@ title: Audit the crypto owner by behavior, not only by source strings
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-22
 depends_on: [TODO-1049, TODO-1065]
 ---
@@ -47,11 +47,29 @@ The safety-contract inventory already fails on a new `unsafe fn` without a `# Sa
 
 ## Sub-Tasks
 
-- [ ] 4n string checks unchanged and still passing.
-- [ ] Behavior invocation of the three named tests.
-- [ ] Confirm the existing unsafe-fn contract gate still rejects a contract-free `unsafe fn` (no code change; document the probe).
-- [ ] Script comment lists the three test filters.
-- [ ] A dry run is recorded in Notes with the pass line for 4n-behavior. Full-script exit may stay non-zero because of the unrelated criticals.
+- [x] 4n string checks unchanged and still passing.
+- [x] Behavior invocation of the three named tests.
+- [x] Confirm the existing unsafe-fn contract gate still rejects a contract-free `unsafe fn` (no code change; document the probe).
+- [x] Script comment lists the three test filters.
+- [x] A dry run is recorded in Notes with the pass line for 4n-behavior. Full-script exit may stay non-zero because of the unrelated criticals.
+
+## Notes
+
+Check 1c already exits when a crypto `unsafe fn` lacks `# Safety` or `SAFETY` in the preceding 12 lines. Live tree: 0 unsafe functions, 0 missing contracts. A synthetic `pub unsafe fn` with an empty preceding window matches the same predicate and would be reported. No second gate was added.
+
+`cargo test --exact` exits 0 when the filter matches nothing. 4n-behavior therefore requires `test result: ok. 1 passed` for each of:
+
+- `tests::ring_aes_gcm128_matches_nist_vector`
+- `libaegis_aead::tests::libaegis_matches_pinned_cfrg_aegis128l_vector_1`
+- `transport::packet::tests::retry_integrity_matches_rfc9001_appendix_a4`
+
+A missing-name probe (`tests::this_test_does_not_exist`) does not contain that line.
+
+Dry run 2026-09-22: "Crypto lifecycle and removed-primitive contracts are wired" and "Crypto owner behavior matches NIST, CFRG, and RFC 9001 Retry vectors". Exit 1, Critical: 6. The six errors are AMX proof, WFP cleanup, interface negative-proof matrix, privilege/memory-lock/TLS Windows wiring, native Linux resolver proof, and multi-client dual-stack proof. Those lines were not edited.
+
+## Result
+
+4n stays a source-string check. 4n-behavior runs the three owner tests and fails closed if a test fails or disappears. The unsafe-fn inventory stays the existing check 1c.
 
 ## Acceptance
 
