@@ -4,7 +4,7 @@ title: FEC standards alignment - NWCRG RLC window, application-tailored gating, 
 severity: MEDIUM
 phase: M
 priority: P2
-status: PARTIAL
+status: DONE
 created: 2026-09-19
 depends_on: []
 ---
@@ -227,3 +227,15 @@ stale-epoch drop in `core::connection::tests`
 (`repair_ack_round_trip_reports_masked_wire_loss_to_cc`,
 `repair_ack_stale_epoch_is_dropped`). 1767 lib tests green, clippy clean,
 `zero_copy_dgram` build verified.
+
+## Closure (2026-09-21)
+
+All five findings have a written verdict and a home:
+
+1. QUIRL unequal protection - landed (packet-class Bulk/Protected).
+2. NWCRG/TinyMT32 wire seed - rejected-by-design (HKDF + splitmix64).
+3. Repair-ACK - landed (closes TODO-1006 option (a)).
+4. Convolutional/sliding window - landed as TODO-1018 (Streaming GF8).
+5. Unequal protection - same as item 1.
+
+This standing track has no remaining adopt/adapt work.
