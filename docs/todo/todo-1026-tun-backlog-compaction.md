@@ -4,7 +4,7 @@ title: TUN uplink backlog retains sent slots until fully drained (Vec + cursor)
 severity: LOW
 phase: L
 priority: P3
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1021]
 ---
@@ -55,3 +55,16 @@ drains under realistic backpressure; pick (3) if drains are frequent,
   sufficient.
 - FIFO order and the `TUN_PACKET_QUEUE_CAPACITY` unsent bound are
   unchanged; `tun_drops` accounting identical.
+
+## Implementation (2026-09-21)
+
+Option 1. `compact_tun_backlog` in `src/main/runtime.rs` drains the
+sent prefix when `cursor >= 64` (and clears the backlog when the
+cursor consumes the vec). Both `drain_client_tun_uplink` and
+`drain_client_tun_uplink_fd` compact after a parked remainder
+survives a send pass. Unsent admission still uses `len - cursor`
+against `TUN_PACKET_QUEUE_CAPACITY`.
+
+Tests (`cargo test --bin quicfuscate compact_tun_backlog`): small
+cursor stays put, threshold drain keeps the live tail, exhausted
+cursor drops the backlog.

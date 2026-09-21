@@ -4086,7 +4086,7 @@
 
 ### TODO-1026 - TUN uplink backlog retains sent slots until fully drained
 
-- OPEN (P3, 2026-09-21). `tun_backpressure_frame` is `(Vec<TunPacket>, cursor)`; sent slots are only freed when the backlog fully drains and the Vec is replaced. Memory is bounded (cap counts unsent `len - cursor`) so this is churn, not a leak - but a steady drip keeps dead prefix slots indefinitely. Measure drain frequency first; if rare, compact when `cursor` exceeds a threshold (`drain(..cursor)` or switch to `VecDeque`+`pop_front`).
+- DONE (P3, 2026-09-21). Both client uplink drains call `compact_tun_backlog` after cursor advances: `drain(..cursor)` once the sent prefix hits 64. Unsent cap and `tun_drops` unchanged. Tests cover skip/compact/clear.
 - Detail: docs/todo/todo-1026-tun-backlog-compaction.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff

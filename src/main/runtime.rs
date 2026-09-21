@@ -1122,6 +1122,31 @@ fn send_one_tun_frame(
 /// may push into the MASQUE queue before yielding to the other select arms.
 const TUN_DRAIN_FRAME_BUDGET: usize = 128;
 
+/// TODO-1026: compact the sent prefix once the cursor reaches this many
+/// slots so a drip-feed backlog cannot retain dead `TunPacket` entries
+/// until the queue fully empties.
+const TUN_BACKLOG_COMPACT_CURSOR: usize = 64;
+
+/// Drops sent prefix slots from a `(frames, cursor)` backlog. No-op when
+/// the cursor is below [`TUN_BACKLOG_COMPACT_CURSOR`]. A cursor past the
+/// live tail clears the backlog entirely.
+fn compact_tun_backlog<T>(backlog: &mut Option<(Vec<T>, usize)>) {
+    let Some((frames, cursor)) = backlog.as_mut() else {
+        return;
+    };
+    if *cursor == 0 {
+        return;
+    }
+    if *cursor >= frames.len() {
+        *backlog = None;
+        return;
+    }
+    if *cursor >= TUN_BACKLOG_COMPACT_CURSOR {
+        frames.drain(..*cursor);
+        *cursor = 0;
+    }
+}
+
 /// Drain batched TUN waves from `rx` and forward each frame through `conn`
 /// without dropping frames that encounter DATAGRAM queue backpressure. A
 /// backpressured or budget-cut wave remainder is held in `backlog` (with its
@@ -1163,6 +1188,8 @@ fn drain_client_tun_uplink(
         if *cursor >= frames.len() {
             *backlog = None;
             carrier_full = false;
+        } else {
+            compact_tun_backlog(backlog);
         }
     }
 
@@ -1197,6 +1224,7 @@ fn drain_client_tun_uplink(
                         // remainder; the backlog keeps the adaptive tick
                         // active and preserves the wake-up contract.
                         *backlog = Some((frames, cursor));
+                        compact_tun_backlog(backlog);
                         if budget == 0 {
                             return Ok(true);
                         }
@@ -1249,9 +1277,13 @@ fn drain_client_tun_uplink(
             } else {
                 *backlog = Some((frames, 0));
             }
+            compact_tun_backlog(backlog);
             Ok(true)
         }
-        Err(std::sync::mpsc::TryRecvError::Empty) => Ok(backlog.is_some() && !carrier_full),
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            compact_tun_backlog(backlog);
+            Ok(backlog.is_some() && !carrier_full)
+        }
         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
             Err(quicfuscate::engine::DataPlaneFault::ChannelDisconnected {
                 component: "standalone client TUN reader channel".to_string(),
@@ -1324,6 +1356,8 @@ fn drain_client_tun_uplink_fd(
             if *cursor >= frames.len() {
                 *backlog = None;
                 carrier_full = false;
+            } else {
+                compact_tun_backlog(backlog);
             }
         }
     }
@@ -1383,6 +1417,7 @@ fn drain_client_tun_uplink_fd(
         }
     }
 
+    compact_tun_backlog(backlog);
     Ok(backlog.is_some() && sendable && !carrier_full)
 }
 
@@ -1625,4 +1660,45 @@ pub(super) fn load_client_ca_file(
 
 pub(super) fn heartbeat_probe_interval(heartbeat_timeout_ms: u64) -> Option<Duration> {
     (heartbeat_timeout_ms > 0).then(|| Duration::from_millis((heartbeat_timeout_ms / 3).max(1)))
+}
+
+#[cfg(test)]
+mod compact_tun_backlog_tests {
+    use super::{compact_tun_backlog, TUN_BACKLOG_COMPACT_CURSOR};
+
+    #[test]
+    fn compact_tun_backlog_leaves_small_cursor_in_place() {
+        let mut backlog = Some(((0..10).collect::<Vec<_>>(), 3));
+        compact_tun_backlog(&mut backlog);
+        assert_eq!(backlog, Some(((0..10).collect(), 3)));
+    }
+
+    #[test]
+    fn compact_tun_backlog_drains_prefix_at_threshold() {
+        let live = TUN_BACKLOG_COMPACT_CURSOR + 8;
+        let mut frames: Vec<usize> = (0..live).collect();
+        frames.extend(1000..1008);
+        let mut backlog = Some((frames, TUN_BACKLOG_COMPACT_CURSOR));
+        compact_tun_backlog(&mut backlog);
+        let (frames, cursor) = backlog.expect("live tail must remain");
+        assert_eq!(cursor, 0);
+        assert_eq!(
+            frames,
+            (TUN_BACKLOG_COMPACT_CURSOR..live).chain(1000..1008).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn compact_tun_backlog_clears_exhausted_cursor() {
+        let mut backlog = Some(((0..4).collect::<Vec<_>>(), 4));
+        compact_tun_backlog(&mut backlog);
+        assert!(backlog.is_none());
+    }
+
+    #[test]
+    fn compact_tun_backlog_ignores_empty() {
+        let mut backlog: Option<(Vec<u8>, usize)> = None;
+        compact_tun_backlog(&mut backlog);
+        assert!(backlog.is_none());
+    }
 }
