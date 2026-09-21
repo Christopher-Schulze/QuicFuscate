@@ -541,7 +541,7 @@
 - Detail: `docs/todo/todo-1065-retry-tag-rfc-vector.md`
 
 ### TODO-1066 - Freeze one pre-ring QFENC1 ciphertext and open it with ring
-- OPEN. Capture one envelope from the first-party sealer at `a87b9584` and check those bytes in. Current `decrypt` must open them. Do not reseal the fixture with ring.
+- DONE. Golden sealed by first-party ChaCha20-Poly1305 at `a87b9584` (key `0x31` x32, nonce `0x91` x12, counter 0, empty AAD). `legacy_envelope_frozen_from_a87b9584_opens_with_ring` opens it with ring and rejects a flipped tag. `cargo test --offline --lib legacy_envelope_frozen` 1/1.
 - Detail: `docs/todo/todo-1066-legacy-qkey-golden-ciphertext.md`
 
 ### TODO-1067 - Rewrite present-tense claims about deleted crypto

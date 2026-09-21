@@ -1096,6 +1096,41 @@ mod tests {
     }
 
     #[test]
+    fn legacy_envelope_frozen_from_a87b9584_opens_with_ring() {
+        // Sealed by first-party ChaCha20Poly1305 at commit a87b9584.
+        // Key [0x31; 32], nonce [0x91; 12], counter 0, empty AAD, PLAINTEXT.
+        // Not produced by RingChaCha20Poly1305 in this process.
+        const GOLDEN_HEX: &str = "5146454e4331919191919191919191919191e3e7851e04f3420fd0bc96cc3d7a3116b38373a9d38f7f482871f9ae0e95ce910e7f6f901fa332d8f9bef94c4a90e28f1f8bc63cf706adee77e7d3942d3a7d1d1493154c9b5569cea6";
+        let mut golden = Vec::with_capacity(GOLDEN_HEX.len() / 2);
+        let hex = GOLDEN_HEX.as_bytes();
+        let mut index = 0;
+        while index < hex.len() {
+            let hi = (hex[index] as char).to_digit(16).expect("hex");
+            let lo = (hex[index + 1] as char).to_digit(16).expect("hex");
+            golden.push(((hi << 4) | lo) as u8);
+            index += 2;
+        }
+        assert!(golden.starts_with(LEGACY_MAGIC));
+
+        let root = test_root("legacy-golden");
+        let path = root.join("qkeys.json");
+        write_protected(&path, &golden);
+        let storage =
+            RegistryStorage::for_test(path.clone(), Some(CURRENT_KEY), None).expect("storage");
+        let loaded = storage.load().expect("load golden").expect("payload");
+        assert_eq!(loaded.rewrite, Some(RewriteReason::LegacyUpgrade));
+        assert_eq!(loaded.as_slice(), PLAINTEXT);
+
+        let mut corrupted = golden;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 1;
+        write_protected(&path, &corrupted);
+        let rejected = RegistryStorage::for_test(path, Some(CURRENT_KEY), None).expect("storage");
+        assert!(rejected.load().is_err(), "a flipped golden tag must fail authentication");
+        std::fs::remove_dir_all(root).expect("clean test root");
+    }
+
+    #[test]
     fn write_io_failure_is_typed_and_leaves_no_temporary_file() {
         let root = test_root("io-failure");
         let blocking_parent = root.join("not-a-directory");
