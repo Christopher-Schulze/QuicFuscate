@@ -42,6 +42,7 @@ fn main() {
         client_scid_len: FALLBACK_CID_LEN,
         server_scid_len: FALLBACK_CID_LEN,
         initial_dcid: None,
+        app_version: None,
     };
     let mut report = Report { private_inconsistent: !private.consistent, ..Default::default() };
     for datagram in &pcap.datagrams {
@@ -429,6 +430,9 @@ struct State<'a> {
     // The original DCID from the client's first Initial — Initial secrets
     // derive from this CID for BOTH directions, not from per-packet DCIDs.
     initial_dcid: Option<Vec<u8>>,
+    // Negotiated QUIC version learned from the first long-header packet —
+    // v2 derives packet keys under different HKDF labels than v1.
+    app_version: Option<u32>,
 }
 
 #[derive(Default)]
@@ -554,6 +558,9 @@ fn analyze_datagram(datagram: &Datagram, state: &mut State, report: &mut Report)
             } else {
                 state.server_scid_len = scid_len as usize;
             }
+            if state.app_version.is_none() {
+                state.app_version = Some(version);
+            }
             if is_initial && c2s && state.initial_dcid.is_none() {
                 state.initial_dcid = Some(dcid.to_vec());
             }
@@ -561,13 +568,13 @@ fn analyze_datagram(datagram: &Datagram, state: &mut State, report: &mut Report)
                 let Some((tok_len, n)) = read_varint(&buf[pos..]) else { return };
                 pos += n + tok_len as usize;
             }
-            let Some((pkt_len, n)) = read_varint(&buf[pos..]) else { return };
-            pos += n;
+            // This stack deliberately omits the RFC 9000 Length field on
+            // long-header packets (see transport::packet::format_header):
+            // the packet number follows the header fields directly and the
+            // packet always consumes the rest of the datagram. Long-header
+            // packets therefore cannot be coalesced.
             let pn_offset = pos;
-            let end = pn_offset + pkt_len as usize;
-            if end > buf.len() {
-                return;
-            }
+            let end = buf.len();
             if is_initial || is_handshake {
                 analyze_long(
                     &buf[off..end],
@@ -580,7 +587,8 @@ fn analyze_datagram(datagram: &Datagram, state: &mut State, report: &mut Report)
                     report,
                 );
             }
-            // 0-RTT long-header packets still carry the length field; skip.
+            // 0-RTT long-header packets are skipped; the key schedule for
+            // early data is out of scope for this proof.
             off = end;
         } else {
             // Short header consumes the rest of the datagram.
@@ -715,8 +723,9 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
     let pn_offset = 1 + dcid_len;
     let dir_name = dir(c2s);
     let std_secret_name = if c2s { "CLIENT_TRAFFIC_SECRET_0" } else { "SERVER_TRAFFIC_SECRET_0" };
+    let version = state.app_version.unwrap_or(QUIC_V1);
     let Some(std_keys) =
-        state.secrets.get(std_secret_name).and_then(|s| DirectionKeys::from_secret(s, QUIC_V1))
+        state.secrets.get(std_secret_name).and_then(|s| DirectionKeys::from_secret(s, version))
     else {
         report.rtt_failed += 1;
         println!("  1rtt {dir_name}: no standard traffic secret in keylog");
