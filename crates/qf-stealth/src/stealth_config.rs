@@ -23,11 +23,32 @@ fn parse_wire_shape_value(value: &str) -> Option<WireShape> {
     }
 }
 
+/// The single wire image `dynamic` mode freezes at connect time (TODO-1059).
+///
+/// Once the connection is established the image never changes: escalation may
+/// only move the repair-ratio hint and the Reality/MASQUE armed bit, never the
+/// packet shape (padding set, timing, cover schedule, framing) or the AEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicWireImage {
+    /// Full stealth shape: persona-trace padding schedule, in-QUIC FEC,
+    /// persona cover headers. The default when the operator sets no image.
+    #[default]
+    Stealth,
+    /// Thin image: no stealth padding or cover schedule; the in-QUIC FEC
+    /// wrapper stays allowed. Still AES-128-GCM — the AEGIS payload pin is a
+    /// `performance` *mode* property, not a `dynamic` image.
+    Performance,
+}
+
 /// Ultra-sophisticated configuration for the main StealthManager.
 #[derive(Clone)]
 pub struct StealthConfig {
     /// Selected high-level mode for behavior decisions.
     pub mode: StealthMode,
+    /// The wire image frozen at connect when `mode` is `Dynamic`
+    /// (TODO-1059). Inert in every other mode.
+    pub dynamic_wire_image: DynamicWireImage,
     /// Cover-target hostnames for the Reality relay path (TODO-1048).
     ///
     /// Each entry is a `host` or `host:port` whose certificate the hop
@@ -269,6 +290,7 @@ impl StealthConfig {
             choke_burst_ms: 0,
             // Dynamic disabled
             dynamic_enabled: false,
+            dynamic_wire_image: DynamicWireImage::Stealth,
             enable_http3_masquerading: true,
             use_tls_cover: true,
             use_qpack_headers: true,
@@ -322,6 +344,7 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
+            dynamic_wire_image: DynamicWireImage::Stealth,
             // Aggressive compression defaults for Anti-DPI traffic (textual payloads)
             compress_enabled: true,
             compress_min_len: 128,
@@ -404,6 +427,7 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
+            dynamic_wire_image: DynamicWireImage::Stealth,
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
@@ -444,6 +468,7 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
+            dynamic_wire_image: DynamicWireImage::Stealth,
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
@@ -498,6 +523,7 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
+            dynamic_wire_image: DynamicWireImage::Stealth,
             compress_enabled: false,
             compress_min_len: 512,
             compress_level: 3,
@@ -509,11 +535,27 @@ impl StealthConfig {
         }
     }
 
-    /// Creates Intelligent mode - starts like Performance and escalates intelligently.
+    /// `dynamic` freezes exactly one wire image at connect (TODO-1059). The
+    /// default image is `Stealth`: persona-trace padding, in-QUIC FEC and
+    /// persona cover headers are already in place from the first 1-RTT
+    /// packet — escalation never thickens the shape mid-connection.
     pub fn dynamic() -> Self {
-        let mut cfg = Self::performance();
+        Self::dynamic_with_image(DynamicWireImage::Stealth)
+    }
+
+    /// Builds `dynamic` for an explicit operator-selected wire image.
+    /// `Performance` selects the thin image (no stealth padding, no cover
+    /// schedule, in-QUIC FEC wrapper still allowed). Both images keep the
+    /// AES-128-GCM payload — `engine_mode_uses_libaegis` pins AEGIS to the
+    /// `performance` mode only, never to `dynamic`.
+    pub fn dynamic_with_image(image: DynamicWireImage) -> Self {
+        let mut cfg = match image {
+            DynamicWireImage::Stealth => Self::stealth(),
+            DynamicWireImage::Performance => Self::performance(),
+        };
         cfg.mode = StealthMode::Dynamic;
         cfg.dynamic_enabled = true;
+        cfg.dynamic_wire_image = image;
         cfg
     }
 
@@ -590,6 +632,7 @@ impl StealthConfig {
             choke_target_mbps: Option<u32>,
             choke_burst_ms: Option<u32>,
             dynamic_enabled: Option<bool>,
+            dynamic_wire_image: Option<DynamicWireImage>,
             // Removed in TODO-1055 — keys stay parseable for config
             // compatibility; `enable_server_push_cover = true` is rejected.
             enable_server_push_cover: Option<bool>,
@@ -618,6 +661,14 @@ impl StealthConfig {
         if let Some(sec) = root.stealth {
             if let Some(mode) = sec.mode {
                 cfg = StealthConfig::from_mode(mode);
+                // TODO-1059: for `dynamic` the wire image is part of the
+                // preset, so it must be selected before the per-key overrides
+                // below land on top of it.
+                if cfg.mode == StealthMode::Dynamic {
+                    if let Some(image) = sec.dynamic_wire_image {
+                        cfg = StealthConfig::dynamic_with_image(image);
+                    }
+                }
             }
             if let Some(v) = sec.initial_browser {
                 cfg.initial_browser = v;
@@ -632,7 +683,9 @@ impl StealthConfig {
                 cfg.suppress_icmp_unreachable = v;
             }
             if let Some(v) = sec.use_tls_cover {
-                cfg.use_tls_cover = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.use_tls_cover = v;
+                }
             }
             if let Some(v) = sec.enable_doh {
                 cfg.enable_doh = v;
@@ -641,10 +694,14 @@ impl StealthConfig {
                 cfg.doh_provider = v;
             }
             if let Some(v) = sec.enable_http3_masquerading {
-                cfg.enable_http3_masquerading = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.enable_http3_masquerading = v;
+                }
             }
             if let Some(v) = sec.use_qpack_headers {
-                cfg.use_qpack_headers = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.use_qpack_headers = v;
+                }
             }
             if sec.enable_domain_fronting == Some(true) {
                 return Err(
@@ -660,20 +717,31 @@ impl StealthConfig {
             if let Some(v) = sec.reality_cover_targets {
                 cfg.reality_cover_targets = v;
             }
+            // TODO-1059: under `dynamic` the image preset owns the whole wire
+            // shape — the per-key shape overrides stay inert so `mode =
+            // "dynamic"` alone always yields the frozen image.
             if let Some(v) = sec.enable_traffic_padding {
-                cfg.enable_traffic_padding = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.enable_traffic_padding = v;
+                }
             }
             if let Some(v) = sec.enable_timing_obfuscation {
-                cfg.enable_timing_obfuscation = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.enable_timing_obfuscation = v;
+                }
             }
             if let Some(v) = sec.enable_protocol_mimicry {
-                cfg.enable_protocol_mimicry = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.enable_protocol_mimicry = v;
+                }
             }
-            if let Some(v) = sec.padding_strategy.as_deref().and_then(parse_padding_strategy) {
-                cfg.wire_shape = v;
-            }
-            if let Some(v) = sec.wire_shape.as_deref().and_then(parse_padding_strategy) {
-                cfg.wire_shape = v;
+            if cfg.mode != StealthMode::Dynamic {
+                if let Some(v) = sec.padding_strategy.as_deref().and_then(parse_padding_strategy) {
+                    cfg.wire_shape = v;
+                }
+                if let Some(v) = sec.wire_shape.as_deref().and_then(parse_padding_strategy) {
+                    cfg.wire_shape = v;
+                }
             }
             if let Some(v) = sec.wire_cap_bytes_per_sec {
                 cfg.wire_cap_bytes_per_sec = v;
@@ -682,7 +750,9 @@ impl StealthConfig {
                 cfg.wire_cap_bytes_per_burst = v;
             }
             if let Some(v) = sec.max_padding_size {
-                cfg.max_padding_size = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.max_padding_size = v;
+                }
             }
             if let Some(v) = sec.enable_fingerprint_rotation {
                 cfg.enable_fingerprint_rotation = v;
@@ -702,6 +772,11 @@ impl StealthConfig {
             if let Some(v) = sec.dynamic_enabled {
                 cfg.dynamic_enabled = v;
             }
+            if cfg.mode != StealthMode::Dynamic {
+                if let Some(image) = sec.dynamic_wire_image {
+                    cfg.dynamic_wire_image = image;
+                }
+            }
             if sec.enable_server_push_cover == Some(true) {
                 return Err(
                     "stealth.enable_server_push_cover was removed in TODO-1055: fake PUSH_PROMISE bursts only spent the wire budget on header bytes no observer could read; persona-shaped requests run on the outer MASQUE hop and debit the wire ledger"
@@ -716,10 +791,14 @@ impl StealthConfig {
                 sec.server_push_burst_interval,
             );
             if let Some(v) = sec.normalize_target_size {
-                cfg.normalize_target_size = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.normalize_target_size = v;
+                }
             }
             if let Some(v) = sec.enable_cover_ping {
-                cfg.enable_cover_ping = v;
+                if cfg.mode != StealthMode::Dynamic {
+                    cfg.enable_cover_ping = v;
+                }
             }
             if let Some(v) = sec.cover_ping_interval_ms {
                 cfg.cover_ping_interval_ms = v;
@@ -990,7 +1069,7 @@ impl StealthConfig {
 #[cfg(test)]
 mod tests {
     use super::StealthConfig;
-    use crate::{BrowserProfile, OsProfile, StealthMode, WireShape};
+    use crate::{BrowserProfile, DynamicWireImage, OsProfile, StealthMode, WireShape};
     use qf_common::env_utils::EnvSnapshot;
 
     #[test]
@@ -1101,6 +1180,89 @@ mod tests {
         let toml = "[stealth]\nfronting_domains = [\"a.example\", \"b.example\"]\n";
         let cfg = StealthConfig::from_toml(toml).expect("legacy alias maps");
         assert_eq!(cfg.reality_cover_targets, vec!["a.example", "b.example"]);
+    }
+
+    // TODO-1059: `mode = "dynamic"` freezes one wire image at connect. The
+    // image preset owns the whole packet shape — per-key shape overrides stay
+    // inert so the operator cannot accidentally unfreeze the image.
+
+    #[test]
+    fn toml_dynamic_defaults_to_stealth_image() {
+        let cfg =
+            StealthConfig::from_toml("[stealth]\nmode = 'dynamic'\n").expect("parse dynamic mode");
+        assert_eq!(cfg.mode, StealthMode::Dynamic);
+        assert_eq!(cfg.dynamic_wire_image, DynamicWireImage::Stealth);
+        assert!(cfg.enable_traffic_padding);
+        assert!(cfg.enable_timing_obfuscation);
+        assert!(cfg.enable_protocol_mimicry);
+        assert_eq!(cfg.wire_shape, WireShape::PersonaTrace);
+        assert!(cfg.enable_cover_ping);
+    }
+
+    #[test]
+    fn toml_dynamic_ignores_every_shape_override() {
+        let toml = "[stealth]\n\
+            mode = 'dynamic'\n\
+            use_tls_cover = false\n\
+            enable_http3_masquerading = false\n\
+            use_qpack_headers = false\n\
+            enable_traffic_padding = false\n\
+            enable_timing_obfuscation = false\n\
+            enable_protocol_mimicry = false\n\
+            padding_strategy = 'fixed-cell'\n\
+            wire_shape = 'fixed-cell'\n\
+            max_padding_size = 0\n\
+            normalize_target_size = 1400\n\
+            enable_cover_ping = false\n\
+            reality_cover_targets = ['cdn.example']\n\
+            doh_provider = 'https://dns.quad9.net/dns-query'\n";
+        let cfg = StealthConfig::from_toml(toml).expect("parse dynamic with overrides");
+
+        // The frozen stealth image wins over every shape key.
+        assert_eq!(cfg.dynamic_wire_image, DynamicWireImage::Stealth);
+        assert!(cfg.enable_traffic_padding, "padding key must be inert");
+        assert!(cfg.enable_timing_obfuscation, "timing key must be inert");
+        assert!(cfg.enable_protocol_mimicry, "mimicry key must be inert");
+        assert!(cfg.enable_http3_masquerading, "masquerade key must be inert");
+        assert!(cfg.use_qpack_headers, "qpack key must be inert");
+        assert!(cfg.use_tls_cover, "tls-cover key must be inert");
+        assert!(cfg.enable_cover_ping, "cover-ping key must be inert");
+        assert_eq!(cfg.wire_shape, WireShape::PersonaTrace, "shape keys must be inert");
+        assert_ne!(cfg.max_padding_size, 0, "max_padding_size must be inert");
+        assert_ne!(cfg.normalize_target_size, 1400, "normalize_target must be inert");
+
+        // Non-shape keys still apply: persona identity, cover targets, DoH.
+        assert_eq!(cfg.reality_cover_targets, vec!["cdn.example"]);
+        assert_eq!(cfg.doh_provider, "https://dns.quad9.net/dns-query");
+    }
+
+    #[test]
+    fn toml_dynamic_wire_image_performance_selects_thin_image() {
+        let toml = "[stealth]\n\
+            mode = 'dynamic'\n\
+            dynamic_wire_image = 'performance'\n\
+            enable_traffic_padding = true\n";
+        let cfg = StealthConfig::from_toml(toml).expect("parse performance image");
+        assert_eq!(cfg.mode, StealthMode::Dynamic);
+        assert_eq!(cfg.dynamic_wire_image, DynamicWireImage::Performance);
+        assert!(!cfg.enable_traffic_padding, "thin image owns padding — key inert");
+        assert!(!cfg.enable_timing_obfuscation);
+        assert!(!cfg.enable_protocol_mimicry);
+        assert!(!cfg.enable_cover_ping);
+    }
+
+    #[test]
+    fn toml_explicit_modes_still_honor_shape_overrides() {
+        let toml = "[stealth]\n\
+            mode = 'stealth'\n\
+            enable_traffic_padding = false\n\
+            max_padding_size = 96\n\
+            enable_cover_ping = false\n";
+        let cfg = StealthConfig::from_toml(toml).expect("parse stealth overrides");
+        assert_eq!(cfg.mode, StealthMode::Stealth);
+        assert!(!cfg.enable_traffic_padding);
+        assert_eq!(cfg.max_padding_size, 96);
+        assert!(!cfg.enable_cover_ping);
     }
 }
 

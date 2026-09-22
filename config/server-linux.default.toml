@@ -88,8 +88,14 @@ mode = "performance"
 # - performance:  cheap browser baseline, costly features locked off. Payload is AEGIS-128L.
 # - stealth:      balanced features. Payload stays AES-128-GCM.
 # - Stealth MAX:  aggressive stealth. Payload stays AES-128-GCM.
-# - dynamic:      starts like performance and escalates. Payload stays AES-128-GCM.
+# - dynamic:      freezes ONE wire image at connect (TODO-1059): the stealth
+#                 image by default (persona-trace padding, in-QUIC FEC, cover
+#                 headers), or the thin image via dynamic_wire_image =
+#                 "performance". Escalation only moves the repair ratio inside
+#                 the byte cap and the Reality/MASQUE armed bit — never the
+#                 packet shape. Payload stays AES-128-GCM.
 # - manual:       operator picks each flag and the payload cipher.
+# dynamic_wire_image = "stealth"   # "stealth" (default) or "performance"; only for mode = "dynamic"
 
 # Manual mode settings (only used when mode = "manual"):
 # reality_cover_targets = []      # cover hosts whose certificate this hop presents/relays

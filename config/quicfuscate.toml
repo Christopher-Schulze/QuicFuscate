@@ -166,9 +166,31 @@ force_aead = ""
 #                 Post-auth payload is libaegis AEGIS-128L.
 # - stealth:      Balanced features. Payload stays AES-128-GCM.
 # - Stealth MAX:  Aggressive stealth. Payload stays AES-128-GCM.
-# - dynamic:      Starts like performance and escalates. Payload stays AES-128-GCM.
+# - dynamic:      Freezes ONE wire image at connect (TODO-1059) and never
+#                 changes it mid-connection. Default is the stealth image:
+#                 persona-trace padding, in-QUIC FEC and persona cover headers
+#                 are on from the first 1-RTT packet. Escalation may only move
+#                 the repair ratio inside the byte cap and the Reality/MASQUE
+#                 armed bit — never padding set, timing, cover schedule,
+#                 framing or AEAD. Payload stays AES-128-GCM.
 # - manual:       Operator picks each stealth flag and the payload cipher.
 mode = "dynamic"
+
+# Wire image frozen by mode = "dynamic" (TODO-1059):
+# - "stealth"     (default): full stealth shape from connect — persona-trace
+#                 padding schedule, in-QUIC FEC, persona cover headers.
+# - "performance": thin image — no stealth padding or cover schedule; the
+#                 in-QUIC FEC wrapper stays allowed. Still AES-128-GCM: the
+#                 AEGIS payload pin belongs to mode = "performance" only.
+#                 Choose mode = "performance" instead if you want the speed
+#                 profile with its AEGIS pin — the thin dynamic image is not
+#                 the same thing.
+# The individual shape keys below (enable_traffic_padding,
+# enable_timing_obfuscation, enable_protocol_mimicry, padding_strategy,
+# max_padding_size, enable_http3_masquerading, use_tls_cover,
+# use_qpack_headers) are inert under mode = "dynamic" — the image preset
+# owns the whole wire shape. They still apply to the explicit modes.
+# dynamic_wire_image = "stealth"
 
 # Manual mode settings (only used when mode = "manual")
 # ------------------------------------------------------------------------------

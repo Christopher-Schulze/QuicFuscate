@@ -545,7 +545,7 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Mode defaults:
   - `stealth` and `stealth_max`: `persona-trace` with the shared default cap (65536 B/s, 16384 B burst).
   - `off` and `performance`: no ledger, zero stealth bytes — padding, cover, and chaff gates are pass-through and never emit.
-  - `dynamic`: owns a ledger from connect so a later brain escalation keeps the same wire image and counters.
+  - `dynamic`: owns a ledger from connect — the default `stealth` image installs the persona-trace shape; `dynamic_wire_image = "performance"` keeps the thin image with no ledger, mirroring `off`/`performance` byte behavior while escalation stays limited to repair ratio and the Reality armed bit (TODO-1059).
 - Timing obfuscation (Stealth MAX default): per-packet random jitter (us) gated in `transport::Config.set_stealth_timing`; enforced as a send gate in `Connection::send()`.
 - Hot-path randomness: the ledgerless legacy path's padding-rate rolls and jitter samples use `transport::rand::fast_rand_u64_uniform`, a secure-seeded non-cryptographic per-thread SplitMix64 helper. Under an installed wire ledger there are no RNG rolls — the persona trace and the cap decide. Randomness stays limited to cover heuristics; connection IDs, path challenges, keys, nonces, tokens, and authentication material stay on secure RNG APIs.
 
@@ -697,23 +697,23 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 | Reality Cover Targets | off | explicit only | on with explicit targets or built-in CDN list | off at Level 0; explicit/escalated only |
 | HTTP/3 Masquerading | on | on | on | on |
 | QPACK Headers | on | on | on | on |
-| Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | off at Level 0; dynamic at Level 1-2 |
-| Timing Obfuscation | off | 750 us default | 3000 us default | off (dynamic); forced on after probe |
-| Flow Shaper and Dummy Retransmits | off | off | on | off (dynamic) |
+| Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | frozen image: on (stealth image) / off (performance image) — never level-keyed (TODO-1059) |
+| Timing Obfuscation | off | 750 us default | 3000 us default | frozen image — never level-keyed (TODO-1059) |
+| Flow Shaper and Dummy Retransmits | off | off | on | frozen image |
 | Active Fingerprint Rotation | off | off | off (next-session only) | off (next-session only) |
-| Server Push Cover | off | light randomized (0.25, 60 s) | randomized (0.8, 15 s) | Level-dependent randomized (15 s at L2, 30 s at L0/L1) |
-| Real-time Choke | off | off | off (compat/manual only) | off (dynamic) |
+| Server Push Cover | off | off | off | off — generation removed in TODO-1055; outer-hop persona requests only |
+| Real-time Choke | off | off | off (compat/manual only) | off |
 | DNS-over-HTTPS | on | on | on | on |
 | TLS Cover provider | on* | on* | on* | on* |
-| WebTransport Cover | off | off | escalated/anti-DPI cover only | Level 2 only |
+| WebTransport Cover | off | off | escalated/anti-DPI cover only | stealth image only — never level-keyed |
 | Core H3/MASQUE TUN | only if TUN requires it | only if TUN requires it | only if TUN requires it | TUN or escalation |
-| Core H3/MASQUE Preference | off | off | off | off at Level 0; dynamic after escalation |
-| Cover Traffic Interval | off | 5 s | 5 s (tightened on escalation) | off at Level 0; 5 s from Level 1 |
+| Core H3/MASQUE Preference | off | off | off | armed bit — may flip with probe pressure (allowed actuator, TODO-1059) |
+| Cover Traffic Interval | off | 5 s | 5 s | 5 s — fixed, never re-keyed by escalation |
 
 Notes:
-- Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. Intelligent starts like Performance at Level 0 and can escalate toward Stealth/Anti-DPI features on probe signals.
+- Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. `dynamic` freezes one wire image at connect (TODO-1059): the stealth image by default, or the thin performance image via `stealth.dynamic_wire_image = "performance"`. Probe escalation may only move the repair-ratio hint and the Reality/MASQUE armed bit — never the packet shape.
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
-- `qf-stealth` owns the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthManager` owns preset baselines and preserves the historical root adapter. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
+- `qf-stealth` owns the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthManager` owns preset baselines and preserves the historical root adapter. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline. Under `dynamic` every packet-shape permission is denied (`BrainRuntimePermissions::deny_all`), so the delta cannot mutate the frozen wire image — the Brain still steers the repair-ratio hint and the MASQUE armed bit.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: cover targets must be hosts the hop can legitimately serve or relay to; a target the hop does not control produces relay failures, not a certificate mismatch. Relayed probe bytes are forwarded unchanged and consume upstream bandwidth.
 - Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
@@ -787,7 +787,7 @@ Final stealth stack:
 - Performance: uTLS/persona on; DoH on; cover targets off; HTTP/3 masquerading on; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
 - Stealth: uTLS/persona on; DoH on; cover targets only when `reality_cover_targets` is explicitly configured; HTTP/3 masquerading on (outer hops only); QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off.
 - Anti-DPI: uTLS/persona on; DoH on; cover targets from the explicit list or the built-in CDN set; HTTP/3 masquerading on (outer hops only); QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; WebTransport cover enabled as a one-shot H3 application-cover session; real-time choke off by default.
-- Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no cover targets); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; WebTransport cover is level-2 only.
+- Intelligent (`dynamic`): freezes one wire image at connect — the stealth image by default (persona-trace padding, timing, in-QUIC FEC and persona cover headers on from the first 1-RTT packet) or the thin performance image via `stealth.dynamic_wire_image = "performance"` (no stealth padding, no cover schedule, in-QUIC FEC wrapper allowed). Escalation on probe/brain pressure moves only the repair ratio inside the byte cap and the Reality/MASQUE armed bit; padding set, timing, cover schedule, framing and AEAD never change mid-connection (TODO-1059).
 - Manual: all knobs as configured in TOML or env; no automatic escalation.
 
 #### Real-Time Rate Choke
@@ -797,9 +797,8 @@ Final stealth stack:
 
 #### Probe Escalation (runtime)
 - Escalation triggers on active probe detection only when `dynamic_enabled` is true (`dynamic`). `performance` and `stealth` do not auto-escalate on probe.
-- Escalation window lasts 20 minutes and tightens cover traffic interval to 2500 ms.
-- Server push cover traffic is enabled at runtime during escalation.
-- While server push cover is active, the regular cover-request scheduler is suppressed so only one active cover-traffic owner shapes burst behavior at a time.
+- The probe level feeds `IntelligentLevelHints.probe_level` → the Brain's repair-ratio hint (`fec_hint_ppm`) and the Reality/MASQUE armed bit. Both are the only actuators escalation may move (TODO-1059); the armed window expires after 20 minutes.
+- Cover cadence, padding set, timing amplitude, framing, the traffic-analysis policy and the payload AEAD are frozen at connect — escalation never re-keys them.
 
 ### StealthBrain Runtime Control
 

@@ -1387,6 +1387,9 @@ impl Connection {
     }
 
     /// Applies the authorized Level-2 defense or restores the authenticated baseline.
+    /// Test-only: the production tick no longer swaps the traffic-analysis
+    /// policy on probe level — it is part of the frozen wire image (TODO-1059).
+    #[cfg(any(test, feature = "rust-tests"))]
     pub(crate) fn apply_intelligent_traffic_analysis_level(
         &mut self,
         level: u32,

@@ -203,11 +203,12 @@ One owner is created per client/server runtime generation, including `main_parts
 Probe-count-based escalation state machine on `StealthManager`.
 - `record_probe()`: records epoch-millisecond probe buckets, checks the ladder thresholds (>=3 in 60s -> L1, then >=8 in 120s -> L2), aggregates same-millisecond probes, and enforces a maximum of 120,001 retained timestamp buckets; a fresh level-0 state cannot jump directly to L2.
 - `check_de_escalation()`: drops at most one level per configurable quiet period (default 300s), measured from the latest probe or level change.
-- `on_probe_detected()` uses `EscalationState` instead of immediate binary escalation.
-- `sync_intelligent_level()` calls `check_de_escalation()` on each tick.
+- `on_probe_detected()` uses `EscalationState` instead of immediate binary escalation; the probe level feeds `IntelligentLevelHints.probe_level` -> the Brain's repair-ratio hint and the Reality/MASQUE armed bit — the only actuators escalation may move under `dynamic` (TODO-1059).
+- `sync_intelligent_level()` calls `check_de_escalation()` on each tick and re-syncs the armed bit; it no longer writes padding/timing rates.
 - Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (3), `_L2` (8),
-  `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (50).
+  `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (50, policy derivation only — the value cannot reach the transport under `dynamic` because all shape permissions are denied).
 - `on_probe_detected` only escalates when `config.dynamic_enabled` is true (Intelligent mode).
+- TODO-1059: `dynamic` freezes one wire image at connect — `stealth.dynamic_wire_image = "stealth"` (default) or `"performance"` selects the image preset; all per-key shape overrides are inert on this mode, cover/WebTransport gates key on the image instead of the level, `brain_runtime_permissions()` returns `deny_all()`, and the update tick no longer swaps the traffic-analysis policy. Payload stays AES-128-GCM for both images.
 - `probe_timestamps` is a bounded `ProbeHistory` with independent 60-/120-second counters, same-millisecond aggregation, and a hard maximum of 120,001 millisecond buckets; it remains separate from the detector history. TODO-808 is closed by named hosted execution in macOS job `93669407470`.
 
 ### IntelligentStealthInputs.level_hint (crates/qf-stealth/src/intelligent_policy.rs)

@@ -41,12 +41,6 @@ pub struct StealthManager {
     escalation_state: Arc<EscalationState>,
     /// Connection-local Brain/probe level state.
     intelligent_level_hints: Arc<qf_transport_types::IntelligentLevelHints>,
-    /// Runtime override: padding rate 0-100 (set on probe detection or escalation).
-    /// Level 0 = 0%, Level 1 = 50%, Level 2 = 100%.
-    runtime_padding_rate: AtomicU8,
-    /// Runtime override: timing obfuscation rate 0-100 (set on probe detection or escalation).
-    /// Level 0 = 0%, Level 1 = 0%, Level 2 = 100%.
-    runtime_timing_rate: AtomicU8,
     /// Optimization manager for memory pools
     _optimization_manager: Arc<OptimizationManager>,
     /// Reality Fallback Proxy for active probe handling
@@ -237,8 +231,6 @@ impl StealthManager {
                 &env_snapshot,
             )),
             intelligent_level_hints,
-            runtime_padding_rate: AtomicU8::new(0),
-            runtime_timing_rate: AtomicU8::new(0),
             _optimization_manager: optimization_manager,
             reality_proxy,
             fallback_rx: Arc::new(Mutex::new(rx)),
@@ -681,11 +673,8 @@ impl StealthManager {
             }
             if clear_flag {
                 self.escalated.store(false, Ordering::Relaxed);
-                // Restore default cover-traffic interval (5s) and MASQUE preference
-                if let Some(ref sched) = self.cover_traffic {
-                    sched.set_interval_ms(5000);
-                }
-                self.prefer_masque.store(false, Ordering::Relaxed);
+                // Recompute the armed bit — probe hits may still justify it.
+                self.maybe_escalate_masque_intelligent();
             }
         }
 
@@ -786,7 +775,8 @@ impl StealthManager {
             // derive_intelligent_runtime_policy call aligns with the escalation.
             crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.fetch_add(10, Ordering::Relaxed);
 
-            // Mark escalated window for stronger pacing (Level 2 only).
+            // Arm the Reality/MASQUE relay window (Level 2 only). The armed
+            // bit may flip mid-connection; the wire image may not (TODO-1059).
             if level >= 2 {
                 self.escalated.store(true, Ordering::Relaxed);
                 if let Ok(mut guard) = self.escalated_until.lock() {
@@ -795,7 +785,7 @@ impl StealthManager {
                 }
 
                 // Keep the active Browser/OS/TLS/H3 persona stable. Escalation
-                // may raise padding, timing, cover traffic and MASQUE hints,
+                // may raise the repair-ratio hint and the MASQUE armed bit,
                 // but it must not rotate fingerprints or fronting hosts inside
                 // an already-established connection.
             }
@@ -825,10 +815,13 @@ impl StealthManager {
             && !matches!(config.mode, StealthMode::Off | StealthMode::Performance)
     }
 
-    fn cover_header_emission_allowed(&self) -> bool {
+    pub(crate) fn cover_header_emission_allowed(&self) -> bool {
         match self.config.mode {
             StealthMode::Off | StealthMode::Performance => false,
-            StealthMode::Dynamic => self.intelligent_runtime_level() >= 1,
+            // TODO-1059: the frozen image decides, never the escalation level.
+            StealthMode::Dynamic => {
+                self.config.dynamic_wire_image == qf_stealth::DynamicWireImage::Stealth
+            }
             StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Manual => true,
         }
     }
@@ -870,6 +863,12 @@ impl StealthManager {
 
     /// Computes which transport knobs the brain is allowed to adjust at runtime.
     pub(crate) fn brain_runtime_permissions(&self) -> crate::transport::BrainRuntimePermissions {
+        // TODO-1059: `dynamic` froze its wire image at connect. The Brain may
+        // still steer the repair-ratio hint (probe level → fec_hint_ppm) and
+        // the Reality/MASQUE armed bit, but no packet-shape actuator.
+        if self.is_intelligent_runtime() {
+            return crate::transport::BrainRuntimePermissions::deny_all();
+        }
         let ack_locked = self.config.transport_ack_threshold_override(&self.env_snapshot).is_some()
             || self.config.transport_ack_max_delay_override(&self.env_snapshot).is_some();
         let timing_locked =
@@ -933,10 +932,10 @@ impl StealthManager {
     }
 
     /// Apply the brain-computed intelligent level to runtime overrides.
-    /// Called periodically (e.g., from the connection tick) to sync runtime
-    /// padding/timing/rotation rates with the brain's escalation level.
-    /// Also checks probe-count-based de-escalation from `EscalationState`.
-    /// Only active in Intelligent mode - explicit modes set their rates directly.
+    /// Called periodically (e.g., from the connection tick) to keep the
+    /// Reality/MASQUE armed bit in sync and to run probe-count de-escalation
+    /// from `EscalationState`. TODO-1059: packet-shape knobs are frozen at
+    /// connect — this tick never re-keys them.
     pub(crate) fn sync_intelligent_level(&self) {
         if !self.is_intelligent_runtime() {
             return;
@@ -953,20 +952,10 @@ impl StealthManager {
             return;
         }
 
-        let level = self.intelligent_runtime_level() as u8;
-        let current_padding = self.runtime_padding_rate.load(Ordering::Relaxed);
-        let target_padding = match level {
-            0 => 0u8,
-            1 => self
-                .env_snapshot
-                .parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
-                .unwrap_or(50),
-            _ => 100u8,
-        };
-        // Only update if different to avoid unnecessary atomic writes
-        if current_padding != target_padding {
-            self.escalate_to_level(level);
-        }
+        // The probe level already flows to the Brain through
+        // `EscalationState` → `IntelligentLevelHints`; keep only the armed
+        // MASQUE preference in sync. Packet-shape knobs stay frozen.
+        self.maybe_escalate_masque_intelligent();
     }
 
     fn desired_masque_preference_with_hint(&self, telemetry_hint: u64) -> bool {
@@ -1011,39 +1000,24 @@ impl StealthManager {
 
     /// Returns whether this connection persona may negotiate WebTransport cover.
     pub(crate) fn webtransport_cover_enabled(&self) -> bool {
+        // TODO-1059: the frozen image decides, never the escalation level.
         let active = matches!(self.config.mode, StealthMode::StealthMax)
-            || (self.is_intelligent_runtime() && self.intelligent_runtime_level() >= 2);
+            || (self.is_intelligent_runtime()
+                && self.config.dynamic_wire_image == qf_stealth::DynamicWireImage::Stealth);
         active && self.config.enable_http3_masquerading
     }
 
-    /// Escalate to a specific stealth level (0=performance, 1=stealth, 2=Stealth MAX).
-    /// Each level sets graduated intensity on padding/timing/rotation.
+    /// Escalate to a specific probe level (0 = quiet, 1 = probed, 2 = pressed).
+    ///
+    /// TODO-1059: escalation may only move the *allowed* actuators — the
+    /// repair-ratio hint (the probe level already reached the Brain through
+    /// `EscalationState` → `IntelligentLevelHints`, which feeds
+    /// `fec_hint_ppm`) and the Reality/MASQUE armed bit. The wire image is
+    /// frozen at connect: padding set, timing, cover schedule, framing and
+    /// AEAD never change mid-connection.
     pub(crate) fn escalate_to_level(&self, level: u8) {
-        let padding_rate = match level {
-            0 => 0u8,
-            1 => self
-                .env_snapshot
-                .parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1")
-                .unwrap_or(50),
-            _ => 100u8,
-        };
-        let timing_rate = match level {
-            0 | 1 => 0u8,
-            _ => 100u8,
-        };
-        self.runtime_padding_rate.store(padding_rate, Ordering::Relaxed);
-        self.runtime_timing_rate.store(timing_rate, Ordering::Relaxed);
-
-        if level >= 2 {
-            // Level 2: full escalation tightens the cover-request cadence.
-            if let Some(ref sched) = self.cover_traffic {
-                sched.set_interval_ms(2500);
-            }
-        }
-        debug!(
-            "Stealth escalated to level {}: padding={}%, timing={}%",
-            level, padding_rate, timing_rate
-        );
+        self.maybe_escalate_masque_intelligent();
+        debug!("Stealth probe escalation reached level {level} (wire image unchanged)");
     }
 
     /// De-escalate to a lower stealth level (called after quiet period).
@@ -1057,18 +1031,6 @@ impl StealthManager {
             }
         }
         debug!("Stealth de-escalated to level {}", level);
-    }
-
-    /// Get current runtime padding rate (0-100).
-    #[cfg(test)]
-    pub(crate) fn runtime_padding_rate(&self) -> u8 {
-        self.runtime_padding_rate.load(Ordering::Relaxed)
-    }
-
-    /// Get current runtime timing rate (0-100).
-    #[cfg(test)]
-    pub(crate) fn runtime_timing_rate(&self) -> u8 {
-        self.runtime_timing_rate.load(Ordering::Relaxed)
     }
 
     /// Get the current escalation level from the EscalationState (test accessor).

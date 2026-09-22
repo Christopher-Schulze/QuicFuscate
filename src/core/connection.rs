@@ -1610,10 +1610,11 @@ impl QuicFuscateConnection {
 
         Self::run_update_state_phase(&clock, diagnostics_enabled, "stealth-intelligence", || {
             self.stealth_manager.sync_intelligent_level();
-            let level = self.stealth_manager.intelligent_runtime_level();
-            if let Err(error) = self.conn.apply_intelligent_traffic_analysis_level(level) {
-                warn!("Intelligent traffic-analysis policy transition failed: {error}");
-            }
+            // TODO-1059: no `apply_intelligent_traffic_analysis_level` call
+            // here — the traffic-analysis policy (chaff rate/size, constant
+            // rate, defense) is part of the frozen wire image. The probe
+            // level still reaches the Brain through the level hints and may
+            // only move the repair ratio and the Reality/MASQUE armed bit.
         });
     }
 

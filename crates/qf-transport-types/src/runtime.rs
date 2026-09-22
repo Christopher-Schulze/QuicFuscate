@@ -34,6 +34,23 @@ pub struct BrainRuntimePermissions {
     pub cc_profile: bool,
 }
 
+impl BrainRuntimePermissions {
+    /// No packet-shape actuator at all (TODO-1059): the connection's wire
+    /// image was frozen at connect, so the Brain may only steer the separate
+    /// repair-ratio and Reality/MASQUE-armed hints, never this table.
+    pub const fn deny_all() -> Self {
+        Self {
+            ack_threshold: false,
+            external_pacing: false,
+            timing: false,
+            padding: false,
+            mimic_bias: false,
+            granularity: false,
+            cc_profile: false,
+        }
+    }
+}
+
 impl Default for BrainRuntimePermissions {
     fn default() -> Self {
         Self {

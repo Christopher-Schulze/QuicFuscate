@@ -100,8 +100,10 @@ fn brain_runtime_permissions_lock_operator_overrides() {
     let _padding = EnvGuard::set("QUICFUSCATE_STEALTH_PADDING_STRATEGY", "browser");
     let _bias = EnvGuard::set("QUICFUSCATE_STEALTH_MIMIC_BIAS", "safari");
 
+    // Non-dynamic modes keep the lock table; `dynamic` denies every shape
+    // actuator regardless of env overrides (TODO-1059).
     let manager = StealthManager::new(
-        StealthConfig::dynamic(),
+        StealthConfig::stealth(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
@@ -666,77 +668,127 @@ fn active_probe_detector_benign_packet_ignored() {
 }
 
 // =============================================================================
-// TODO-416: Gradual Stealth Escalation Tests
+// TODO-1059: dynamic keeps one wire image for the whole connection
 // =============================================================================
 
+/// The default `dynamic` image is the Stealth image: persona-trace padding,
+/// timing and mimicry are already on from the first 1-RTT packet — the
+/// connection never starts thin and thickens later. The payload AEAD stays
+/// AES-128-GCM; the AEGIS pin belongs to the `performance` mode only.
 #[test]
-fn test_escalate_to_level_0_no_overhead() {
+fn test_dynamic_default_image_is_stealth() {
+    let cfg = StealthConfig::dynamic();
+    assert_eq!(cfg.dynamic_wire_image, qf_stealth::DynamicWireImage::Stealth);
+    assert!(cfg.enable_traffic_padding, "stealth image pads from packet one");
+    assert!(cfg.enable_timing_obfuscation);
+    assert!(cfg.enable_protocol_mimicry);
+    assert_eq!(cfg.wire_shape, qf_stealth::WireShape::PersonaTrace);
+    assert!(!cfg.enable_realtime_choke, "no second choke on top of the ledger");
+    // AES-GCM pin: dynamic never inherits the performance AEGIS path.
+    assert!(!crate::engine::runtime_mode_uses_libaegis(StealthMode::Dynamic, false));
+    assert!(crate::engine::runtime_mode_uses_libaegis(StealthMode::Performance, false));
+}
+
+/// The explicit performance image stays thin: no stealth padding, no cover
+/// schedule — the in-QUIC FEC wrapper is untouched (budget-independent).
+#[test]
+fn test_dynamic_performance_image_is_thin() {
+    let cfg = StealthConfig::dynamic_with_image(qf_stealth::DynamicWireImage::Performance);
+    assert_eq!(cfg.dynamic_wire_image, qf_stealth::DynamicWireImage::Performance);
+    assert!(!cfg.enable_traffic_padding);
+    assert!(!cfg.enable_timing_obfuscation);
+    assert!(!cfg.enable_protocol_mimicry);
+    // Still AES-128-GCM — the image never touches the payload cipher.
+    assert!(!crate::engine::runtime_mode_uses_libaegis(StealthMode::Dynamic, false));
+}
+
+/// Core spec test: drive probe escalation to level 2 and flip the armed bit —
+/// every wire-shape gate, the permission table and the image stay identical.
+#[test]
+fn test_dynamic_wire_image_frozen_under_probe_escalation() {
     let mgr = StealthManager::new(
         StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
-    mgr.escalate_to_level(0);
-    assert_eq!(mgr.runtime_padding_rate(), 0);
-    assert_eq!(mgr.runtime_timing_rate(), 0);
+
+    // Baseline: stealth image gates are already open at level 0; the Brain
+    // holds no packet-shape actuator at all.
+    assert!(mgr.cover_header_emission_allowed());
+    assert!(mgr.webtransport_cover_enabled());
+    let perms = mgr.brain_runtime_permissions();
+    assert!(!perms.ack_threshold);
+    assert!(!perms.external_pacing);
+    assert!(!perms.timing);
+    assert!(!perms.padding);
+    assert!(!perms.mimic_bias);
+    assert!(!perms.granularity);
+    assert!(!perms.cc_profile);
+    assert!(!mgr.masque_preferred());
+
+    // Eight probes inside the window escalate to level 2 — the repair-ratio
+    // hint (probe level) is allowed to move.
+    for _ in 0..8 {
+        mgr.record_probe_for_test();
+    }
+    assert_eq!(mgr.escalation_level(), 2);
+    assert_eq!(
+        mgr.intelligent_level_hints().probe_level(),
+        2,
+        "repair-ratio hint must follow the probe level"
+    );
+
+    // The Reality/MASQUE armed bit may flip — this is the second allowed
+    // actuator.
+    mgr.escalate_to_level(2);
+    mgr.sync_masque_preference_with_hint_for_test(1);
+    assert!(mgr.masque_preferred(), "reality/masque armed may flip under pressure");
+
+    // Frozen image: every wire-shape decision is identical to pre-escalation.
+    assert!(mgr.cover_header_emission_allowed(), "cover gate must not re-key on level");
+    assert!(mgr.webtransport_cover_enabled(), "WT gate must not re-key on level");
+    let perms = mgr.brain_runtime_permissions();
+    assert!(!perms.timing && !perms.padding && !perms.cc_profile);
+    // AEAD stays AES-GCM regardless of escalation.
+    assert!(!crate::engine::runtime_mode_uses_libaegis(StealthMode::Dynamic, false));
 }
 
+/// The thin image never opens the stealth gates — escalation cannot turn a
+/// performance-image connection into a stealth-looking one.
 #[test]
-fn test_escalate_to_level_1_partial_padding() {
+fn test_dynamic_performance_image_keeps_gates_closed_under_escalation() {
     let mgr = StealthManager::new(
-        StealthConfig::dynamic(),
+        StealthConfig::dynamic_with_image(qf_stealth::DynamicWireImage::Performance),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
-    mgr.escalate_to_level(1);
-    // Level 1: padding at 50% (default), no timing, no rotation
-    assert!(mgr.runtime_padding_rate() > 0, "padding should be active at level 1");
-    assert!(mgr.runtime_padding_rate() <= 100, "padding rate should be <= 100");
-    assert_eq!(mgr.runtime_timing_rate(), 0, "timing should be off at level 1");
+    assert!(!mgr.cover_header_emission_allowed());
+    assert!(!mgr.webtransport_cover_enabled());
+
+    for _ in 0..8 {
+        mgr.record_probe_for_test();
+    }
+    assert_eq!(mgr.escalation_level(), 2);
+    mgr.escalate_to_level(2);
+
+    assert!(!mgr.cover_header_emission_allowed(), "image gates never re-open mid-connection");
+    assert!(!mgr.webtransport_cover_enabled());
+    // Repair hint still moved — allowed inside the byte cap.
+    assert_eq!(mgr.intelligent_level_hints().probe_level(), 2);
 }
 
+/// De-escalation returns the probe level to 0 — and nothing else changed.
 #[test]
-fn test_escalate_to_level_2_full_overhead() {
+fn test_de_escalation_only_resets_repair_hint() {
     let mgr = StealthManager::new(
         StealthConfig::dynamic(),
         Arc::new(OptimizationManager::new()),
         Arc::new(CryptoManager::new()),
     );
     mgr.escalate_to_level(2);
-    assert_eq!(mgr.runtime_padding_rate(), 100);
-    assert_eq!(mgr.runtime_timing_rate(), 100);
-}
-
-#[test]
-fn test_de_escalate_from_level_2_to_0() {
-    let mgr = StealthManager::new(
-        StealthConfig::dynamic(),
-        Arc::new(OptimizationManager::new()),
-        Arc::new(CryptoManager::new()),
-    );
-    mgr.escalate_to_level(2);
-    assert_eq!(mgr.runtime_padding_rate(), 100);
     mgr.de_escalate_to_level(0);
-    assert_eq!(mgr.runtime_padding_rate(), 0);
-    assert_eq!(mgr.runtime_timing_rate(), 0);
-}
-
-#[test]
-fn test_gradual_escalation_ladder() {
-    let mgr = StealthManager::new(
-        StealthConfig::dynamic(),
-        Arc::new(OptimizationManager::new()),
-        Arc::new(CryptoManager::new()),
-    );
-    // Level 0 -> Level 1 -> Level 2: each step increases overhead
-    mgr.escalate_to_level(0);
-    let l0_padding = mgr.runtime_padding_rate();
-    mgr.escalate_to_level(1);
-    let l1_padding = mgr.runtime_padding_rate();
-    mgr.escalate_to_level(2);
-    let l2_padding = mgr.runtime_padding_rate();
-    assert!(l0_padding < l1_padding, "level 1 should have more padding than level 0");
-    assert!(l1_padding < l2_padding, "level 2 should have more padding than level 1");
+    assert!(mgr.cover_header_emission_allowed());
+    assert!(mgr.webtransport_cover_enabled());
 }
 
 /// Single probe detection must NOT trigger escalation (stays at Level 0).

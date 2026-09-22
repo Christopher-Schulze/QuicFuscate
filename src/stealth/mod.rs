@@ -56,7 +56,7 @@ Rules-File Guard (Stealth Module)
 // clap dependency removed - using manual enum implementation
 use log::{debug, info, warn};
 // use of sha2 replaced with centralized SIMD dispatch
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::crypto::CryptoManager; // Assumed for integration

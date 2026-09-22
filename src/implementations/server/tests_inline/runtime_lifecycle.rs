@@ -172,6 +172,8 @@ fn server_runtime_rejects_ipv6_pool_outside_effective_tun_network() {
 #[test]
 fn test_server_runtime_rejects_invalid_engine_projection() {
     let mut engine_config = EngineConfig::default();
+    // Shape keys are inert under `dynamic`; use an explicit mode to reach validation.
+    engine_config.stealth.mode = qf_engine_types::StealthMode::Stealth;
     engine_config.stealth.padding_strategy = "invalid".to_string();
     let error = match ServerRuntime::new(engine_config, ServerConfig::default()) {
         Ok(_) => panic!("invalid stealth must fail closed"),

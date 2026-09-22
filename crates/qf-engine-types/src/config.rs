@@ -264,6 +264,12 @@ impl From<&EngineConfig> for QKeyConfig {
 pub struct StealthSection {
     /// Stealth mode
     pub mode: StealthMode,
+    /// The wire image `dynamic` freezes at connect (TODO-1059): `stealth`
+    /// (default) keeps persona-trace padding, in-QUIC FEC and cover headers;
+    /// `performance` selects the thin image. Shape keys below are inert under
+    /// `mode = "dynamic"` — the image preset owns the whole wire shape.
+    #[serde(default)]
+    pub dynamic_wire_image: qf_stealth::DynamicWireImage,
     /// Enable uTLS/ClientHello persona spoofing. Effective only when mode is not Off.
     pub use_utls: bool,
     /// Removed wire behavior (TODO-1048): an SNI that differs from the hop's
@@ -336,6 +342,7 @@ impl Default for StealthSection {
     fn default() -> Self {
         Self {
             mode: StealthMode::Dynamic,
+            dynamic_wire_image: qf_stealth::DynamicWireImage::Stealth,
             use_utls: true,
             enable_domain_fronting: false,
             enable_http3_masquerading: true,
@@ -403,19 +410,33 @@ impl StealthSection {
                     .into(),
             ));
         }
-        let mut runtime = qf_stealth::StealthConfig::from_mode(runtime_mode);
-        runtime.enable_http3_masquerading = self.enable_http3_masquerading;
-        runtime.use_tls_cover = self.use_tls_cover;
-        runtime.use_qpack_headers = self.use_qpack_headers;
-        runtime.enable_traffic_padding = self.enable_traffic_padding;
-        runtime.enable_timing_obfuscation = self.enable_timing_obfuscation;
-        runtime.enable_protocol_mimicry = self.enable_protocol_mimicry;
+        let dynamic = runtime_mode == qf_stealth::StealthMode::Dynamic;
+        let mut runtime = if dynamic {
+            // TODO-1059: the image preset owns the whole wire shape for
+            // `dynamic` — padding set, timing, cover schedule and framing are
+            // frozen at connect, so the per-key shape overrides below stay
+            // inert on this mode (non-Option keys cannot distinguish
+            // "operator set false" from the section default).
+            qf_stealth::StealthConfig::dynamic_with_image(self.dynamic_wire_image)
+        } else {
+            qf_stealth::StealthConfig::from_mode(runtime_mode)
+        };
+        if !dynamic {
+            runtime.enable_http3_masquerading = self.enable_http3_masquerading;
+            runtime.use_tls_cover = self.use_tls_cover;
+            runtime.use_qpack_headers = self.use_qpack_headers;
+            runtime.enable_traffic_padding = self.enable_traffic_padding;
+            runtime.enable_timing_obfuscation = self.enable_timing_obfuscation;
+            runtime.enable_protocol_mimicry = self.enable_protocol_mimicry;
+        }
         runtime.enable_network_fingerprint_normalization =
             self.enable_network_fingerprint_normalization;
         runtime.suppress_icmp_unreachable = self.suppress_icmp_unreachable;
         runtime.enable_doh = self.enable_doh;
         runtime.doh_provider = self.doh_provider.clone();
-        runtime.max_padding_size = self.max_padding_size;
+        if !dynamic {
+            runtime.max_padding_size = self.max_padding_size;
+        }
         // `fronting_domains` survives as a deprecated alias: its entries name
         // cover hosts whose certificate the hop presents or relays.
         runtime.reality_cover_targets = self
@@ -443,41 +464,46 @@ impl StealthSection {
                     self.initial_browser, self.initial_os
                 ))
             })?;
-        runtime.wire_shape = Self::parse_wire_shape(&self.padding_strategy).ok_or_else(|| {
-            ConfigError::Validation(format!(
-                "stealth.padding_strategy has unsupported value '{}'",
-                self.padding_strategy
-            ))
-        })?;
+        if !dynamic {
+            runtime.wire_shape =
+                Self::parse_wire_shape(&self.padding_strategy).ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "stealth.padding_strategy has unsupported value '{}'",
+                        self.padding_strategy
+                    ))
+                })?;
+            runtime.normalize_target_size = self.normalize_target_size;
+        }
         if let Some(v) = self.wire_cap_bytes_per_sec {
             runtime.wire_cap_bytes_per_sec = v;
         }
         if let Some(v) = self.wire_cap_bytes_per_burst {
             runtime.wire_cap_bytes_per_burst = v;
         }
-        runtime.normalize_target_size = self.normalize_target_size;
-        if runtime.wire_shape == qf_stealth::WireShape::FixedCell {
-            if self.normalize_target_size == 0 {
-                return Err(ConfigError::Validation(
-                    "stealth.padding_strategy=fixed-cell requires stealth.normalize_target_size"
-                        .into(),
-                ));
-            }
-            if !(MIN_NORMALIZE_TARGET_SIZE..=MAX_NORMALIZE_TARGET_SIZE)
-                .contains(&self.normalize_target_size)
-            {
+        if !dynamic {
+            if runtime.wire_shape == qf_stealth::WireShape::FixedCell {
+                if self.normalize_target_size == 0 {
+                    return Err(ConfigError::Validation(
+                        "stealth.padding_strategy=fixed-cell requires stealth.normalize_target_size"
+                            .into(),
+                    ));
+                }
+                if !(MIN_NORMALIZE_TARGET_SIZE..=MAX_NORMALIZE_TARGET_SIZE)
+                    .contains(&self.normalize_target_size)
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "stealth.normalize_target_size must be in {MIN_NORMALIZE_TARGET_SIZE}..={MAX_NORMALIZE_TARGET_SIZE}, got {}",
+                        self.normalize_target_size
+                    )));
+                }
+            } else if self.normalize_target_size != 0 {
+                // A target with any other shape is a contradiction: it would never be applied, and
+                // silently ignoring it is how a configuration comes to claim stealth it does not have.
                 return Err(ConfigError::Validation(format!(
-                    "stealth.normalize_target_size must be in {MIN_NORMALIZE_TARGET_SIZE}..={MAX_NORMALIZE_TARGET_SIZE}, got {}",
-                    self.normalize_target_size
+                    "stealth.normalize_target_size is only valid with padding_strategy=fixed-cell, but the shape is '{}'",
+                    self.padding_strategy
                 )));
             }
-        } else if self.normalize_target_size != 0 {
-            // A target with any other shape is a contradiction: it would never be applied, and
-            // silently ignoring it is how a configuration comes to claim stealth it does not have.
-            return Err(ConfigError::Validation(format!(
-                "stealth.normalize_target_size is only valid with padding_strategy=fixed-cell, but the shape is '{}'",
-                self.padding_strategy
-            )));
         }
         if runtime.enable_traffic_padding && runtime.max_padding_size == 0 {
             return Err(ConfigError::Validation(
@@ -720,7 +746,7 @@ suppress_icmp_unreachable = true
     #[test]
     fn packet_normalize_requires_and_propagates_a_bounded_target_size() {
         let config = EngineConfig::from_toml(
-            "[stealth]\npadding_strategy = \"normalize\"\nnormalize_target_size = 1350\n",
+            "[stealth]\nmode = \"stealth\"\npadding_strategy = \"normalize\"\nnormalize_target_size = 1350\n",
         )
         .expect("parse");
         config.validate().expect("a normalize configuration with a target must validate");
@@ -743,12 +769,14 @@ suppress_icmp_unreachable = true
     /// Missing, undersized, and oversized targets each fail closed with a named key.
     #[test]
     fn packet_normalize_rejects_missing_and_out_of_range_targets() {
-        let missing = EngineConfig::from_toml("[stealth]\npadding_strategy = \"normalize\"\n")
-            .expect("parse")
-            .stealth
-            .to_runtime_config(&FingerprintRotationConfig::default())
-            .err()
-            .expect("normalize without a target must fail");
+        let missing = EngineConfig::from_toml(
+            "[stealth]\nmode = \"stealth\"\npadding_strategy = \"normalize\"\n",
+        )
+        .expect("parse")
+        .stealth
+        .to_runtime_config(&FingerprintRotationConfig::default())
+        .err()
+        .expect("normalize without a target must fail");
         assert!(
             missing.to_string().contains("stealth.normalize_target_size"),
             "the error must name the key an operator has to set: {missing}"
@@ -756,7 +784,7 @@ suppress_icmp_unreachable = true
 
         for target in [1usize, MIN_NORMALIZE_TARGET_SIZE - 1, MAX_NORMALIZE_TARGET_SIZE + 1] {
             let error = EngineConfig::from_toml(&format!(
-                "[stealth]\npadding_strategy = \"normalize\"\nnormalize_target_size = {target}\n"
+                "[stealth]\nmode = \"stealth\"\npadding_strategy = \"normalize\"\nnormalize_target_size = {target}\n"
             ))
             .expect("parse")
             .stealth
@@ -772,7 +800,7 @@ suppress_icmp_unreachable = true
         // The exact bounds are accepted.
         for target in [MIN_NORMALIZE_TARGET_SIZE, MAX_NORMALIZE_TARGET_SIZE] {
             EngineConfig::from_toml(&format!(
-                "[stealth]\npadding_strategy = \"normalize\"\nnormalize_target_size = {target}\n"
+                "[stealth]\nmode = \"stealth\"\npadding_strategy = \"normalize\"\nnormalize_target_size = {target}\n"
             ))
             .expect("parse")
             .stealth
@@ -786,7 +814,7 @@ suppress_icmp_unreachable = true
     #[test]
     fn a_normalize_target_with_another_strategy_is_rejected() {
         let error = EngineConfig::from_toml(
-            "[stealth]\npadding_strategy = \"adaptive\"\nnormalize_target_size = 1350\n",
+            "[stealth]\nmode = \"stealth\"\npadding_strategy = \"adaptive\"\nnormalize_target_size = 1350\n",
         )
         .expect("parse")
         .stealth
@@ -799,7 +827,7 @@ suppress_icmp_unreachable = true
         );
 
         // Other strategies without a target remain unaffected.
-        EngineConfig::from_toml("[stealth]\npadding_strategy = \"adaptive\"\n")
+        EngineConfig::from_toml("[stealth]\nmode = \"stealth\"\npadding_strategy = \"adaptive\"\n")
             .expect("parse")
             .stealth
             .to_runtime_config(&FingerprintRotationConfig::default())
@@ -1264,6 +1292,9 @@ mode = "roaming"
         }
 
         let mut config = EngineConfig::default();
+        // `padding_strategy` is inert under `dynamic` (TODO-1059) — validate
+        // the legacy spelling on an explicit stealth mode.
+        config.stealth.mode = StealthMode::Stealth;
         config.stealth.padding_strategy = "invalid".to_string();
         assert!(config.validate().is_err());
         config.stealth.padding_strategy = "adaptive".to_string();

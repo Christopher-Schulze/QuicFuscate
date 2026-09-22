@@ -31,7 +31,7 @@ pub use profiles::{parse_profile_slot, BrowserProfile, OsProfile};
 #[doc(hidden)]
 pub use rotation::FingerprintRotationConfig;
 #[doc(hidden)]
-pub use stealth_config::{FecMode, StealthConfig};
+pub use stealth_config::{DynamicWireImage, FecMode, StealthConfig};
 #[doc(hidden)]
 pub use tls_client_hello::TlsClientHelloProfileCatalog;
 #[doc(hidden)]

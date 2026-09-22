@@ -513,7 +513,7 @@
 - Detail: `docs/todo/todo-1058-doh-matches-persona.md`
 
 ### TODO-1059 - dynamic keeps one wire image for the whole connection
-- OPEN. Default image is the stealth image, AES-GCM, chosen at connect. Escalation may change repair ratio and Reality only. It must not change lengths, framing, or AEAD.
+- DONE. `DynamicWireImage { Stealth, Performance }` freezes at connect (`stealth` default; `dynamic_wire_image = "performance"` for the thin image). All shape keys are inert under `mode = "dynamic"` in both TOML layers and the QKey override path. `brain_runtime_permissions()` denies every packet-shape actuator; probe escalation only moves the repair-ratio hint (`probe_level` -> `fec_hint_ppm`) and the Reality/MASQUE armed bit. The traffic-analysis policy and cover/WT gates key on the frozen image, never the level. Both images stay AES-128-GCM.
 - Detail: `docs/todo/todo-1059-dynamic-holds-one-wire-image.md`
 
 ### TODO-1060 - Brain sensors may switch repairs and Reality, not the packet shape

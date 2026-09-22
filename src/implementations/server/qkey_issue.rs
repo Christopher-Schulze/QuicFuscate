@@ -504,12 +504,16 @@ pub fn apply_runtime_stealth_overrides(
     } else {
         Vec::new()
     };
-    sc.enable_http3_masquerading = !disable_http3;
-    if disable_http3 {
-        sc.use_qpack_headers = false;
-        sc.enable_protocol_mimicry = false;
-    } else {
-        sc.normalize_protocol_mimicry_bundle();
+    // TODO-1059: `dynamic` froze its wire image at connect — the image preset
+    // owns masquerading/QPACK/mimicry, so deployment overrides stay inert.
+    if !matches!(sc.mode, StealthMode::Dynamic) {
+        sc.enable_http3_masquerading = !disable_http3;
+        if disable_http3 {
+            sc.use_qpack_headers = false;
+            sc.enable_protocol_mimicry = false;
+        } else {
+            sc.normalize_protocol_mimicry_bundle();
+        }
     }
 }
 

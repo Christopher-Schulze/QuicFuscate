@@ -110,6 +110,8 @@ fn test_client_runtime_new() {
 #[test]
 fn test_client_runtime_rejects_invalid_engine_projection() {
     let mut config = EngineConfig::default();
+    // Shape keys are inert under `dynamic`; use an explicit mode to reach validation.
+    config.stealth.mode = qf_engine_types::StealthMode::Stealth;
     config.stealth.padding_strategy = "invalid".to_string();
     let error = match ClientRuntime::new(config) {
         Ok(_) => panic!("invalid stealth must fail closed"),

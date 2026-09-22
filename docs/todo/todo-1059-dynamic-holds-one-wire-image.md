@@ -4,7 +4,7 @@ title: dynamic keeps one wire image for the whole connection
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1052, TODO-1046]
 ---
@@ -46,12 +46,42 @@ Escalation must not change padding length set, cover schedule shape, FEC framing
 2. It keeps a repair-ratio hint and a reality-armed bit.
 3. A test drives high loss and a probe and asserts the length-set id and framing enum are unchanged, while `reality_armed` may flip.
 
+## Landed
+
+- `qf_stealth::DynamicWireImage { Stealth, Performance }` on
+  `StealthConfig::dynamic_wire_image`; `StealthConfig::dynamic()` now builds
+  the Stealth image, `dynamic_with_image(Performance)` the thin one.
+  `dynamic_wire_image = "stealth"|"performance"` parses in both TOML layers.
+- The engine TOML projection (`StealthSection::to_runtime_config`) and
+  `qf-stealth::from_toml` treat every per-key shape override as inert under
+  `mode = "dynamic"` — the image preset owns padding set, timing, mimicry,
+  wire shape, cover schedule, masquerading, QPACK and TLS cover.
+  `apply_runtime_stealth_overrides` (QKey path) skips the same shape keys.
+- `brain_runtime_permissions()` returns `deny_all()` for `dynamic`: the
+  Brain→transport `StealthRuntimeDelta` can no longer touch padding, timing,
+  pacing, mimic bias, granularity, ACK threshold or the CC profile.
+- `escalate_to_level` no longer writes padding/timing rates or the cover
+  cadence; the probe level still reaches the Brain through
+  `EscalationState` → `IntelligentLevelHints.probe_level` and only moves the
+  repair-ratio hint (`fec_hint_ppm`) plus the Reality/MASQUE armed bit
+  (`prefer_masque`, `escalated` window).
+- Cover/WebTransport gates key on the frozen image, not the level:
+  `cover_header_emission_allowed` and `webtransport_cover_enabled` read
+  `dynamic_wire_image` instead of `intelligent_runtime_level`.
+- The update tick no longer calls
+  `apply_intelligent_traffic_analysis_level` — the traffic-analysis policy
+  (chaff rate/size, constant rate, defense) is part of the frozen image.
+- `runtime_padding_rate`/`runtime_timing_rate` fields removed; they had no
+  production consumers left.
+- AEAD: unchanged — `engine_mode_uses_libaegis` pins AEGIS to `off` and
+  `performance` modes; both dynamic images stay AES-128-GCM.
+
 ## Sub-Tasks
 
-- [ ] Freeze image at connect.
-- [ ] Strip distribution fields from escalation.
-- [ ] Test the allowed deltas and the forbidden ones.
-- [ ] Toml comment: default image is the stealth image, cipher remains AES-GCM.
+- [x] Freeze image at connect.
+- [x] Strip distribution fields from escalation.
+- [x] Test the allowed deltas and the forbidden ones.
+- [x] Toml comment: default image is the stealth image, cipher remains AES-GCM.
 
 ## Acceptance
 

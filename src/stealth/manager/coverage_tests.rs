@@ -55,11 +55,11 @@ mod stealth_coverage_tests {
         assert_eq!(m.mode(), StealthMode::Dynamic);
         assert!(m.is_intelligent_runtime());
         assert!(m.probe_detector.is_some());
-        // Intelligent inherits Performance base -> flow_shaper present (dynamic_enabled=true)
+        // Stealth image: flow shaper and cover scheduler are wired from
+        // connect — the frozen image already emits at level 0 (TODO-1059).
         assert!(m.flow_shaper.is_some());
-        // Intelligent keeps the scheduler available but only emits from level 1 upward.
         assert!(m.cover_traffic.is_some());
-        assert!(!m.cover_header_emission_allowed());
+        assert!(m.cover_header_emission_allowed());
         // Reality proxy enabled in Intelligent mode
         assert!(m.reality_proxy.is_some());
     }
@@ -743,31 +743,45 @@ mod stealth_coverage_tests {
     // =========================================================================
 
     #[test]
-    fn webtransport_cover_policy_is_escalated_only() {
+    fn webtransport_cover_policy_is_image_bound() {
+        // TODO-1059: the frozen image decides — never the escalation level.
         let performance = make_manager(StealthConfig::performance());
         assert!(performance.webtransport_cover_plan().is_none());
 
-        let intelligent = make_manager(StealthConfig::dynamic());
-        assert!(intelligent.webtransport_cover_plan().is_none());
+        let thin_dynamic = make_manager(StealthConfig::dynamic_with_image(
+            qf_stealth::DynamicWireImage::Performance,
+        ));
+        assert!(thin_dynamic.webtransport_cover_plan().is_none());
 
-        let anti_dpi = make_manager(StealthConfig::stealth_max());
-        let (authority, path) = anti_dpi.webtransport_cover_plan().expect("anti-dpi cover plan");
+        // The stealth image offers the one-shot session plan from level 0.
+        let stealth_dynamic = make_manager(StealthConfig::dynamic());
+        let (authority, path) =
+            stealth_dynamic.webtransport_cover_plan().expect("stealth image cover plan");
         assert!(!authority.is_empty());
         assert!(path.ends_with("/wt/session"));
+
+        let anti_dpi = make_manager(StealthConfig::stealth_max());
+        assert!(anti_dpi.webtransport_cover_plan().is_some());
     }
 
     #[test]
-    fn h3_cover_header_emission_policy_matches_modes() {
+    fn h3_cover_header_emission_policy_matches_frozen_image() {
         let performance = make_manager(StealthConfig::performance());
         assert!(!performance.cover_header_emission_allowed());
         assert!(performance.cover_request_due().is_none());
 
-        let intelligent = make_manager(StealthConfig::dynamic());
-        assert!(!intelligent.cover_header_emission_allowed());
-        assert!(intelligent.cover_request_due().is_none());
+        // Stealth image: cover emission is allowed from level 0 — the
+        // persona trace in the ledger owns the timing, not the level.
+        let stealth_dynamic = make_manager(StealthConfig::dynamic());
+        assert!(stealth_dynamic.cover_header_emission_allowed());
 
-        intelligent.set_brain_level_for_test(1);
-        assert!(intelligent.cover_header_emission_allowed());
+        // Thin image: the gate stays shut even after probe escalation.
+        let thin_dynamic = make_manager(StealthConfig::dynamic_with_image(
+            qf_stealth::DynamicWireImage::Performance,
+        ));
+        assert!(!thin_dynamic.cover_header_emission_allowed());
+        thin_dynamic.set_brain_level_for_test(2);
+        assert!(!thin_dynamic.cover_header_emission_allowed());
     }
 
     // =========================================================================
@@ -802,8 +816,21 @@ mod stealth_coverage_tests {
             std::env::remove_var("QUICFUSCATE_PADDING_STRATEGY");
         }
 
-        let m = make_manager(StealthConfig::dynamic());
-        let perms = m.brain_runtime_permissions();
+        // `dynamic` denies every packet-shape actuator — the frozen image
+        // owns the wire (TODO-1059); only repair/reality hints may move.
+        let dynamic = make_manager(StealthConfig::dynamic());
+        let perms = dynamic.brain_runtime_permissions();
+        assert!(!perms.ack_threshold);
+        assert!(!perms.external_pacing);
+        assert!(!perms.timing);
+        assert!(!perms.padding);
+        assert!(!perms.mimic_bias);
+        assert!(!perms.granularity);
+        assert!(!perms.cc_profile);
+
+        // Explicit stealth keeps the Brain's shape actuators unlocked.
+        let stealth = make_manager(StealthConfig::stealth());
+        let perms = stealth.brain_runtime_permissions();
         assert!(perms.ack_threshold);
         assert!(perms.external_pacing);
         assert!(perms.timing);
