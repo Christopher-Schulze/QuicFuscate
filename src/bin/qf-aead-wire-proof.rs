@@ -922,17 +922,107 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
             }
         }
     }
+    // Exhaustive sweep before declaring the packet unopenable: every pn_len
+    // encoding, small pn range around the boundary, every derivable private
+    // epoch in both directions, and standard key-update hops. A packet that
+    // survives this sweep cannot be authenticated with any material this
+    // connection legitimately holds — that is a dataplane anomaly, not a
+    // blind spot of the analyzer.
+    let family = state.private.family.unwrap_or(PrivateAeadFamily::Aegis128L);
+    let mut candidates: Vec<(String, Box<dyn AeadOpen + Send + Sync>)> = Vec::new();
+    if let Some(secret) = state.secrets.get(std_secret_name) {
+        let mut next = secret.to_vec();
+        if let Some(k) = DirectionKeys::from_secret(secret, version) {
+            candidates.push(("std-1rtt".to_string(), Box::new(k.open)));
+        }
+        for hop in 1..=8u8 {
+            let Ok(n) = quic_kdf::derive_next_secret_for_version(&next, version) else { break };
+            next = n;
+            if let Some(k) = DirectionKeys::from_secret(&next, version) {
+                candidates.push((format!("std-update-{hop}"), Box::new(k.open)));
+            }
+        }
+    }
+    if let (Some(root), Some(ctx)) = (&state.private.schedule_root, &state.private.context_hash) {
+        for dir_label in [b"client-write".as_slice(), b"server-write".as_slice()] {
+            for epoch in 1u32..=64 {
+                let mut info = Vec::with_capacity(128);
+                info.extend_from_slice(PRIVATE_EXPORTER_LABEL);
+                info.push(family.protocol_id());
+                info.extend_from_slice(dir_label);
+                info.extend_from_slice(&epoch.to_be_bytes());
+                info.extend_from_slice(ctx);
+                let prk = qf_crypto::hkdf::hkdf_extract(PRIVATE_EXPORTER_SALT, root);
+                let Ok(material) = qf_crypto::hkdf::hkdf_expand(
+                    &prk,
+                    &info,
+                    PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN,
+                ) else {
+                    continue;
+                };
+                let Ok((_, open)) = qf_crypto::select_private_packet_data_aead(
+                    family,
+                    &material[..PrivateAeadFamily::KEY_LEN],
+                    &material[PrivateAeadFamily::KEY_LEN..],
+                ) else {
+                    continue;
+                };
+                candidates.push((
+                    format!("private-{}-{}", String::from_utf8_lossy(dir_label), epoch),
+                    Box::new(open),
+                ));
+            }
+        }
+    }
+    let mut found: Option<String> = None;
+    'sweep: for cand_pn_len in 1..=4usize {
+        let mut pnb = [0u8; 4];
+        let mask =
+            match std_keys.hp.new_mask(packet.get(pn_offset + 4..pn_offset + 20).unwrap_or(&[])) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+        for i in 0..cand_pn_len {
+            let Some(&b) = packet.get(pn_offset + i) else { continue 'sweep };
+            pnb[i] = b ^ mask[1 + i];
+        }
+        let trunc = truncated_to_u64(&pnb, cand_pn_len);
+        let mut pns: Vec<u64> = (0u64..=64).collect();
+        for extra in [trunc, *expect, *expect + 256, *expect + 512] {
+            if !pns.contains(&extra) {
+                pns.push(extra);
+            }
+        }
+        let aad =
+            aad_for(packet, pn_offset, cand_pn_len, b0 & !0x03 | ((cand_pn_len as u8) - 1), &pnb);
+        let body2 = &packet[pn_offset + cand_pn_len..];
+        for (name, open) in &candidates {
+            for &cand_pn in &pns {
+                let mut buf = body2.to_vec();
+                if open.open_with_u64_counter(cand_pn, &aad, &mut buf).is_ok() {
+                    found = Some(format!("{name} pn={cand_pn} pn_len={cand_pn_len}"));
+                    break 'sweep;
+                }
+            }
+        }
+    }
     report.rtt_failed += 1;
     let key_phase = (b0 & 0x04) != 0;
     let sample = packet.get(pn_offset + 4..pn_offset + 20).unwrap_or(&[]);
-    println!(
-        "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={} sample={} trunc={} hp={} ver={:08x})",
-        packet.len(),
-        hex::encode(sample),
-        truncated_to_u64(&pn_bytes, pn_len),
-        hex::encode(std_keys.hp_key),
-        version,
-    );
+    match found {
+        Some(what) => println!(
+            "  1rtt {dir_name} pn={pn} EXHAUSTIVE-SWEEP HIT: {what} (b0={b0:02x} pkt_len={})",
+            packet.len()
+        ),
+        None => println!(
+            "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={} sample={} trunc={} hp={} ver={:08x})",
+            packet.len(),
+            hex::encode(sample),
+            truncated_to_u64(&pn_bytes, pn_len),
+            hex::encode(std_keys.hp_key),
+            version,
+        ),
+    }
 }
 
 fn dir(c2s: bool) -> &'static str {
