@@ -824,36 +824,51 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
     }
     // Key-phase updates rotate the private epoch: the dumped material is the
     // install epoch, so derive later epochs from the exporter-root schedule.
+    // Both direction labels are tried — a direction mixup in the dataplane
+    // must surface here rather than masquerade as an unopenable packet.
     if opened_epoch.is_none() {
         if let (Some(root), Some(ctx)) = (&state.private.schedule_root, &state.private.context_hash)
         {
-            let dir_label: &[u8] = if c2s { b"client-write" } else { b"server-write" };
-            for epoch in 2u32..=8 {
-                let mut info = Vec::with_capacity(128);
-                info.extend_from_slice(PRIVATE_EXPORTER_LABEL);
-                info.push(family.protocol_id());
-                info.extend_from_slice(dir_label);
-                info.extend_from_slice(&epoch.to_be_bytes());
-                info.extend_from_slice(ctx);
-                let prk = qf_crypto::hkdf::hkdf_extract(PRIVATE_EXPORTER_SALT, root);
-                let Ok(material) = qf_crypto::hkdf::hkdf_expand(
-                    &prk,
-                    &info,
-                    PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN,
-                ) else {
-                    continue;
-                };
-                let Ok((_, open)) = qf_crypto::select_private_packet_data_aead(
-                    family,
-                    &material[..PrivateAeadFamily::KEY_LEN],
-                    &material[PrivateAeadFamily::KEY_LEN..],
-                ) else {
-                    continue;
-                };
-                let mut buf = body.to_vec();
-                if open.open_with_u64_counter(pn, &aad, &mut buf).is_ok() {
-                    opened_epoch = Some(epoch);
-                    break;
+            let labels: [&[u8]; 2] = if c2s {
+                [b"client-write", b"server-write"]
+            } else {
+                [b"server-write", b"client-write"]
+            };
+            'outer: for dir_label in labels {
+                for epoch in 2u32..=16 {
+                    let mut info = Vec::with_capacity(128);
+                    info.extend_from_slice(PRIVATE_EXPORTER_LABEL);
+                    info.push(family.protocol_id());
+                    info.extend_from_slice(dir_label);
+                    info.extend_from_slice(&epoch.to_be_bytes());
+                    info.extend_from_slice(ctx);
+                    let prk = qf_crypto::hkdf::hkdf_extract(PRIVATE_EXPORTER_SALT, root);
+                    let Ok(material) = qf_crypto::hkdf::hkdf_expand(
+                        &prk,
+                        &info,
+                        PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN,
+                    ) else {
+                        continue;
+                    };
+                    let Ok((_, open)) = qf_crypto::select_private_packet_data_aead(
+                        family,
+                        &material[..PrivateAeadFamily::KEY_LEN],
+                        &material[PrivateAeadFamily::KEY_LEN..],
+                    ) else {
+                        continue;
+                    };
+                    for cand in [pn, pn.wrapping_sub(1), boundary, 0] {
+                        let mut buf = body.to_vec();
+                        if open.open_with_u64_counter(cand, &aad, &mut buf).is_ok() {
+                            opened_epoch = Some(epoch);
+                            println!(
+                                "  1rtt {dir_name} pn={pn} opened private-{} epoch {epoch} label={} pn-cand={cand}",
+                                family.as_str(),
+                                String::from_utf8_lossy(dir_label)
+                            );
+                            break 'outer;
+                        }
+                    }
                 }
             }
         }
