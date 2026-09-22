@@ -303,6 +303,15 @@ impl Connection {
             traffic_analysis: None,
             traffic_analysis_base_policy,
             traffic_analysis_escalation_ceiling: None,
+            admitted_batch_defer: false,
+            admitted_batch_reserved: 0,
+            admitted_batch_dgram_skip: 0,
+            admitted_batch_frames: Vec::new(),
+            admitted_batch_held_streams: Vec::new(),
+            #[cfg(test)]
+            admitted_seal_batch_calls: 0,
+            #[cfg(test)]
+            admitted_seal_batch_packets: 0,
         };
         conn.rebuild_traffic_analysis_scheduler();
         // Inherit strike register from config (server-side 0-RTT anti-replay).
@@ -490,6 +499,16 @@ impl Connection {
         } else {
             self.stream_retransmit_queue.retain(|id| *id != transmission_id);
         }
+    }
+
+    /// Remove a staged transmission from the retransmit queue without marking it sent.
+    ///
+    /// The admitted-run sealer frames several packets before `seal_batch`. A newly
+    /// staged transmission would otherwise sit at the queue head and be written
+    /// again into the next packet. `commit_stream_transmission` still records the
+    /// packet number after the seal. On seal failure the id is pushed back.
+    pub(super) fn unqueue_stream_transmission(&mut self, transmission_id: u64) {
+        self.remove_stream_retransmit_queue_entry(transmission_id);
     }
 
     pub(super) fn commit_stream_transmission(&mut self, transmission_id: u64, packet_number: u64) {

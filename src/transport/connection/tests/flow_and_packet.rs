@@ -933,3 +933,35 @@ fn masque_recv_take_drops_malformed_and_oversized_entries() {
     assert!(h3.try_recv_masque_datagram(&mut conn).is_none());
     assert_eq!(conn.dgram_recv_queue_len(), 0);
 }
+
+#[test]
+fn admitted_uniform_run_seals_once_and_opens_on_the_peer() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.enable_datagrams(16, 16);
+    pair.server.enable_datagrams(16, 16);
+    pair.client.recovery.cwnd = 8 * 2048;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    let payload = [0x5Au8; 200];
+    for _ in 0..8 {
+        pair.client.dgram_send(&payload).expect("enqueue datagram");
+    }
+    let mut storage = vec![vec![0u8; 2048]; 8];
+    let mut refs: Vec<&mut [u8]> = storage.iter_mut().map(|buf| buf.as_mut_slice()).collect();
+    pair.client.admitted_seal_batch_calls = 0;
+    pair.client.admitted_seal_batch_packets = 0;
+    let produced = pair.client.send_admitted_batch(&mut refs, 0).expect("admitted batch");
+    assert_eq!(produced.len(), 8, "cwnd admits the whole uniform run");
+    assert_eq!(pair.client.admitted_seal_batch_calls, 1, "one seal_batch for the run");
+    assert_eq!(pair.client.admitted_seal_batch_packets, 8);
+    let wire_len = produced[0].0;
+    assert!(produced
+        .iter()
+        .all(|(len, info)| { *len == wire_len && info.to == pair.client.peer_addr }));
+    for (index, (len, _)) in produced.iter().enumerate() {
+        pair.server
+            .recv(&mut storage[index][..*len], &pair.recv_info)
+            .expect("peer opens the sealed packet");
+        assert_eq!(pair.server.dgram_recv_vec().expect("datagram"), payload);
+    }
+    assert_eq!(pair.client.dgram_send_queue_len(), 0);
+}

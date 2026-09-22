@@ -174,6 +174,38 @@ pub struct Connection {
     // Post-authentication Intelligent escalation ceiling. None is fail-closed.
     pub(super) traffic_analysis_escalation_ceiling:
         Option<crate::transport::config::TrafficAnalysisPolicy>,
+    /// When set, 1-RTT short-header sends frame and return before AEAD.
+    /// `send_admitted_batch` seals the gathered run with one `seal_batch`.
+    pub(super) admitted_batch_defer: bool,
+    /// Bytes already framed in the open batch, counted against cwnd before
+    /// `on_packet_sent` runs.
+    pub(super) admitted_batch_reserved: usize,
+    /// DATAGRAM queue index of the next unstaged payload in the open batch.
+    pub(super) admitted_batch_dgram_skip: usize,
+    pub(super) admitted_batch_frames: Vec<AdmittedShortHeader>,
+    pub(super) admitted_batch_held_streams: Vec<u64>,
+    #[cfg(test)]
+    pub(crate) admitted_seal_batch_calls: u64,
+    #[cfg(test)]
+    pub(crate) admitted_seal_batch_packets: u64,
+}
+
+/// One framed 1-RTT short header waiting for the admitted-run seal.
+pub(crate) struct AdmittedShortHeader {
+    pub(super) pn: u64,
+    pub(super) pn_off: usize,
+    pub(super) pn_len: usize,
+    pub(super) plaintext_end: usize,
+    pub(super) staged_datagram: bool,
+    pub(super) emitted_chaff: bool,
+    pub(super) wrote_ack_eliciting: bool,
+    pub(super) stream_transmission_id: Option<u64>,
+    pub(super) packet_contents: crate::transport::recovery::SentPacketContents,
+    pub(super) pmtu_probe_sent: bool,
+    pub(super) pmtu_probe_bypassed_congestion: bool,
+    pub(super) staged_bulk: bool,
+    pub(super) datagram_overhead: usize,
+    pub(super) now: std::time::Instant,
 }
 
 impl Connection {

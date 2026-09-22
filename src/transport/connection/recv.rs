@@ -1,3 +1,4 @@
+use super::state::AdmittedShortHeader;
 use super::*;
 use crate::transport::DatagramClass;
 
@@ -1157,9 +1158,9 @@ impl Connection {
     #[inline(always)]
     pub(super) fn pending_datagram_frame_reserve(&self) -> Option<usize> {
         #[cfg(not(feature = "zero_copy_dgram"))]
-        let payload_len = self.dgram_send_queue.front()?.data.len();
+        let payload_len = self.dgram_send_queue.get(self.admitted_batch_dgram_skip)?.data.len();
         #[cfg(feature = "zero_copy_dgram")]
-        let payload_len = self.dgram_send_queue.front()?.len;
+        let payload_len = self.dgram_send_queue.get(self.admitted_batch_dgram_skip)?.len;
         let payload_len_u64 = u64::try_from(payload_len).ok()?;
         1usize
             .checked_add(crate::transport::varint::varint_len(payload_len_u64))?
@@ -1184,8 +1185,8 @@ impl Connection {
             log::trace!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",
                 off, need, tag_reserve, out.len(), self.dgram_send_queue.len());
             if off + need + tag_reserve <= out.len() {
-                let Some(front) = self.dgram_send_queue.front() else {
-                    return Err(crate::error::ConnectionError::Done);
+                let Some(front) = self.dgram_send_queue.get(self.admitted_batch_dgram_skip) else {
+                    return Ok((off, None));
                 };
                 #[cfg(not(feature = "zero_copy_dgram"))]
                 let frame = Frame::Datagram { data: Cow::Borrowed(front.data.as_slice()) };
@@ -1302,11 +1303,13 @@ impl Connection {
         }
     }
 
+    /// Pad a short header out to the header-protection sample and set the
+    /// packet-number length bits that AEAD authenticates.
     #[inline(always)]
-    pub(super) fn seal_short_header_packet(
+    pub(super) fn layout_short_header_plaintext(
         &mut self,
         out: &mut [u8],
-        pn: u64,
+        _pn: u64,
         pn_off: usize,
         pn_len: usize,
         mut off: usize,
@@ -1337,17 +1340,29 @@ impl Connection {
             }
             off += frames::write_padding(padding_len, &mut out[off..])?;
         }
-
         // Set PN length bits in the first byte BEFORE sealing so the AAD
-        // matches what the peer sees after HP removal. Without this, the
-        // first byte used for AEAD sealing is 0x40 (from format_short_header,
-        // which doesn't set PN length bits), but the peer reconstructs it as
-        // 0x40 | (pn_len-1) after HP removal. For 1-byte PN this happens to
-        // match (0x40), but for 2+ byte PN the AAD differs and decryption fails.
+        // matches what the peer sees after HP removal.
         out[0] = 0x40 | (((pn_len as u8) - 1) & 0x03);
         if self.key_phase {
             out[0] |= packet::KEY_PHASE_BIT;
         }
+        Ok(off)
+    }
+
+    #[inline(always)]
+    pub(super) fn seal_short_header_packet(
+        &mut self,
+        out: &mut [u8],
+        pn: u64,
+        pn_off: usize,
+        pn_len: usize,
+        off: usize,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        let mut off = self.layout_short_header_plaintext(out, pn, pn_off, pn_len, off)?;
+        let sample_end = pn_off
+            .checked_add(packet::MAX_PKT_NUM_LEN)
+            .and_then(|offset| offset.checked_add(packet::SAMPLE_LEN))
+            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
 
         // Hot path: try lock-free 1-RTT ArcSwap first.
         let one_rtt = self.crypto_1rtt.load();
@@ -1441,6 +1456,107 @@ impl Connection {
         }
         self.advance_send_packet_number(2)?;
         Ok(off)
+    }
+
+    /// Seal prepared short headers with one `seal_batch` per sealer group, then
+    /// apply header protection per packet. Packet numbers were already advanced
+    /// when the batch was framed.
+    pub(super) fn seal_prepared_short_headers(
+        &mut self,
+        outs: &mut [&mut [u8]],
+        frames: &[AdmittedShortHeader],
+    ) -> Result<Vec<usize>, crate::error::ConnectionError> {
+        if outs.len() != frames.len() {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        #[cfg(test)]
+        let mut batch_calls = 0u64;
+        #[cfg(test)]
+        let mut batch_packets = 0u64;
+        let one_rtt = self.crypto_1rtt.load();
+        let Some(keys) = one_rtt.as_ref() else {
+            return Err(crate::error::ConnectionError::TlsError(
+                "admitted seal batch requires installed 1-RTT keys".into(),
+            ));
+        };
+        let mut totals = vec![0usize; frames.len()];
+        let mut group_start = 0usize;
+        while group_start < frames.len() {
+            let first = packet::select_private_packet_protection(
+                frames[group_start].pn,
+                keys.private_write_boundary,
+                keys.private_seal.is_some(),
+            );
+            let mut group_end = group_start + 1;
+            while group_end < frames.len()
+                && packet::select_private_packet_protection(
+                    frames[group_end].pn,
+                    keys.private_write_boundary,
+                    keys.private_seal.is_some(),
+                ) == first
+            {
+                group_end += 1;
+            }
+            let seal = packet::select_private_seal(
+                Some(&keys.seal),
+                keys.private_seal.as_ref(),
+                frames[group_start].pn,
+                keys.private_write_boundary,
+            )
+            .map_err(|error| match error {
+                crate::error::ConnectionError::Done => crate::error::ConnectionError::TlsError(
+                    "missing AEAD sealer for admitted 1-RTT batch".into(),
+                ),
+                error => error,
+            })?;
+            let mut items = Vec::with_capacity(group_end - group_start);
+            for (buf, frame) in
+                outs[group_start..group_end].iter_mut().zip(frames[group_start..group_end].iter())
+            {
+                let ad_len = frame.pn_off + frame.pn_len;
+                if frame.plaintext_end < ad_len || frame.plaintext_end > buf.len() {
+                    return Err(crate::error::ConnectionError::InvalidPacket);
+                }
+                let (ad, rest) = buf.split_at_mut(ad_len);
+                items.push(crate::crypto::aead::AeadSealItem {
+                    counter: frame.pn,
+                    ad,
+                    buf: rest,
+                    plaintext_len: frame.plaintext_end - ad_len,
+                });
+            }
+            seal.seal_batch(&mut items)?;
+            #[cfg(test)]
+            {
+                batch_calls = batch_calls.saturating_add(1);
+                batch_packets = batch_packets.saturating_add(items.len() as u64);
+            }
+            for (offset, frame) in frames[group_start..group_end].iter().enumerate() {
+                let buf = &mut *outs[group_start + offset];
+                let sample_end = frame
+                    .pn_off
+                    .checked_add(packet::MAX_PKT_NUM_LEN)
+                    .and_then(|value| value.checked_add(packet::SAMPLE_LEN))
+                    .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+                let sample_offset = sample_end - packet::SAMPLE_LEN;
+                let mask = keys.hp_seal.new_mask(&buf[sample_offset..sample_end])?;
+                buf[0] ^= mask[0] & 0x1f;
+                for byte in 0..frame.pn_len {
+                    buf[frame.pn_off + byte] ^= mask[byte + 1];
+                }
+                totals[group_start + offset] = frame.plaintext_end + 16;
+            }
+            group_start = group_end;
+        }
+        drop(one_rtt);
+        #[cfg(test)]
+        {
+            self.admitted_seal_batch_calls =
+                self.admitted_seal_batch_calls.saturating_add(batch_calls);
+            self.admitted_seal_batch_packets =
+                self.admitted_seal_batch_packets.saturating_add(batch_packets);
+        }
+        Ok(totals)
     }
 
     #[inline(always)]

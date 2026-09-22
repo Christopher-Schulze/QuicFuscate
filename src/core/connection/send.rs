@@ -563,32 +563,26 @@ impl QuicFuscateConnection {
 
         let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
 
-        // Raw (non-FEC) emit: conn.send writes straight into the caller's
-        // buffer - no pool checkout, no queue round-trip, no copy - unless a
-        // stealth/jitter deferral actually fires and the bytes must be
-        // materialized into a pooled block for the outgoing queue. Only legal
-        // when the queue is empty: path_control_pending skips the flush above,
-        // so a non-empty queue must keep the ordered push/pop emission. The
-        // burst drain also routes through the queue: produced packets must
-        // pass the reorder-aware pick so the gathered backlog emits permuted
-        // instead of in arrival order.
-        if wire_profile.is_none()
+        let batch_n = self.admitted_seal_count();
+        if batch_n > 1
+            && self.outgoing_fec_packets.is_empty()
+            && !path_control_pending
+            && !self.deferral_window_open(now)
+        {
+            self.produce_admitted_batch(batch_n, now, established, wire_profile)?;
+        } else if wire_profile.is_none()
             && self.outgoing_fec_packets.is_empty()
             && !self.burst_draining.get()
         {
+            // Raw (non-FEC) emit: conn.send writes straight into the caller's
+            // buffer. The burst path above is the one that seal-batches.
             return self.send_with_info_raw(buf, now, established);
+        } else {
+            // TODO-1016: materialize a held backlog. A non-deferred packet
+            // stops the loop so the no-stealth hot path keeps one packet
+            // when the admitted seal batch did not run.
+            self.produce_while_held(now, established, wire_profile)?;
         }
-
-        // Batch-materialize pending transport datagrams into the outgoing
-        // queue (TODO-1016). Under stealth deferral every produced packet
-        // stays held; producing only one per call would serialize the
-        // drain to one packet per loop tick - measured ~2 Mbit/s against
-        // a 74 Mbit/s no-stealth baseline on Omega. Keep producing while
-        // packets defer, up to a bounded batch, so the next wake emits a
-        // full ripe batch in one sendmmsg/GSO burst. A non-deferred
-        // (Ready) packet stops the loop so the no-stealth hot path keeps
-        // exactly one materialization per call.
-        self.produce_while_held(now, established, wire_profile)?;
 
         // Pop the first ripe packet from the buffer to send it now.
         if !self.outgoing_fec_packets.is_empty() {
@@ -811,6 +805,71 @@ impl QuicFuscateConnection {
         self.stealth_window_release.set(Some(target));
     }
 
+    /// How many 1-RTT packets this wake may seal together.
+    ///
+    /// Stealth timing still produces one packet per wake so a hold can open.
+    /// A drain epoch, and any connection with timing off, already emits a
+    /// train; that train is one `seal_batch`.
+    fn admitted_seal_count(&self) -> usize {
+        if self.burst_draining.get() {
+            return self.drain_budget.get().clamp(1, 8);
+        }
+        if self.conn.transport_stealth_timing_active() {
+            return 1;
+        }
+        let queued = self.conn.dgram_send_queue_len();
+        if queued >= 2 {
+            queued.min(8)
+        } else {
+            1
+        }
+    }
+
+    /// Frame and seal up to `count` admitted packets, then queue them.
+    fn produce_admitted_batch(
+        &mut self,
+        count: usize,
+        now: Instant,
+        established: bool,
+        wire_profile: Option<WireProfile>,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if count == 0 {
+            return Ok(());
+        }
+        let pool = self.optimization_manager.memory_pool();
+        let head = if wire_profile.is_some() { 2 * wire::SOURCE_LENGTH_LEN } else { 0 };
+        let overhead = if wire_profile.is_some() { wire::MAX_DATAGRAM_OVERHEAD } else { 0 };
+        let mut blocks = Vec::with_capacity(count);
+        for _ in 0..count {
+            let block = PooledBlock::new(pool.clone());
+            if block.len() <= head {
+                return Err(crate::error::ConnectionError::BufferTooShort);
+            }
+            blocks.push(block);
+        }
+        let produced = {
+            let mut refs: Vec<&mut [u8]> =
+                blocks.iter_mut().map(|block| &mut block[head..]).collect();
+            self.conn.send_admitted_batch(&mut refs, overhead).map_err(|error| {
+                if matches!(error, crate::error::ConnectionError::BufferTooShort) {
+                    error
+                } else if matches!(error, crate::error::ConnectionError::Done) {
+                    crate::error::ConnectionError::Done
+                } else {
+                    crate::error::ConnectionError::Transport(error.to_string())
+                }
+            })?
+        };
+        let mut blocks = blocks.into_iter();
+        for (write, send_info) in produced {
+            let Some(block) = blocks.next() else {
+                return Err(crate::error::ConnectionError::InvalidState);
+            };
+            self.finish_produced_packet(block, write, send_info, wire_profile, established, now)?;
+        }
+        Ok(())
+    }
+
     /// Materialize one transport datagram into `outgoing_fec_packets`.
     /// Returns `Done` when the transport has nothing pending, `Ready`
     /// when the produced packet may emit immediately, and `Deferred`
@@ -872,6 +931,19 @@ impl QuicFuscateConnection {
             return Ok(ProduceOutcome::Done);
         }
 
+        self.finish_produced_packet(send_buffer, write, send_info, wire_profile, established, now)
+    }
+
+    /// Queue one already-sealed transport datagram, including FEC framing.
+    fn finish_produced_packet(
+        &mut self,
+        mut send_buffer: PooledBlock,
+        write: usize,
+        send_info: crate::transport::SendInfo,
+        wire_profile: Option<WireProfile>,
+        established: bool,
+        now: Instant,
+    ) -> Result<ProduceOutcome, crate::error::ConnectionError> {
         // Path-control packets must reach the peer before a Core-side FEC
         // context exists; bulk-only packets skip framing because their inner
         // protocol already retransmits (TODO-1011). Only path-control bypasses

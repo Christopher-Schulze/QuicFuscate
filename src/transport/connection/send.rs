@@ -1,3 +1,4 @@
+use super::state::AdmittedShortHeader;
 use super::*;
 
 impl Connection {
@@ -72,7 +73,9 @@ impl Connection {
         // ACK-only packets bypass the gate (RFC 9002 sec. 7.2) to prevent
         // congestion-control deadlocks where both sides exhaust their windows
         // and neither can send ACKs to release budget.
-        let congestion_blocked = !self.recovery.can_send(self.dgram_send_max_size);
+        let congestion_blocked = !self
+            .recovery
+            .can_send(self.dgram_send_max_size.saturating_add(self.admitted_batch_reserved));
         log::trace!("send_with_datagram_overhead congestion gate: recovery.bytes_in_flight={} recovery.cwnd={} dgram_send_max_size={} congestion_blocked={}",
             self.recovery.bytes_in_flight, self.recovery.cwnd, self.dgram_send_max_size, congestion_blocked);
         let mut congestion_bypass = congestion_blocked && self.has_pending_application_ack();
@@ -541,88 +544,220 @@ impl Connection {
             return Err(ConnectionError::Done);
         }
         off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
+        let frame = AdmittedShortHeader {
+            pn,
+            pn_off,
+            pn_len,
+            plaintext_end: off,
+            staged_datagram,
+            emitted_chaff,
+            wrote_ack_eliciting,
+            stream_transmission_id,
+            packet_contents,
+            pmtu_probe_sent: _pmtu_probe_sent,
+            pmtu_probe_bypassed_congestion,
+            staged_bulk,
+            datagram_overhead,
+            now,
+        };
+        if self.admitted_batch_defer {
+            off = self.layout_short_header_plaintext(out, pn, pn_off, pn_len, off)?;
+            self.advance_send_packet_number(2)?;
+            if let Some(transmission_id) = frame.stream_transmission_id {
+                self.unqueue_stream_transmission(transmission_id);
+                self.admitted_batch_held_streams.push(transmission_id);
+            }
+            if staged_datagram {
+                self.admitted_batch_dgram_skip = self.admitted_batch_dgram_skip.saturating_add(1);
+            }
+            let mut deferred = frame;
+            deferred.plaintext_end = off;
+            self.admitted_batch_frames.push(deferred);
+            return Ok((
+                off,
+                SendInfo {
+                    from: self.local_addr,
+                    to: self.peer_addr,
+                    at: now,
+                    congestion_controlled: wrote_ack_eliciting,
+                    path_control: false,
+                    bulk_only: staged_bulk && !packet_contents.control && !packet_contents.stream,
+                },
+            ));
+        }
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
-        if staged_datagram {
+        let info = self.account_admitted_short_header(off, &frame)?;
+        Ok((off, info))
+    }
+
+    /// Frame up to eight already-admitted 1-RTT packets and seal them with one
+    /// `seal_batch`. Handshake flights stay on the single-packet path. A seal
+    /// failure leaves DATAGRAM queue ownership and stream retransmissions in
+    /// place; packet numbers already taken are not reused.
+    pub(crate) fn send_admitted_batch(
+        &mut self,
+        outs: &mut [&mut [u8]],
+        datagram_overhead: usize,
+    ) -> Result<Vec<(usize, SendInfo)>, crate::error::ConnectionError> {
+        const MAX_ADMITTED_SEAL: usize = 8;
+        if self.admitted_batch_defer {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        self.admitted_batch_defer = true;
+        self.admitted_batch_reserved = 0;
+        self.admitted_batch_dgram_skip = 0;
+        self.admitted_batch_frames.clear();
+        self.admitted_batch_held_streams.clear();
+
+        let mut sealed_now: Vec<(usize, SendInfo)> = Vec::new();
+        let limit = outs.len().min(MAX_ADMITTED_SEAL);
+        let mut build_error = None;
+        for out in outs.iter_mut().take(limit) {
+            let before = self.admitted_batch_frames.len();
+            match self.send_with_datagram_overhead(out, datagram_overhead) {
+                Ok((len, info)) => {
+                    if self.admitted_batch_frames.len() > before {
+                        if self
+                            .admitted_batch_frames
+                            .last()
+                            .is_some_and(|frame| frame.wrote_ack_eliciting)
+                        {
+                            self.admitted_batch_reserved = self
+                                .admitted_batch_reserved
+                                .saturating_add(self.dgram_send_max_size);
+                        }
+                    } else {
+                        sealed_now.push((len, info));
+                        break;
+                    }
+                }
+                Err(crate::error::ConnectionError::Done) => break,
+                Err(error) => {
+                    build_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if let Some(error) = build_error {
+            self.abort_admitted_batch();
+            return Err(error);
+        }
+        if self.admitted_batch_frames.is_empty() {
+            self.admitted_batch_defer = false;
+            self.admitted_batch_reserved = 0;
+            return Ok(sealed_now);
+        }
+        let frames = std::mem::take(&mut self.admitted_batch_frames);
+        let framed_len = frames.len();
+        let seal_result = self.seal_prepared_short_headers(&mut outs[..framed_len], &frames);
+        self.admitted_batch_defer = false;
+        self.admitted_batch_reserved = 0;
+        self.admitted_batch_dgram_skip = 0;
+        let sealed_lengths = match seal_result {
+            Ok(lengths) => lengths,
+            Err(error) => {
+                self.restore_held_stream_transmissions();
+                return Err(error);
+            }
+        };
+        let mut produced = Vec::with_capacity(sealed_now.len() + sealed_lengths.len());
+        produced.extend(sealed_now);
+        for (total, frame) in sealed_lengths.into_iter().zip(frames) {
+            let info = match self.account_admitted_short_header(total, &frame) {
+                Ok(info) => info,
+                Err(error) => {
+                    self.restore_held_stream_transmissions();
+                    return Err(error);
+                }
+            };
+            if let Some(transmission_id) = frame.stream_transmission_id {
+                self.admitted_batch_held_streams.retain(|held| *held != transmission_id);
+            }
+            produced.push((total, info));
+        }
+        self.admitted_batch_held_streams.clear();
+        Ok(produced)
+    }
+
+    fn abort_admitted_batch(&mut self) {
+        self.admitted_batch_defer = false;
+        self.admitted_batch_reserved = 0;
+        self.admitted_batch_dgram_skip = 0;
+        self.admitted_batch_frames.clear();
+        self.restore_held_stream_transmissions();
+    }
+
+    fn restore_held_stream_transmissions(&mut self) {
+        for transmission_id in self.admitted_batch_held_streams.drain(..) {
+            self.stream_retransmit_queue.push_back(transmission_id);
+        }
+    }
+
+    fn account_admitted_short_header(
+        &mut self,
+        total: usize,
+        frame: &AdmittedShortHeader,
+    ) -> Result<SendInfo, crate::error::ConnectionError> {
+        if frame.staged_datagram {
             self.commit_staged_datagram_frame()?;
         }
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
-            if emitted_chaff {
+            if frame.emitted_chaff {
                 scheduler.record_chaff_emitted();
             } else {
-                scheduler
-                    .record_cover_packet(now, packet_contents.stream || packet_contents.datagram);
+                scheduler.record_cover_packet(
+                    frame.now,
+                    frame.packet_contents.stream || frame.packet_contents.datagram,
+                );
             }
         }
-
-        // Mark bytes-in-flight timing start if we actually wrote payload beyond header
-        if off > (pn_off + pn_len) && self.bytes_in_flight_started.is_none() {
-            self.bytes_in_flight_started = Some(now);
+        if total > frame.pn_off + frame.pn_len && self.bytes_in_flight_started.is_none() {
+            self.bytes_in_flight_started = Some(frame.now);
         }
-        // Maintain minimal paths_count
         self.refresh_path_count();
-
-        // Legacy transport-level FEC removed
-
-        // Stealth-friendly: do not force 1200-byte minimum for short-header packets
-        let total = off;
         let info = SendInfo {
             from: self.local_addr,
             to: self.peer_addr,
-            at: now,
-            congestion_controlled: wrote_ack_eliciting,
+            at: frame.now,
+            congestion_controlled: frame.wrote_ack_eliciting,
             path_control: false,
-            // TODO-1011: the packet skips FEC framing only when its entire
-            // application payload is a bulk-class datagram - no control,
-            // stream, or chaff content coalesced into it.
-            bulk_only: staged_bulk && !packet_contents.control && !packet_contents.stream,
+            bulk_only: frame.staged_bulk
+                && !frame.packet_contents.control
+                && !frame.packet_contents.stream,
         };
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;
-        // Per RFC 9002 sec. 7.2, only packets containing ack-eliciting frames are
-        // congestion-controlled. Packets carrying only ACK/PADDING/CONNECTION_CLOSE
-        // are not congestion-controlled and must not inflate bytes_in_flight.
-        // They are also not tracked in sent_packets_by_pn because the peer will
-        // never ACK them - tracking them would leak bytes_in_flight permanently.
-        //
-        // `wrote_ack_eliciting` is set whenever any ack-eliciting frame (STREAM,
-        // DATAGRAM, CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, RESET_STREAM,
-        // STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE, HANDSHAKE_DONE, etc.) was
-        // emitted. This is the correct RFC 9002 sec. 7.2 condition - the previous
-        // heuristic ("no stream/dgram payload") misclassified PING-only keepalive
-        // probes and flow-control updates as non-congestion-controlled, breaking
-        // PTO-based loss detection for those packets.
-        let is_ack_only = !wrote_ack_eliciting;
-        if !is_ack_only {
-            if _pmtu_probe_sent && pmtu_probe_bypassed_congestion {
+        if frame.wrote_ack_eliciting {
+            if frame.pmtu_probe_sent && frame.pmtu_probe_bypassed_congestion {
                 self.recovery.on_pmtu_probe_sent_in_space(
                     recovery::PacketSpace::Application,
-                    pn,
+                    frame.pn,
                     total,
-                    now,
+                    frame.now,
                 );
             } else {
                 self.recovery.on_packet_sent_with_contents_in_space(
                     recovery::PacketSpace::Application,
-                    pn,
+                    frame.pn,
                     total,
                     true,
                     true,
                     None,
-                    packet_contents,
-                    now,
+                    frame.packet_contents,
+                    frame.now,
                 );
             }
-            if let Some(transmission_id) = stream_transmission_id {
-                self.commit_stream_transmission(transmission_id, pn);
+            if let Some(transmission_id) = frame.stream_transmission_id {
+                self.commit_stream_transmission(transmission_id, frame.pn);
             }
-            let outer_datagram_size = total.saturating_add(datagram_overhead);
-            self.pmtu.on_packet_sent(outer_datagram_size, now);
+            let outer_datagram_size = total.saturating_add(frame.datagram_overhead);
+            self.pmtu.on_packet_sent(outer_datagram_size, frame.now);
             if outer_datagram_size > self.pmtu.min_mtu() {
-                self.pmtu_above_floor_pns.insert(pn);
+                self.pmtu_above_floor_pns.insert(frame.pn);
             }
             self.cwnd = self.recovery.cwnd;
         }
-        Ok((total, info))
+        Ok(info)
     }
 
     /// Compute stealth padding length given current plaintext payload length and budget.

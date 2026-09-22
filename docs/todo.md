@@ -481,7 +481,7 @@
 - Detail: `docs/todo/todo-1050-quic-kdf-via-ring-hkdf.md`
 
 ### TODO-1051 - Remaining datapath speed without a new cipher
-- OPEN. Do not reopen DONE GSO/sendmmsg work. Couple `seal_batch` to an already admitted uniform run. SIMD only for GF, XOR, checksum, varint, Huffman. x86 aws-lc stays in TODO-1036.
+- DONE. An admitted 1-RTT run is framed first and sealed with one `seal_batch` (`send_admitted_batch`). Eight equal datagrams: 1 seal call, 8 packets, peer opens every packet. GSO/sendmmsg syscall count stays 1 for that burst. TODO-927 is the only 925-964 item not DONE. No new SIMD kernel. TODO-902, TODO-901, and TODO-1036 stay on their own ids.
 - Detail: `docs/todo/todo-1051-datapath-speed-not-cipher.md`
 
 ### TODO-1052 - One wire byte budget for padding, cover, and FEC

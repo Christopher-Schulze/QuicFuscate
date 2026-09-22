@@ -7,10 +7,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 mod private_selection;
-pub(crate) use private_selection::{select_private_open_for_phase, select_private_seal};
 #[cfg(test)]
+pub(crate) use private_selection::PrivatePacketProtectionSelection;
 pub(crate) use private_selection::{
-    select_private_packet_protection, PrivatePacketProtectionSelection,
+    select_private_open_for_phase, select_private_packet_protection, select_private_seal,
 };
 
 pub use qf_crypto::{TlsCoverCipherKind, TlsCoverInstallOutcome, TlsCoverKeyMaterial};
