@@ -23,6 +23,11 @@ use std::path::Path;
 const TAG_LEN: usize = 16;
 const QUIC_V1: u32 = 0x0000_0001;
 const QUIC_V2: u32 = 0x6b33_43cf;
+
+// Mirror of qftls::private_protocol — private epoch schedule derivation
+// (kept private there; duplicated here so the proof can derive epochs >= 2).
+const PRIVATE_EXPORTER_SALT: &[u8] = b"quicfuscate private packet protection v1";
+const PRIVATE_EXPORTER_LABEL: &[u8] = b"qf private packet aead v1";
 const FALLBACK_CID_LEN: usize = 20;
 
 fn main() {
@@ -319,6 +324,11 @@ struct PrivateInstall {
     s2c_key: Option<Vec<u8>>,
     s2c_iv: Option<Vec<u8>>,
     s2c_boundary: u64,
+    // Exporter-root schedule material — lets the proof derive arbitrary
+    // private epochs for key-phase updates, mirroring
+    // qftls::PrivateEpochSchedule::derive.
+    schedule_root: Option<Vec<u8>>,
+    context_hash: Option<Vec<u8>>,
     consistent: bool,
 }
 
@@ -353,6 +363,24 @@ fn parse_private_dump(path: &str) -> PrivateInstall {
                 "aegis" => Some(PrivateAeadFamily::Aegis128L),
                 _ => inst.family,
             };
+        }
+        if let Some(root) = kv.get("schedule_root").and_then(|v| hex_decode(v)) {
+            if let Some(existing) = &inst.schedule_root {
+                if *existing != root {
+                    inst.consistent = false;
+                }
+            } else {
+                inst.schedule_root = Some(root);
+            }
+        }
+        if let Some(ctx) = kv.get("context_hash").and_then(|v| hex_decode(v)) {
+            if let Some(existing) = &inst.context_hash {
+                if *existing != ctx {
+                    inst.consistent = false;
+                }
+            } else {
+                inst.context_hash = Some(ctx);
+            }
         }
         let triple = |w: &str| -> Option<(Vec<u8>, Vec<u8>, u64)> {
             Some((
@@ -784,26 +812,71 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
     } else {
         (&state.private.s2c_key, &state.private.s2c_iv, state.private.s2c_boundary)
     };
+    let mut opened_epoch: Option<u32> = None;
     if let (Some(k), Some(i)) = (key, iv) {
         if let Ok((_, priv_open)) = qf_crypto::select_private_packet_data_aead(family, k, i) {
             let mut buf = body.to_vec();
             if priv_open.open_with_u64_counter(pn, &aad, &mut buf).is_ok() {
-                *expect = pn + 1;
-                report.rtt_private += 1;
-                if boundary != 0 && pn < boundary {
-                    report.rtt_private_below_boundary += 1;
-                    println!(
-                        "  1rtt {dir_name} pn={pn} opened PRIVATE below boundary {boundary} (unexpected)"
-                    );
-                } else {
-                    println!(
-                        "  1rtt {dir_name} pn={pn} FAILED rustls, opened private-{} (boundary {boundary})",
-                        family.as_str()
-                    );
-                }
-                return;
+                opened_epoch = Some(1);
             }
         }
+    }
+    // Key-phase updates rotate the private epoch: the dumped material is the
+    // install epoch, so derive later epochs from the exporter-root schedule.
+    if opened_epoch.is_none() {
+        if let (Some(root), Some(ctx)) = (&state.private.schedule_root, &state.private.context_hash)
+        {
+            let dir_label: &[u8] = if c2s { b"client-write" } else { b"server-write" };
+            for epoch in 2u32..=8 {
+                let mut info = Vec::with_capacity(128);
+                info.extend_from_slice(PRIVATE_EXPORTER_LABEL);
+                info.push(family.protocol_id());
+                info.extend_from_slice(dir_label);
+                info.extend_from_slice(&epoch.to_be_bytes());
+                info.extend_from_slice(ctx);
+                let prk = qf_crypto::hkdf::hkdf_extract(PRIVATE_EXPORTER_SALT, root);
+                let Ok(material) = qf_crypto::hkdf::hkdf_expand(
+                    &prk,
+                    &info,
+                    PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN,
+                ) else {
+                    continue;
+                };
+                let Ok((_, open)) = qf_crypto::select_private_packet_data_aead(
+                    family,
+                    &material[..PrivateAeadFamily::KEY_LEN],
+                    &material[PrivateAeadFamily::KEY_LEN..],
+                ) else {
+                    continue;
+                };
+                let mut buf = body.to_vec();
+                if open.open_with_u64_counter(pn, &aad, &mut buf).is_ok() {
+                    opened_epoch = Some(epoch);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(epoch) = opened_epoch {
+        *expect = pn + 1;
+        report.rtt_private += 1;
+        if boundary != 0 && pn < boundary {
+            report.rtt_private_below_boundary += 1;
+            println!(
+                "  1rtt {dir_name} pn={pn} opened PRIVATE below boundary {boundary} (unexpected)"
+            );
+        } else if epoch > 1 {
+            println!(
+                "  1rtt {dir_name} pn={pn} FAILED rustls, opened private-{} epoch {epoch} (boundary {boundary})",
+                family.as_str()
+            );
+        } else {
+            println!(
+                "  1rtt {dir_name} pn={pn} FAILED rustls, opened private-{} (boundary {boundary})",
+                family.as_str()
+            );
+        }
+        return;
     }
     report.rtt_failed += 1;
     println!("  1rtt {dir_name} pn={pn} failed every available key");

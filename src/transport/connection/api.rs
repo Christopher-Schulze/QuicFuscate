@@ -794,6 +794,16 @@ impl Connection {
         let read_material = machine
             .derive_material(read_direction, epoch)
             .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
+        dump_private_packet_install(
+            self.is_server,
+            epoch,
+            family,
+            &write_material,
+            &read_material,
+            write_boundary,
+            read_boundary,
+            Some(&schedule),
+        );
         {
             let mut crypto = self.crypto.write();
             crypto.install_authenticated_private_1rtt_with_schedule(
@@ -810,15 +820,6 @@ impl Connection {
                 self.key_phase,
             )?;
         }
-        dump_private_packet_install(
-            self.is_server,
-            epoch,
-            family,
-            &write_material,
-            &read_material,
-            write_boundary,
-            read_boundary,
-        );
         self.refresh_short_header_tag_reserve();
         Ok(())
     }
@@ -1421,14 +1422,22 @@ fn dump_private_packet_install(
     read_material: &crate::qftls::PrivateKeyMaterial,
     write_boundary: u64,
     read_boundary: u64,
+    schedule: Option<&crate::qftls::PrivateEpochSchedule>,
 ) {
     let Some(path) = std::env::var_os("QUICFUSCATE_PRIVATE_KEY_DUMP") else {
         return;
     };
     let role = if is_server { "server" } else { "client" };
+    let (schedule_root, context_hash) = schedule
+        .map(|s| {
+            let (root, ctx) = s.wire_proof_material();
+            (hex::encode(root), hex::encode(ctx))
+        })
+        .unwrap_or_default();
     let line = format!(
         "role={role} epoch={epoch} family={family} write_key={} write_iv={} \
-         read_key={} read_iv={} write_boundary={write_boundary} read_boundary={read_boundary}\n",
+         read_key={} read_iv={} write_boundary={write_boundary} read_boundary={read_boundary} \
+         schedule_root={schedule_root} context_hash={context_hash}\n",
         hex::encode(write_material.key.as_slice()),
         hex::encode(write_material.iv.as_slice()),
         hex::encode(read_material.key.as_slice()),

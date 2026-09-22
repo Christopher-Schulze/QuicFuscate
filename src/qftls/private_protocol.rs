@@ -169,6 +169,13 @@ impl PrivateEpochSchedule {
         self.family
     }
 
+    /// Wire-proof hooks: expose the exporter root and bound context hash so the
+    /// env-gated install dump can record them for offline epoch derivation.
+    /// Only called when `QUICFUSCATE_PRIVATE_KEY_DUMP` is set.
+    pub(crate) fn wire_proof_material(&self) -> (&[u8], &[u8; PRIVATE_HASH_LEN]) {
+        (self.root.as_slice(), &self.context_hash)
+    }
+
     pub(crate) fn derive(
         &self,
         direction: PrivateDirection,
