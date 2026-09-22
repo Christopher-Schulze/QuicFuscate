@@ -557,7 +557,27 @@
 - Detail: `docs/todo/todo-1069-remove-write-only-aead-override.md`
 
 ### TODO-1070 - `--no-default-features` build fails on unconditional geoip module vs optional maxminddb
-- OPEN (found during the qf-hpke provider swap, pre-existing). `src/implementations/server/limits.rs` declares `mod geoip;` unconditionally, but `maxminddb` is an optional dependency behind the `server` feature — so `cargo check --no-default-features` fails with 6 `E0433` errors in `limits/geoip.rs`. The edge configuration (no client, no server) is unused in practice; the fix is gating the geoip module and its re-exports on `server`, which touches the `limits` re-export surface and needs a care pass rather than a drive-by.
+- DONE (2026-09-22). Two masked layers fixed, API surface unchanged:
+  1. `limits/geoip.rs`: pure config/status/error types stay unconditional
+     (metrics.rs uses `GeoIpStatus` ungated); only the live backend is
+     `#[cfg(feature = "maxminddb")]` — `GeoReader` type alias vs zero-size
+     stand-in, cfg'd `activate`/`lookup` variants, `map_geoip_database_error`
+     gated. A configured DB path without the backend fails closed with the
+     new `GeoIpError::BackendUnavailable` instead of compiling a dead module;
+     `rate_limiter`-only builds (geoip consumers on, maxminddb off) get the
+     same fail-closed contract.
+  2. `rustls_provider.rs` `create_server_connection`: the dev-cert fallback
+     called `generate_ephemeral_self_signed` which is gated on
+     `any(feature = "server", feature = "dev-certs")` — hoisted into a cfg'd
+     `cert_fallback` helper; no-backend builds return a named TlsError naming
+     both load failures instead of an E0599.
+- Verified: `cargo check --no-default-features` and
+  `--no-default-features --features rate_limiter` compile (47 dead-code
+  warnings on the unreferenced server-policy items remain — same pre-existing
+  pattern as blacklist/ddos_policy, not a regression). New
+  `backend_absent_tests` (2/2) pass under `--no-default-features`; the 7
+  existing geoip tests stay green under default features.
+- Detail: none — edge-config repair, documented here.
 
 ## Completed
 

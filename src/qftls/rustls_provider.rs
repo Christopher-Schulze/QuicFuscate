@@ -798,20 +798,15 @@ impl RustlsProviderImpl {
         let (certs, key) = match (certs_res, key_res) {
             (Ok(c), Ok(k)) => (c, k),
             (cert_err, key_err) => {
+                let ce = cert_err.err().map(|e| e.to_string()).unwrap_or_else(|| "-".to_string());
+                let ke = key_err.err().map(|e| e.to_string()).unwrap_or_else(|| "-".to_string());
                 if TLS_OVERRIDE_REQUIRED.load(Ordering::Relaxed) {
-                    let ce =
-                        cert_err.err().map(|e| e.to_string()).unwrap_or_else(|| "-".to_string());
-                    let ke =
-                        key_err.err().map(|e| e.to_string()).unwrap_or_else(|| "-".to_string());
                     return Err(ConnectionError::TlsError(format!(
                         "TLS cert/key load failed (override required): cert={}, key={}",
                         ce, ke
                     )));
                 }
-                log::warn!(
-	                        "No TLS cert/key found on disk. Generating ephemeral self-signed cert (development default)."
-	                    );
-                Self::generate_ephemeral_self_signed()?
+                Self::cert_fallback(&ce, &ke)?
             }
         };
 
@@ -833,6 +828,38 @@ impl RustlsProviderImpl {
             rustls::quic::ServerConnection::new(Arc::new(config), quic_version, transport_params)
                 .map_err(|e| ConnectionError::TlsError(format!("Server connection error: {}", e)))?,
         ))
+    }
+
+    /// Development fallback when no cert/key exists on disk: an ephemeral
+    /// self-signed certificate (only available when the rcgen backend is
+    /// compiled in via `server` or `dev-certs`).
+    #[cfg(any(feature = "server", feature = "dev-certs"))]
+    fn cert_fallback(
+        _ce: &str,
+        _ke: &str,
+    ) -> Result<
+        (Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>),
+        ConnectionError,
+    > {
+        log::warn!(
+            "No TLS cert/key found on disk. Generating ephemeral self-signed cert (development default)."
+        );
+        Self::generate_ephemeral_self_signed()
+    }
+
+    /// Without the rcgen backend there is no ephemeral-cert path — report the
+    /// missing material instead of silently running without identity.
+    #[cfg(not(any(feature = "server", feature = "dev-certs")))]
+    fn cert_fallback(
+        ce: &str,
+        ke: &str,
+    ) -> Result<
+        (Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>),
+        ConnectionError,
+    > {
+        Err(ConnectionError::TlsError(format!(
+            "TLS cert/key load failed and the dev-cert backend is not compiled in: cert={ce}, key={ke}"
+        )))
     }
 
     #[cfg(any(feature = "server", feature = "dev-certs"))]

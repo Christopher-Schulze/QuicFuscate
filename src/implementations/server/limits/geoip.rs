@@ -9,6 +9,13 @@ use std::path::PathBuf;
 // MaxMindDB GeoLite2 (or GeoIP2) country database. IPs mapping to a blocked
 // country are rejected. A configured database is a startup dependency: the
 // server must not silently continue with an inactive policy.
+//
+// `maxminddb` is an optional dependency (pulled in by the `server` feature).
+// The pure configuration/status/error types below stay compiled in every
+// build so the config schema and status surface never change shape. Only the
+// live reader backend is feature-gated: `GeoIpBlocker::try_new` on a build
+// without `maxminddb` fails closed (`BackendUnavailable`) when a database
+// path is configured, and stays a disabled no-op blocker otherwise.
 // ---------------------------------------------------------------------------
 
 /// Configuration for GeoIP-based country blocking.
@@ -83,6 +90,9 @@ pub enum GeoIpError {
     InvalidDatabase { path: PathBuf, reason: String },
     /// The database is valid MaxMind data but is not a country database.
     UnsupportedDatabase { path: PathBuf, database_type: String },
+    /// A database path was configured on a build without the `maxminddb`
+    /// backend — the policy can never activate, so this fails closed.
+    BackendUnavailable { path: PathBuf },
 }
 
 impl std::fmt::Display for GeoIpError {
@@ -117,6 +127,11 @@ impl std::fmt::Display for GeoIpError {
             Self::UnsupportedDatabase { path, database_type } => write!(
                 formatter,
                 "GeoIP database at {} has unsupported type {database_type:?}; expected a country database",
+                path.display()
+            ),
+            Self::BackendUnavailable { path } => write!(
+                formatter,
+                "GeoIP database configured at {} but this build has no maxminddb backend",
                 path.display()
             ),
         }
@@ -154,6 +169,14 @@ impl std::fmt::Display for GeoIpLookupError {
 
 impl std::error::Error for GeoIpLookupError {}
 
+/// Live MaxMindDB reader when the backend is compiled in.
+#[cfg(feature = "maxminddb")]
+type GeoReader = maxminddb::Reader<Vec<u8>>;
+/// Zero-size stand-in when `maxminddb` is not compiled in — the blocker can
+/// then never hold a live reader and stays a disabled no-op.
+#[cfg(not(feature = "maxminddb"))]
+struct GeoReader;
+
 /// GeoIP-based source-IP blocker.
 ///
 /// Loads and fully verifies a MaxMindDB country database during construction
@@ -161,18 +184,24 @@ impl std::error::Error for GeoIpLookupError {}
 /// blocker is disabled and lookup is a zero-cost allow path.
 pub struct GeoIpBlocker {
     config: GeoIpConfig,
-    reader: Option<maxminddb::Reader<Vec<u8>>>,
+    reader: Option<GeoReader>,
 }
 
 impl GeoIpBlocker {
     /// Validate and activate a blocker from the given config.
     pub fn try_new(config: GeoIpConfig) -> Result<Self, GeoIpError> {
         config.validate()?;
-        let Some(path) = config.db_path.as_ref() else {
+        let Some(path) = config.db_path.clone() else {
             return Ok(Self { config, reader: None });
         };
+        Self::activate(config, path)
+    }
 
-        let metadata = std::fs::metadata(path).map_err(|error| {
+    /// Load and fully verify the configured database when the `maxminddb`
+    /// backend is compiled in.
+    #[cfg(feature = "maxminddb")]
+    fn activate(config: GeoIpConfig, path: PathBuf) -> Result<Self, GeoIpError> {
+        let metadata = std::fs::metadata(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 GeoIpError::MissingDatabase(path.clone())
             } else {
@@ -181,23 +210,23 @@ impl GeoIpBlocker {
         })?;
         if !metadata.is_file() {
             return Err(GeoIpError::UnreadableDatabase {
-                path: path.clone(),
+                path,
                 reason: "path is not a regular file".to_string(),
             });
         }
         if metadata.len() == 0 {
-            return Err(GeoIpError::EmptyDatabase(path.clone()));
+            return Err(GeoIpError::EmptyDatabase(path));
         }
 
-        let reader = maxminddb::Reader::open_readfile(path)
-            .map_err(|error| map_geoip_database_error(path, error))?;
+        let reader = maxminddb::Reader::open_readfile(&path)
+            .map_err(|error| map_geoip_database_error(&path, error))?;
         reader.verify().map_err(|error| GeoIpError::InvalidDatabase {
             path: path.clone(),
             reason: error.to_string(),
         })?;
         let database_type = reader.metadata().database_type.clone();
         if !database_type.to_ascii_lowercase().contains("country") {
-            return Err(GeoIpError::UnsupportedDatabase { path: path.clone(), database_type });
+            return Err(GeoIpError::UnsupportedDatabase { path, database_type });
         }
 
         log::info!(
@@ -206,6 +235,13 @@ impl GeoIpBlocker {
             config.blocked_countries.len()
         );
         Ok(Self { config, reader: Some(reader) })
+    }
+
+    /// Without the `maxminddb` backend a configured database can never
+    /// activate — fail closed instead of silently disabling the policy.
+    #[cfg(not(feature = "maxminddb"))]
+    fn activate(_config: GeoIpConfig, path: PathBuf) -> Result<Self, GeoIpError> {
+        Err(GeoIpError::BackendUnavailable { path })
     }
 
     /// Create a blocker with no database and no blocked countries (no-op).
@@ -229,6 +265,7 @@ impl GeoIpBlocker {
 
     /// Evaluate one source address. Lookup/decode failures are returned so the
     /// admission caller can drop the packet and record explicit telemetry.
+    #[cfg(feature = "maxminddb")]
     pub fn lookup(&self, ip: IpAddr) -> Result<bool, GeoIpLookupError> {
         let Some(reader) = self.reader.as_ref() else {
             return Ok(false);
@@ -250,6 +287,14 @@ impl GeoIpBlocker {
         Ok(self.config.blocked_countries.contains(iso_code))
     }
 
+    /// No-backend builds can never hold a live reader (activation fails
+    /// closed), so the lookup is the same zero-cost allow path as a disabled
+    /// blocker.
+    #[cfg(not(feature = "maxminddb"))]
+    pub fn lookup(&self, _ip: IpAddr) -> Result<bool, GeoIpLookupError> {
+        Ok(false)
+    }
+
     /// Returns `true` if the IP maps to a blocked country. A lookup failure is
     /// fail-closed for callers that cannot carry typed error telemetry.
     pub fn is_blocked(&self, ip: IpAddr) -> bool {
@@ -262,6 +307,7 @@ impl GeoIpBlocker {
     }
 }
 
+#[cfg(feature = "maxminddb")]
 fn map_geoip_database_error(
     path: &std::path::Path,
     error: maxminddb::MaxMindDbError,
@@ -276,5 +322,30 @@ fn map_geoip_database_error(
         error => {
             GeoIpError::InvalidDatabase { path: path.to_path_buf(), reason: error.to_string() }
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "maxminddb")))]
+mod backend_absent_tests {
+    use super::*;
+
+    #[test]
+    fn configured_database_fails_closed_without_backend() {
+        let mut config = GeoIpConfig::default();
+        config.db_path = Some(PathBuf::from("/nonexistent/geo.mmdb"));
+        config.blocked_countries.insert("CN".to_string());
+        assert!(matches!(
+            GeoIpBlocker::try_new(config),
+            Err(GeoIpError::BackendUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn unconfigured_blocker_stays_a_disabled_noop() {
+        let blocker =
+            GeoIpBlocker::try_new(GeoIpConfig::default()).expect("unconfigured activates");
+        assert_eq!(blocker.status(), GeoIpStatus::Disabled);
+        assert_eq!(blocker.lookup("203.0.113.7".parse().unwrap()), Ok(false));
+        assert!(!blocker.is_blocked("203.0.113.7".parse().unwrap()));
     }
 }
