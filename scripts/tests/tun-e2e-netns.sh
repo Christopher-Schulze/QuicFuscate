@@ -55,6 +55,27 @@ NAMESPACES_CREATED=0
 TRAFFIC_CAPTURE_FILE="${QF_E2E_TRAFFIC_CAPTURE_FILE:-}"
 TRAFFIC_CAPTURE_SECONDS="${QF_E2E_TRAFFIC_CAPTURE_SECONDS:-10}"
 TRAFFIC_CAPTURE_DRAIN_SECONDS=1
+# TODO-1029: starts before the client dials so the pcap covers Initial,
+# Handshake, pre-auth 1-RTT, the private-upgrade boundary, and
+# post-activation data. Stops after the tunnel ping checks.
+HANDSHAKE_CAPTURE_FILE="${QF_E2E_HANDSHAKE_CAPTURE_FILE:-}"
+HANDSHAKE_CAPTURE_PID=""
+# Optional second capture point on the server side of the link (same traffic,
+# independent vantage). TODO-1029 wants a capture on client and server.
+HANDSHAKE_CAPTURE_FILE_SERVER="${QF_E2E_HANDSHAKE_CAPTURE_FILE_SERVER:-}"
+HANDSHAKE_CAPTURE_SERVER_PID=""
+# TODO-1029 diagnostic passthroughs: NSS keylog for the rustls traffic secrets
+# and the private install dump for the negotiated owner/boundary. Both are
+# operator-local analysis material and never enter version control.
+KEYLOG_FILE="${QF_E2E_KEYLOG_FILE:-}"
+PRIVATE_DUMP_FILE="${QF_E2E_PRIVATE_DUMP_FILE:-}"
+WIRE_ENV=()
+if [ -n "$KEYLOG_FILE" ]; then
+  WIRE_ENV+=(SSLKEYLOGFILE="$KEYLOG_FILE")
+fi
+if [ -n "$PRIVATE_DUMP_FILE" ]; then
+  WIRE_ENV+=(QUICFUSCATE_PRIVATE_KEY_DUMP="$PRIVATE_DUMP_FILE")
+fi
 READY_HOOK="${QF_E2E_READY_HOOK:-}"
 INITIAL_IPV4_FORWARDING=""
 INITIAL_IPV6_FORWARDING=""
@@ -137,8 +158,23 @@ stop_capture_process() {
   CAPTURE_PID=""
 }
 
+stop_handshake_capture() {
+  if [ -z "$HANDSHAKE_CAPTURE_PID" ]; then
+    return
+  fi
+  kill -INT "$HANDSHAKE_CAPTURE_PID" 2>/dev/null || true
+  wait "$HANDSHAKE_CAPTURE_PID" 2>/dev/null || true
+  HANDSHAKE_CAPTURE_PID=""
+}
+
 cleanup() {
   stop_capture_process
+  stop_handshake_capture
+  if [ -n "$HANDSHAKE_CAPTURE_SERVER_PID" ]; then
+    kill -INT "$HANDSHAKE_CAPTURE_SERVER_PID" 2>/dev/null || true
+    wait "$HANDSHAKE_CAPTURE_SERVER_PID" 2>/dev/null || true
+    HANDSHAKE_CAPTURE_SERVER_PID=""
+  fi
   stop_owned_process "$CLIENT_PID"
   CLIENT_PID=""
   stop_owned_process "$SERVER_PID"
@@ -274,6 +310,26 @@ if [ -e "$ROUTING_STATE_PATH" ]; then
   echo "FAIL: routing ownership state already exists; refusing to remove unowned path $ROUTING_STATE_PATH" >&2
   exit 2
 fi
+if [ -n "$HANDSHAKE_CAPTURE_FILE" ]; then
+  if [ -e "$HANDSHAKE_CAPTURE_FILE" ] || [ -e "${HANDSHAKE_CAPTURE_FILE}.tcpdump.log" ]; then
+    echo "FAIL: handshake capture artifact already exists; refusing to overwrite $HANDSHAKE_CAPTURE_FILE" >&2
+    exit 2
+  fi
+  if ! command -v tcpdump >/dev/null 2>&1; then
+    echo "FAIL: tcpdump is required when QF_E2E_HANDSHAKE_CAPTURE_FILE is set" >&2
+    exit 2
+  fi
+fi
+if [ -n "$HANDSHAKE_CAPTURE_FILE_SERVER" ]; then
+  if [ -e "$HANDSHAKE_CAPTURE_FILE_SERVER" ] || [ -e "${HANDSHAKE_CAPTURE_FILE_SERVER}.tcpdump.log" ]; then
+    echo "FAIL: server handshake capture artifact already exists; refusing to overwrite $HANDSHAKE_CAPTURE_FILE_SERVER" >&2
+    exit 2
+  fi
+  if ! command -v tcpdump >/dev/null 2>&1; then
+    echo "FAIL: tcpdump is required when QF_E2E_HANDSHAKE_CAPTURE_FILE_SERVER is set" >&2
+    exit 2
+  fi
+fi
 if [ -n "$TRAFFIC_CAPTURE_FILE" ]; then
   if [ -e "$TRAFFIC_CAPTURE_FILE" ] || [ -e "${TRAFFIC_CAPTURE_FILE}.tcpdump.log" ]; then
     echo "FAIL: traffic capture artifact already exists; refusing to overwrite $TRAFFIC_CAPTURE_FILE" >&2
@@ -352,7 +408,7 @@ start_server() {
   local admin_socket="$1"
   local log_path="$2"
   SERVER_LOG_PATH="$log_path"
-  ip netns exec ns-srv "$B" server --cert "$CERT" --key "$KEY" \
+  ip netns exec ns-srv env "${WIRE_ENV[@]}" "$B" server --cert "$CERT" --key "$KEY" \
     --listen 10.10.0.1:4433 --admin-socket "$admin_socket" \
     --qkey-store "$QKEY_STORE" \
     --tun --tun-name qtun0 --tun-ip 10.0.1.1 --tun-netmask 255.255.255.0 \
@@ -409,8 +465,31 @@ fi
 start_server "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
 wait_for_qkey "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
 
+# --- optional handshake/activation capture (TODO-1029) ---
+if [ -n "$HANDSHAKE_CAPTURE_FILE" ]; then
+  mkdir -p "$(dirname "$HANDSHAKE_CAPTURE_FILE")"
+  ip netns exec ns-cli tcpdump --immediate-mode -U -n -s 0 -B 4096 -i veth-cli \
+    -w "$HANDSHAKE_CAPTURE_FILE" \
+    'udp and host 10.10.0.2 and host 10.10.0.1 and port 4433' \
+    2>"${HANDSHAKE_CAPTURE_FILE}.tcpdump.log" &
+  HANDSHAKE_CAPTURE_PID=$!
+  sleep 1
+  if ! kill -0 "$HANDSHAKE_CAPTURE_PID" 2>/dev/null; then
+    cat "${HANDSHAKE_CAPTURE_FILE}.tcpdump.log" >&2
+    fail "handshake tcpdump did not remain active"
+  fi
+fi
+if [ -n "$HANDSHAKE_CAPTURE_FILE_SERVER" ]; then
+  mkdir -p "$(dirname "$HANDSHAKE_CAPTURE_FILE_SERVER")"
+  ip netns exec ns-srv tcpdump --immediate-mode -U -n -s 0 -B 4096 -i veth-srv \
+    -w "$HANDSHAKE_CAPTURE_FILE_SERVER" \
+    'udp and host 10.10.0.2 and host 10.10.0.1 and port 4433' \
+    2>"${HANDSHAKE_CAPTURE_FILE_SERVER}.tcpdump.log" &
+  HANDSHAKE_CAPTURE_SERVER_PID=$!
+fi
+
 # --- start client in ns-cli ---
-ip netns exec ns-cli "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
+ip netns exec ns-cli env "${WIRE_ENV[@]}" "$B" client --remote 10.10.0.1:4433 --url https://10.10.0.1/ \
   --qkey "$QKEY" --ca-file "$CA" --verify-peer --disable-doh \
   --tun --tun-name qtun0 --no-utls -v \
   "${CLIENT_CONFIG_ARGS[@]}" \
@@ -503,6 +582,25 @@ fi
 echo "=== MASQUE counters ==="
 echo "srv: $(grep -i 'MASQUE' "$SERVER_LOG_PATH" | tail -3)"
 echo "cli: $(grep -i 'MASQUE' /tmp/ns-cli.log | tail -3)"
+
+if [ -n "$HANDSHAKE_CAPTURE_FILE" ]; then
+  # The activation boundary and the post-activation ping data in both
+  # directions are now covered; stop before the teardown traffic.
+  stop_handshake_capture
+  if [ ! -s "$HANDSHAKE_CAPTURE_FILE" ]; then
+    fail "handshake capture is empty"
+  fi
+  echo "HANDSHAKE_CAPTURE file=$HANDSHAKE_CAPTURE_FILE"
+fi
+if [ -n "$HANDSHAKE_CAPTURE_SERVER_PID" ]; then
+  kill -INT "$HANDSHAKE_CAPTURE_SERVER_PID" 2>/dev/null || true
+  wait "$HANDSHAKE_CAPTURE_SERVER_PID" 2>/dev/null || true
+  HANDSHAKE_CAPTURE_SERVER_PID=""
+  if [ ! -s "$HANDSHAKE_CAPTURE_FILE_SERVER" ]; then
+    fail "server-side handshake capture is empty"
+  fi
+  echo "HANDSHAKE_CAPTURE server_file=$HANDSHAKE_CAPTURE_FILE_SERVER"
+fi
 
 echo "=== server log tail (TUN/errors) ==="
 grep -iE "tun|error|warn|panic|MASQUE" "$SERVER_LOG_PATH" | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10

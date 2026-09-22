@@ -810,6 +810,15 @@ impl Connection {
                 self.key_phase,
             )?;
         }
+        dump_private_packet_install(
+            self.is_server,
+            epoch,
+            family,
+            &write_material,
+            &read_material,
+            write_boundary,
+            read_boundary,
+        );
         self.refresh_short_header_tag_reserve();
         Ok(())
     }
@@ -1396,5 +1405,42 @@ impl Connection {
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
             scheduler.cancel();
         }
+    }
+}
+
+/// Opt-in diagnostic dump of the exact private packet material installed on
+/// the wire path (`QUICFUSCATE_PRIVATE_KEY_DUMP=<path>`), used by the
+/// packet-capture AEAD proof (TODO-1029). The file receives raw key material —
+/// a transient analysis artifact that must never be committed. No-op unless
+/// the env var names a path.
+fn dump_private_packet_install(
+    is_server: bool,
+    epoch: u32,
+    family: qf_crypto::PrivateAeadFamily,
+    write_material: &crate::qftls::PrivateKeyMaterial,
+    read_material: &crate::qftls::PrivateKeyMaterial,
+    write_boundary: u64,
+    read_boundary: u64,
+) {
+    let Some(path) = std::env::var_os("QUICFUSCATE_PRIVATE_KEY_DUMP") else {
+        return;
+    };
+    let role = if is_server { "server" } else { "client" };
+    let line = format!(
+        "role={role} epoch={epoch} family={family} write_key={} write_iv={} \
+         read_key={} read_iv={} write_boundary={write_boundary} read_boundary={read_boundary}\n",
+        hex::encode(write_material.key.as_slice()),
+        hex::encode(write_material.iv.as_slice()),
+        hex::encode(read_material.key.as_slice()),
+        hex::encode(read_material.iv.as_slice()),
+        family = family.as_str(),
+    );
+    let result =
+        std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(line.as_bytes())
+        });
+    if let Err(error) = result {
+        log::warn!("private key dump to {} failed: {error}", path.to_string_lossy());
     }
 }

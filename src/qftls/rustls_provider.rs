@@ -767,6 +767,9 @@ impl RustlsProviderImpl {
         };
 
         let mut config = config;
+        if std::env::var_os("SSLKEYLOGFILE").is_some() {
+            config.key_log = Arc::new(rustls::KeyLogFile::new());
+        }
         config.resumption = standard_session_resumption();
         // Enable QUIC
         config.enable_early_data = false;
@@ -819,6 +822,9 @@ impl RustlsProviderImpl {
                 .map_err(|e| ConnectionError::TlsError(format!("Cert error: {}", e)))?;
 
         let mut config = config;
+        if std::env::var_os("SSLKEYLOGFILE").is_some() {
+            config.key_log = Arc::new(rustls::KeyLogFile::new());
+        }
         config.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec()];
         config.max_early_data_size = MAX_EARLY_DATA_SIZE.load(Ordering::Relaxed);
         config.ticketer = standard_server_ticketer()?;
@@ -1073,6 +1079,9 @@ impl RustlsProviderImpl {
                 .with_client_cert_resolver(no_client_certificate())
         };
         let mut cfg = cfg;
+        if std::env::var_os("SSLKEYLOGFILE").is_some() {
+            cfg.key_log = Arc::new(rustls::KeyLogFile::new());
+        }
         cfg.resumption = standard_session_resumption();
         // Apply ALPN
         cfg.alpn_protocols = profile.alpn_protocols.iter().map(|s| s.as_bytes().to_vec()).collect();
