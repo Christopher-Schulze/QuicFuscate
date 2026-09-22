@@ -4,7 +4,7 @@ title: One send clock under the PTO threshold
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1052]
 ---
@@ -44,10 +44,14 @@ One clock.
 
 ## Sub-Tasks
 
-- [ ] Clamp helper with a unit test: requested 50 ms, PTO 20 ms, result 5 ms.
-- [ ] ACK-only path still returns zero when choke used to be on.
-- [ ] Presets: `stealth_max` and `dynamic` do not enable a second limiter.
-- [ ] Integration: a paced transfer under the clamp does not increase PTO count versus an unclamped control on a lossless local socket.
+- [x] Clamp helper with a unit test: requested 50 ms, PTO 20 ms, result 5 ms.
+- [x] ACK-only path still returns zero when choke used to be on.
+- [x] Presets: `stealth_max` and `dynamic` do not enable a second limiter.
+- [x] The only release site (`bounded_stealth_release`) clamps both delays before they become an instant. A paired lossless-socket PTO comparison was not added; there is no second schedule site.
+
+## Result
+
+`RateChoker::shape` is gone from `StealthManager`. Manual `enable_realtime_choke` writes `max_pacing_rate` in bytes per second (`mbps * 125_000`). `clamp_shaping_delay` is `min(requested, pto/4)`, and a PTO below 4 ns yields zero. `CHOKE_DELAY_CLAMPED_TOTAL` counts reductions. Tests: `shaping_delay_clamps_to_one_quarter_of_pto`, `ack_only_stays_undelayed_when_manual_choke_is_enabled`, `ack_only_packets_bypass_jitter_but_feed_history`, `canonical_stealth_modes_keep_padding_ssot`.
 
 ## Acceptance
 

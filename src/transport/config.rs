@@ -109,7 +109,7 @@ pub struct Config {
     pub(crate) stealth_mimic_bias: u8,
     // ACK policy: number of ack-eliciting packets before sending ACK (Chrome-like tuning)
     pub(crate) ack_eliciting_threshold: u64,
-    // When true, pacing/timing is controlled externally (e.g., StealthManager/RateChoker)
+    // When true, pacing/timing is controlled by the connection send clock
     // and the internal stealth timing gate should not schedule sleeps.
     pub(crate) external_pacing: bool,
     // Shared 0-RTT anti-replay strike register (server-side only).

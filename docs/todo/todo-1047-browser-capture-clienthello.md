@@ -75,3 +75,7 @@ Grease values must be real grease (reserved values a browser emits), generated p
 
 - Browser parameters move every release. The freshness gate is the control, not a one-time paste.
 - Advertising a smaller `initial_max_data` than the old 10 MB can slow the ramp. That is required for mimicry. Internal credit above the advertisement would be a lie if it is used to send more than the peer allowed. Advertise the capture, and do not send past the peer's limit.
+
+## Notes
+
+2026-09-22 source check, not a capture. Firefox `modules/libpref/init/StaticPrefList.yaml` on main: `network.http.http3.max_data` 25165824, `network.http.http3.max_stream_data` 12582912, `network.http.http3.idle_timeout` 30 seconds. Those are Neqo prefs, not an Initial CRYPTO payload. The catalog Firefox `initial_max_data` 12582912 matches the stream window, not the connection window. Do not paste 25165824 into the catalog and call this task done. Chrome `quic_constants.h` `kDefaultFlowControlSendWindow` is 16 KB and the 16 MB / 24 MB values are receive-window limits, not a proven ClientHello `initial_max_data`. Safari was not fetched. No Initial fixture is in the repo.

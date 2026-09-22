@@ -15,6 +15,10 @@ fn canonical_stealth_modes_keep_padding_ssot() {
     assert!(anti_dpi.enable_http3_masquerading);
     assert!(anti_dpi.use_tls_cover);
     assert!(!anti_dpi.enable_realtime_choke);
+
+    let dynamic = StealthConfig::dynamic();
+    assert!(!dynamic.enable_realtime_choke);
+    assert!(!StealthConfig::performance().enable_realtime_choke);
 }
 
 #[test]

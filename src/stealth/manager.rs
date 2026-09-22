@@ -30,8 +30,6 @@ pub struct StealthManager {
     escalated_until: Arc<Mutex<Option<std::time::Instant>>>,
     /// Prefer MASQUE path while escalated (when available)
     prefer_masque: AtomicBool,
-    /// Optional real-time rate choker
-    rate_choker: Arc<Mutex<Option<RateChoker>>>,
     /// **NEW**: Server Push Cover Traffic state
     server_push_state: Arc<Mutex<ServerPushState>>,
     /// **NEW**: Runtime toggle for Server Push cover (used by Intelligent mode)
@@ -172,13 +170,6 @@ impl StealthManager {
             None
         };
 
-        // Initialize rate choker (disabled in Base, enabled in Anti-DPI; Dynamic activates on demand)
-        let rate_choker = Arc::new(Mutex::new(RateChoker::new_with_clock(
-            config.choke_target_mbps,
-            config.choke_burst_ms,
-            &clock,
-        )));
-
         // Initialize Server Push Cover Traffic state
         let server_push_state = Arc::new(Mutex::new(ServerPushState::new_with_clock(
             &clock,
@@ -241,7 +232,6 @@ impl StealthManager {
             escalated: AtomicBool::new(false),
             escalated_until: Arc::new(Mutex::new(None)),
             prefer_masque: AtomicBool::new(false),
-            rate_choker,
             server_push_state,
             server_push_runtime_enabled: std::sync::atomic::AtomicBool::new(false),
             probe_hits: Arc::new(AtomicUsize::new(0)),
@@ -490,6 +480,13 @@ impl StealthManager {
         config.set_initial_max_streams_bidi(fingerprint.initial_max_streams_bidi);
         config.set_max_idle_timeout(fingerprint.max_idle_timeout);
 
+        if self.config.enable_realtime_choke && self.config.choke_target_mbps > 0 {
+            let bytes_per_sec = u64::from(self.config.choke_target_mbps).saturating_mul(125_000);
+            if bytes_per_sec > 0 {
+                config.set_max_pacing_rate(bytes_per_sec);
+            }
+        }
+
         // Chrome-like ACK policy tuned per browser profile.
         // Reuse the already-held `fingerprint` guard: re-locking the same
         // non-reentrant mutex here would deadlock (the guard acquired above is
@@ -631,11 +628,9 @@ impl StealthManager {
     /// Does NOT block the thread.
     ///
     /// `ack_only` marks datagrams carrying no ack-eliciting frames (pure ACK /
-    /// PADDING / CONNECTION_CLOSE). They bypass FlowShaper jitter: delaying
-    /// pure ACKs inflates the peer's RTT measurement without changing the
-    /// wire-visible data-flow shape the jitter is meant to decorrelate. The
-    /// explicit realtime choke still applies - it is a configured bandwidth
-    /// cap that must hold for every byte leaving the socket.
+    /// PADDING / CONNECTION_CLOSE). They are never delayed. A manual bandwidth
+    /// cap, when enabled, replaces the congestion controller pacing rate and
+    /// does not add a second sleep.
     pub(crate) fn process_outgoing_packet(
         &self,
         _payload: &mut [u8],
@@ -643,25 +638,16 @@ impl StealthManager {
     ) -> Option<std::time::Duration> {
         // Shaping delays are merged in core::QuicFuscateConnection::send() with transport
         // jitter (when active). One release gate: the shared deferral window.
-        // - explicit realtime choke -> RateChoker
-        // - Anti-DPI without choke -> FlowShaper (ack-eliciting packets only)
+        // Stealth MAX jitter applies only to ack-eliciting packets and is
+        // clamped to PTO/4 at the send clock. A manual bandwidth cap, if set,
+        // replaces the pacer rate instead of sleeping here.
         let mut total_delay = std::time::Duration::ZERO;
-        let mut choked_bytes = 0u64;
         let anti_mode = matches!(self.config.mode, StealthMode::StealthMax);
 
-        if self.config.enable_realtime_choke {
-            if let Ok(mut guard) = self.rate_choker.lock() {
-                if let Some(choker) = guard.as_mut() {
-                    let len = _payload.len();
-                    if len > 0 {
-                        total_delay = choker.shape(len);
-                        if !total_delay.is_zero() {
-                            choked_bytes = len as u64;
-                        }
-                    }
-                }
-            }
-        } else if anti_mode && !ack_only {
+        // The congestion controller is the only continuous limiter. A manual
+        // bandwidth cap replaces the pacer rate in `apply_utls_profile`.
+        // RateChoker::shape does not add a second delay on top of that.
+        if !ack_only && !self.config.enable_realtime_choke && anti_mode {
             if let Some(flow_shaper) = &self.flow_shaper {
                 total_delay = flow_shaper.apply_jitter() + flow_shaper.apply_flight_pacing(false);
             }
@@ -669,12 +655,8 @@ impl StealthManager {
 
         // Telemetry for calculated delay (Async Mode)
         if !total_delay.is_zero() {
-            // We count this as "sleep" even if we yield async
             let ms = total_delay.as_millis() as u64;
             crate::telemetry::CHOKE_SLEEP_MS.inc_by(ms);
-            if choked_bytes > 0 {
-                crate::telemetry::CHOKED_BYTES.inc_by(choked_bytes);
-            }
         }
 
         // Record packet into history to consume PacketInfo fields. ACK-only
@@ -684,10 +666,8 @@ impl StealthManager {
             if let Some(shaper) = &self.flow_shaper {
                 let ty = if ack_only {
                     StealthPacketClass::Ack
-                } else if choked_bytes == 0 {
-                    StealthPacketClass::Data
                 } else {
-                    StealthPacketClass::Retransmit
+                    StealthPacketClass::Data
                 };
                 shaper.record_and_prune(_payload.len(), ty);
             }
@@ -824,14 +804,6 @@ impl StealthManager {
                 // may raise padding, timing, cover traffic and MASQUE hints,
                 // but it must not rotate fingerprints or fronting hosts inside
                 // an already-established connection.
-
-                // Anti-DPI mode with realtime choke: activate rate choker.
-                let anti_mode = matches!(self.config.mode, StealthMode::StealthMax);
-                if anti_mode && self.config.enable_realtime_choke {
-                    if let Ok(mut guard) = self.rate_choker.lock() {
-                        *guard = RateChoker::new_with_clock(50, 12, &self.clock);
-                    }
-                }
             }
         } else {
             // Threshold not met - log but do not escalate.

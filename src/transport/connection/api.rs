@@ -845,6 +845,12 @@ impl Connection {
             (None, None) => None,
         }
     }
+
+    /// Current PTO duration. Zero when the recovery timer has no positive delay.
+    pub(crate) fn current_pto_delay(&self) -> std::time::Duration {
+        let now = self.clock.now();
+        self.recovery.pto_deadline(now).saturating_duration_since(now)
+    }
     /// True if we can send at least one datagram of size `sz` within cwnd
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn can_send(&self, sz: usize) -> bool {

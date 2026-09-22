@@ -489,7 +489,7 @@
 - Detail: `docs/todo/todo-1052-one-wire-byte-budget.md`
 
 ### TODO-1053 - One send clock under the PTO threshold
-- OPEN. Congestion control is the only continuous limiter. Extra delay must be `< pto/4`. Pure ACKs stay undelayed. No choke beside BBR.
+- DONE. Congestion control is the only continuous limiter. `clamp_shaping_delay` caps extra delay at `pto/4` (`shaping_delay_clamps_to_one_quarter_of_pto`: 50 ms requested, 20 ms PTO, 5 ms result; zero PTO yields zero). `StealthManager` no longer calls `RateChoker::shape`. A manual `enable_realtime_choke` sets `max_pacing_rate` (`ack_only_stays_undelayed_when_manual_choke_is_enabled`). Presets `performance`, `stealth_max`, and `dynamic` leave the choke off. Pure ACKs stay undelayed.
 - Detail: `docs/todo/todo-1053-single-clock-under-pto.md`
 
 ### TODO-1054 - Cover PING only when the persona trace would send

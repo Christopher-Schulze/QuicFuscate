@@ -845,6 +845,8 @@ pub static ACK_DELAY_BUCKET_GT_256MS: Counter = Counter::new();
 
 /// Cumulative stealth choke/pacing sleep time in milliseconds.
 pub static CHOKE_SLEEP_MS: Counter = Counter::new();
+/// Times a shaping delay was reduced to the PTO/4 bound.
+pub static CHOKE_DELAY_CLAMPED_TOTAL: Counter = Counter::new();
 /// Total bytes delayed by stealth choke/pacing.
 pub static CHOKED_BYTES: Counter = Counter::new();
 

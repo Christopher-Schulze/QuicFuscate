@@ -1153,10 +1153,7 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            self.stealth_window_tick(
-                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter),
-                now,
-            );
+            self.stealth_window_tick(self.bounded_stealth_release(now, delay_opt, transport_jitter), now);
         }
         // Every datagram materialized inside a drain epoch spends one unit
         // of its budget - including the packet whose window edge armed it.
@@ -1287,10 +1284,7 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            self.stealth_window_tick(
-                Self::compute_outbound_stealth_release(now, delay_opt, transport_jitter),
-                now,
-            );
+            self.stealth_window_tick(self.bounded_stealth_release(now, delay_opt, transport_jitter), now);
             self.reorder_window_tick(&send_info, now);
             // A window edge expiring inside the ticks arms the drain
             // mid-call: this packet belongs to the burst batch, so it
@@ -1353,6 +1347,46 @@ impl QuicFuscateConnection {
             return;
         };
         self.outbound_pacer.record_send(now, bytes, self.conn.send_quantum(), rate);
+    }
+
+    /// Caps a requested shaping delay at `pto / 4`. An unknown or zero PTO
+    /// yields zero delay so the send clock cannot invent loss.
+    pub(crate) fn clamp_shaping_delay(requested: Duration, pto: Duration) -> Duration {
+        if requested.is_zero() || pto < Duration::from_nanos(4) {
+            return Duration::ZERO;
+        }
+        let bound = pto / 4;
+        if requested <= bound {
+            requested
+        } else {
+            bound
+        }
+    }
+
+    fn bounded_stealth_release(
+        &self,
+        now: Instant,
+        stealth_manager_delay: Option<Duration>,
+        transport_jitter: Option<Duration>,
+    ) -> Option<Instant> {
+        let pto = self.conn.current_pto_delay();
+        let stealth_manager_delay = stealth_manager_delay.map(|delay| {
+            let clamped = Self::clamp_shaping_delay(delay, pto);
+            if clamped < delay {
+                crate::telemetry::CHOKE_DELAY_CLAMPED_TOTAL.inc();
+            }
+            clamped
+        });
+        let transport_jitter = transport_jitter.map(|delay| {
+            let clamped = Self::clamp_shaping_delay(delay, pto);
+            if clamped < delay {
+                crate::telemetry::CHOKE_DELAY_CLAMPED_TOTAL.inc();
+            }
+            clamped
+        });
+        let stealth_manager_delay = stealth_manager_delay.filter(|delay| !delay.is_zero());
+        let transport_jitter = transport_jitter.filter(|delay| !delay.is_zero());
+        Self::compute_outbound_stealth_release(now, stealth_manager_delay, transport_jitter)
     }
 
     /// Merges StealthManager delay and transport jitter into one release instant.

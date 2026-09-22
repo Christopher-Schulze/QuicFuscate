@@ -1028,6 +1028,21 @@ fn outbound_stealth_release_merges_to_single_latest_deadline() {
 }
 
 #[test]
+fn shaping_delay_clamps_to_one_quarter_of_pto() {
+    let requested = Duration::from_millis(50);
+    let pto = Duration::from_millis(20);
+    assert_eq!(
+        QuicFuscateConnection::clamp_shaping_delay(requested, pto),
+        Duration::from_millis(5)
+    );
+    assert_eq!(
+        QuicFuscateConnection::clamp_shaping_delay(Duration::from_millis(2), pto),
+        Duration::from_millis(2)
+    );
+    assert!(QuicFuscateConnection::clamp_shaping_delay(requested, Duration::ZERO).is_zero());
+}
+
+#[test]
 fn outbound_stealth_release_none_when_no_delays() {
     let now = Instant::now();
     assert!(QuicFuscateConnection::compute_outbound_stealth_release(now, None, None).is_none());

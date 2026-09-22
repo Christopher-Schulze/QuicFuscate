@@ -164,6 +164,23 @@ mod stealth_coverage_tests {
     }
 
     #[test]
+    fn ack_only_stays_undelayed_when_manual_choke_is_enabled() {
+        let mut cfg = StealthConfig::stealth_max();
+        cfg.enable_realtime_choke = true;
+        cfg.choke_target_mbps = 1;
+        cfg.choke_burst_ms = 10;
+        let m = make_manager(cfg);
+        let mut packet = vec![0u8; 2000];
+        assert!(m.process_outgoing_packet(&mut packet, true).is_none());
+        assert!(m.process_outgoing_packet(&mut packet, false).is_none());
+        let mut config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("transport config");
+        m.apply_utls_profile(&mut config);
+        assert_eq!(config.max_pacing_rate, Some(1 * 125_000));
+    }
+
+    #[test]
     fn rate_choker_none_when_zero_target() {
         assert!(RateChoker::new(0, 100).is_none());
     }
