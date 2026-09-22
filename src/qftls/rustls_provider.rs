@@ -161,7 +161,6 @@ fn crypto_provider_for_profile(
 /// (TODO-1064). Only a shared outer hop supplies `ech_config_list`; every
 /// other path passes `None` and gets a plain TLS 1.3 builder. An advertised
 /// list that rustls rejects is a dial error — never silently downgraded.
-#[cfg(feature = "rustls-aws-lc")]
 pub(super) fn ech_mode_for_config_list(
     ech_config_list: Option<&[u8]>,
 ) -> Result<Option<rustls::client::EchMode>, ConnectionError> {
@@ -170,7 +169,7 @@ pub(super) fn ech_mode_for_config_list(
     };
     let config = rustls::client::EchConfig::new(
         rustls::pki_types::EchConfigListBytes::from(bytes),
-        rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
+        qf_hpke::ALL_SUPPORTED_SUITES,
     )
     .map_err(|e| ConnectionError::TlsError(format!("ECHConfigList rejected: {e}")))?;
     Ok(Some(rustls::client::EchMode::Enable(config)))
@@ -730,20 +729,9 @@ impl RustlsProviderImpl {
 
         let builder =
             ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()));
-        #[cfg(feature = "rustls-aws-lc")]
         let builder = match ech_mode_for_config_list(ech_config_list)? {
             Some(mode) => builder.with_ech(mode),
             None => builder.with_protocol_versions(&[&rustls::version::TLS13]),
-        };
-        #[cfg(not(feature = "rustls-aws-lc"))]
-        let builder = {
-            if ech_config_list.is_some() {
-                log::warn!(
-                    "ECHConfigList resolved for this hop but the rustls-aws-lc feature is off; \
-                     dialing without ECH"
-                );
-            }
-            builder.with_protocol_versions(&[&rustls::version::TLS13])
         };
         let builder = builder
             .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
@@ -1014,7 +1002,6 @@ impl RustlsProviderImpl {
         let roots = Self::build_client_root_store(self.client_ca_path.as_deref())?;
         let builder =
             ClientConfig::builder_with_provider(Arc::new(crypto_provider_for_profile(profile)?));
-        #[cfg(feature = "rustls-aws-lc")]
         let builder = if profile.enable_ech {
             match ech_mode_for_config_list(self.ech_config_list.as_deref())? {
                 Some(mode) => builder.with_ech(mode),
@@ -1024,16 +1011,6 @@ impl RustlsProviderImpl {
             // A persona that never sends ECH (e.g. Brave) must not advertise it
             // even when the hop's DNS record offers a config — the ClientHello
             // shape stays faithful to the captured fingerprint.
-            builder.with_protocol_versions(&[&rustls::version::TLS13])
-        };
-        #[cfg(not(feature = "rustls-aws-lc"))]
-        let builder = {
-            if self.ech_config_list.is_some() {
-                log::warn!(
-                    "ECHConfigList resolved for this hop but the rustls-aws-lc feature is off; \
-                     dialing without ECH"
-                );
-            }
             builder.with_protocol_versions(&[&rustls::version::TLS13])
         };
         let builder = builder

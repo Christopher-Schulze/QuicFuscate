@@ -885,17 +885,17 @@ fn test_all_browser_profiles_have_cipher_suites() {
     }
 }
 
-#[cfg(feature = "rustls-aws-lc")]
 mod ech_tests {
     //! TODO-1064: ECH only rides the shared outer hop. These tests build real
     //! rustls QUIC client connections with a DNS-sourced ECHConfigList and
-    //! inspect the emitted ClientHello on the wire.
+    //! inspect the emitted ClientHello on the wire. The HPKE suites come from
+    //! qf-hpke (hpke-rs rustcrypto backend) — no aws-lc-sys needed.
 
     use super::*;
 
     /// Wire-format ECHConfigList (draft-ietf-tls-esni-18 §4): one config with
-    /// DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256/AES-128-GCM — a suite rustls
-    /// ships in `aws_lc_rs::hpke::ALL_SUPPORTED_SUITES`.
+    /// DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256/AES-128-GCM — a suite qf-hpke
+    /// ships in `ALL_SUPPORTED_SUITES`.
     fn fixture_ech_config_list() -> Vec<u8> {
         let mut contents = Vec::new();
         contents.push(1u8); // key_config.config_id

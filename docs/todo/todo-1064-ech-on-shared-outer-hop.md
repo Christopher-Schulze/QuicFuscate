@@ -59,13 +59,15 @@ RFC 9849 (2026-03) encrypts the inner ClientHello, including SNI. QUIC can carry
 
 - **rustls 0.23.45 already carries client ECH** (`rustls::client::EchConfig`,
   `EchMode::Enable`, `ConfigBuilder::with_ech`). No bump needed, no fork, no
-  hand-rolled extension bytes. HPKE suites come from rustls' own
-  `crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES` behind the `rustls-aws-lc`
-  cargo feature — the ring provider ships no HPKE. The feature is part of the
-  default feature set (promoted after review; it only activates the ECH code
-  paths, the handshake provider stays ring). A `--no-default-features` build
-  without it logs once and dials a normal ClientHello. `aws-lc-sys` needs a
-  C toolchain (Windows MSVC: CMake + NASM).
+  hand-rolled extension bytes. HPKE suites come from `qf-hpke`
+  (`crates/qf-hpke`), a pure-Rust `rustls::crypto::hpke::Hpke` provider
+  built on `hpke-rs` with the `rustcrypto` backend — the ring provider ships
+  no HPKE and aws-lc-sys was dropped from the default tree after review.
+  The provider is always compiled in; the `rustls-aws-lc` feature stays
+  declared for bakeoff comparisons only. Coverage: X25519/P-256/P-384 KEMs
+  x AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305; a list offering only P-521
+  suites fails closed at `EchConfig::new` (the rustcrypto backend has no
+  P-521).
 - **DoH path**: `qf_dns::https_record` builds the type-65 query and extracts
   the `ech` SvcParam (key 5) from the answer section — bounded parse,
   compression-aware names, fail-closed on malformed RDATA. The wire value is
@@ -94,8 +96,8 @@ RFC 9849 (2026-03) encrypts the inner ClientHello, including SNI. QUIC can carry
 
 - `qf-dns`: 6 `https_record` tests — query wire shape, `ech` present/absent,
   non-HTTPS answers ignored, malformed RDATA → `None`.
-- `qftls::tests::ech_tests` (runs by default; `rustls-aws-lc` is in the
-  default set): `EchConfig` construction
+- `qftls::tests::ech_tests` (always compiled; qf-hpke needs no feature):
+  `EchConfig` construction
   accept/reject paths plus **real wire assertions** — the emitted ClientHello
   carries extension `0xfe0d` and the outer SNI becomes the ECH `public_name`
   for an ECH persona; a Brave persona and an absent list both emit no `0xfe0d`.

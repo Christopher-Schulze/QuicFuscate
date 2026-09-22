@@ -13,6 +13,7 @@ members = [
     "crates/qf-fec",
     "crates/qf-firewall",
     "crates/qf-harness",
+    "crates/qf-hpke",
     "crates/qf-instrumentation",
     "crates/qf-logging",
     "crates/qf-memory-lock",
@@ -64,6 +65,7 @@ qf-cpu = { path = "crates/qf-cpu" }
 qf-crypto = { path = "crates/qf-crypto" }
 qf-control-plane = { path = "crates/qf-control-plane" }
 qf-dns = { path = "crates/qf-dns" }
+qf-hpke = { path = "crates/qf-hpke" }
 qf-engine-types = { path = "crates/qf-engine-types" }
 qf-error = { path = "crates/qf-error" }
 qf-fec = { path = "crates/qf-fec" }
@@ -181,10 +183,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # other platforms), every runtime entry probes the kernel and falls back to
 # sendmmsg/per-packet, and QUICFUSCATE_IO_URING=0|off is the operator
 # kill-switch for environments where ring setup must not be attempted.
-# rustls-aws-lc is in the default set: it supplies the HPKE suites real ECH
-# needs on the shared outer hop (TODO-1064); without it the hop dials without
-# ECH. aws-lc-sys requires a C toolchain (Windows MSVC: CMake + NASM).
-default = ["client", "server", "rate_limiter", "io_uring", "rustls-aws-lc"]
+# ECH is always compiled in: the HPKE suites it needs come from qf-hpke
+# (hpke-rs with the pure-Rust rustcrypto backend), so no aws-lc-sys C
+# toolchain is required. rustls-aws-lc stays declared for bakeoff
+# comparisons only.
+default = ["client", "server", "rate_limiter", "io_uring"]
 
 # --- Role features ---
 client = []
