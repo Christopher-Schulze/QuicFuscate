@@ -120,6 +120,13 @@ pub struct QuicFuscateConnection {
     h3_tunnel_response_started: HashSet<u64>,
     h3_tunnel_uplink_fallback_reported: bool,
     h3_tunnel_downlink_fallback_reported: bool,
+    /// In-flight disguise migration (new_local, peer) awaiting path validation
+    /// (TODO-1056). The runtime keeps the old socket as standby until the
+    /// outcome settles.
+    pending_disguise_migration: Option<(SocketAddr, SocketAddr)>,
+    /// Settled disguise-migration outcome for the runtime loop (TODO-1056):
+    /// `true` = validated, commit the new socket; `false` = failed, roll back.
+    disguise_migration_outcome: Option<bool>,
     last_telemetry: std::time::Instant,
     // Observer for transport telemetry -> FEC/ACK policy coupling.
     transport_observer: Arc<FecTransportObserver>,
@@ -632,6 +639,8 @@ impl QuicFuscateConnection {
             h3_tunnel_response_started: HashSet::new(),
             h3_tunnel_uplink_fallback_reported: false,
             h3_tunnel_downlink_fallback_reported: false,
+            pending_disguise_migration: None,
+            disguise_migration_outcome: None,
             last_telemetry: clock.now(),
             transport_observer: obs.clone(),
             masque_cb: None,
@@ -1355,6 +1364,57 @@ impl QuicFuscateConnection {
             .map_err(|_| crate::transport::Error::NoViablePath)
     }
 
+    /// Whether the stealth disguise-migration timer fired (TODO-1056).
+    ///
+    /// Speed profiles (`off`, `performance`) never report due. The runtime
+    /// loop calls this on its housekeeping tick and, when due, binds a fresh
+    /// UDP socket and calls [`Self::begin_disguise_migration`].
+    pub fn disguise_migration_due(&self) -> bool {
+        self.stealth_manager.disguise_migration_due()
+    }
+
+    /// Starts a disguise migration onto `new_local` (TODO-1056).
+    ///
+    /// Issues PATH_CHALLENGE validation for the new local address through the
+    /// existing path API. The outcome surfaces via
+    /// [`Self::take_disguise_migration_outcome`]; the caller keeps the old
+    /// socket alive as a standby until then so a failed validation falls back
+    /// to the old path instead of dropping the tunnel.
+    pub fn begin_disguise_migration(
+        &mut self,
+        new_local: SocketAddr,
+    ) -> Result<u64, crate::transport::Error> {
+        if new_local == self.local_addr {
+            return Err(crate::transport::Error::NoViablePath);
+        }
+        let path_id = self
+            .conn
+            .migrate(new_local, self.peer_addr)
+            .map_err(|_| crate::transport::Error::NoViablePath)?;
+        self.pending_disguise_migration = Some((new_local, self.peer_addr));
+        Ok(path_id)
+    }
+
+    /// Drains the settled disguise-migration outcome: `true` = the new path
+    /// validated (caller commits the new socket), `false` = validation failed
+    /// (caller rolls back to the standby socket). `None` = still pending or
+    /// none in flight.
+    pub fn take_disguise_migration_outcome(&mut self) -> Option<bool> {
+        self.disguise_migration_outcome.take()
+    }
+
+    /// Whether a disguise migration is awaiting validation.
+    pub fn disguise_migration_pending(&self) -> bool {
+        self.pending_disguise_migration.is_some()
+    }
+
+    /// Redraws the disguise-migration timer without a path event (TODO-1056).
+    /// Callers use this when the attempt could not even start (socket bind or
+    /// `migrate` failure) so a due timer does not retry every loop tick.
+    pub fn note_disguise_migration_attempt(&self) {
+        self.stealth_manager.note_disguise_migration();
+    }
+
     /// Returns the Host header used for HTTP requests on this connection.
     /// With domain fronting removed (TODO-1048) it always equals the SNI host.
     pub fn host_header(&self) -> &str {
@@ -1466,9 +1526,22 @@ impl QuicFuscateConnection {
                         self.peer_addr = peer;
                         self.local_addr = local;
                         telemetry!(telemetry::PATH_MIGRATIONS.inc());
+                        // TODO-1056: every validated path counts as the disguise
+                        // event — a real path change redraws the next timer.
+                        if self.pending_disguise_migration == Some((local, peer)) {
+                            self.pending_disguise_migration = None;
+                            self.disguise_migration_outcome = Some(true);
+                        }
+                        self.stealth_manager.note_disguise_migration();
                     }
                     crate::transport::PathEvent::FailedValidation(local, peer) => {
                         warn!("Path validation failed: {local}->{peer}");
+                        if self.pending_disguise_migration == Some((local, peer)) {
+                            self.pending_disguise_migration = None;
+                            self.disguise_migration_outcome = Some(false);
+                            self.stealth_manager.note_disguise_migration();
+                            telemetry!(telemetry::DISGUISE_MIGRATION_FAILURES.inc());
+                        }
                     }
                     crate::transport::PathEvent::Closed(local, peer) => {
                         info!("Path closed: {local}->{peer}");

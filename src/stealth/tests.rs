@@ -623,44 +623,6 @@ fn http3_masquerade_safari_omits_sec_fetch_headers() {
         .all(|header| { forbidden.iter().all(|name| !header.name().eq_ignore_ascii_case(name)) }));
 }
 
-// --- FingerprintRotation Tests (via StealthManager) ---
-
-#[test]
-fn fingerprint_rotation_fixed_mode_stable() {
-    use super::{RotationMode, StealthConfig};
-    let optimization = Arc::new(OptimizationManager::new());
-    let crypto = Arc::new(CryptoManager::new());
-    let mut cfg = StealthConfig::stealth();
-    cfg.fingerprint_rotation_mode = RotationMode::Fixed;
-    cfg.enable_fingerprint_rotation = false;
-    cfg.fingerprint_rotation_interval = 0;
-    let mgr = StealthManager::new(cfg, optimization, crypto);
-
-    let name_before = mgr.runtime_tls_profile(None).name.clone();
-    for _ in 0..20 {
-        mgr.maybe_rotate_fingerprint();
-    }
-    let name_after = mgr.runtime_tls_profile(None).name;
-    assert_eq!(name_before, name_after, "Fixed mode must not change fingerprint");
-}
-
-#[test]
-fn fingerprint_rotation_all_mode_no_panic_under_load() {
-    use super::{RotationMode, StealthConfig};
-    let optimization = Arc::new(OptimizationManager::new());
-    let crypto = Arc::new(CryptoManager::new());
-    let mut cfg = StealthConfig::stealth();
-    cfg.fingerprint_rotation_mode = RotationMode::All;
-    cfg.enable_fingerprint_rotation = true;
-    // interval=0 causes early-return (guarded), so this tests the guard path
-    cfg.fingerprint_rotation_interval = 0;
-    let mgr = StealthManager::new(cfg, optimization, crypto);
-    // Must never panic across many calls
-    for _ in 0..50 {
-        mgr.maybe_rotate_fingerprint();
-    }
-}
-
 // --- ActiveProbeDetector Tests ---
 
 #[test]
@@ -717,7 +679,6 @@ fn test_escalate_to_level_0_no_overhead() {
     mgr.escalate_to_level(0);
     assert_eq!(mgr.runtime_padding_rate(), 0);
     assert_eq!(mgr.runtime_timing_rate(), 0);
-    assert_eq!(mgr.runtime_rotation_rate(), 0);
 }
 
 #[test]
@@ -732,7 +693,6 @@ fn test_escalate_to_level_1_partial_padding() {
     assert!(mgr.runtime_padding_rate() > 0, "padding should be active at level 1");
     assert!(mgr.runtime_padding_rate() <= 100, "padding rate should be <= 100");
     assert_eq!(mgr.runtime_timing_rate(), 0, "timing should be off at level 1");
-    assert_eq!(mgr.runtime_rotation_rate(), 0, "rotation should be off at level 1");
 }
 
 #[test]
@@ -745,7 +705,6 @@ fn test_escalate_to_level_2_full_overhead() {
     mgr.escalate_to_level(2);
     assert_eq!(mgr.runtime_padding_rate(), 100);
     assert_eq!(mgr.runtime_timing_rate(), 100);
-    assert_eq!(mgr.runtime_rotation_rate(), 0, "active persona rotation stays disabled");
 }
 
 #[test]
@@ -760,7 +719,6 @@ fn test_de_escalate_from_level_2_to_0() {
     mgr.de_escalate_to_level(0);
     assert_eq!(mgr.runtime_padding_rate(), 0);
     assert_eq!(mgr.runtime_timing_rate(), 0);
-    assert_eq!(mgr.runtime_rotation_rate(), 0);
 }
 
 #[test]

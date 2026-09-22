@@ -934,6 +934,8 @@ pub static PACKETS_RECEIVED: Counter = Counter::new();
 pub static PACKETS_LOST: Counter = Counter::new();
 /// Total QUIC connection path migrations.
 pub static PATH_MIGRATIONS: Counter = Counter::new();
+/// Total failed disguise migrations (validation never completed; old path kept).
+pub static DISGUISE_MIGRATION_FAILURES: Counter = Counter::new();
 /// Total stealth-encoded packets produced.
 pub static ENCODED_PACKETS: Counter = Counter::new();
 /// Total stealth-decoded packets consumed.

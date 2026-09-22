@@ -4,7 +4,7 @@ title: Persona change via connection migration, not a 120 s handshake
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1047]
 ---
@@ -43,10 +43,46 @@ The ClientHello is finished after the handshake. Rotating a User-Agent inside th
 
 ## Sub-Tasks
 
-- [ ] Validation rejects timer-driven handshakes.
-- [ ] Migration timer uses the existing path API.
-- [ ] Test: advancing 120 s does not start a new ClientHello.
-- [ ] Test: one migration changes the local port and connection ID and keeps the same TLS keys.
+- [x] Validation rejects timer-driven handshakes.
+- [x] Migration timer uses the existing path API.
+- [x] Test: advancing 120 s does not start a new ClientHello.
+- [x] Test: one migration changes the local port and connection ID and keeps the same TLS keys.
+
+## Outcome (2026-09-27)
+
+- Mid-connection timer removed: `StealthManager::maybe_rotate_fingerprint`,
+  `profile_pool`/`profile_index`/`last_rotation`, `runtime_rotation_rate`, and
+  the escalated 30 s rotation hack are gone. The only surviving rotation is the
+  next-session persona cursor (`StealthRuntimeOwner::spawn_profile_rotation`
+  mutates `initial_browser`/`initial_os` read by the next dial — never the live
+  connection). No config value can express a mid-connection handshake timer;
+  `enable_fingerprint_rotation`/`fingerprint_rotation_interval` field docs now
+  state next-session semantics explicitly.
+- New disguise-migration draw on `StealthManager`: enabled for `stealth`,
+  `stealth_max`, `dynamic`; off for `off`/`performance`. Uniform 120..=600 s
+  draw per connection and per event (`draw_disguise_migration_delay`),
+  `disguise_migration_due()`, `note_disguise_migration()` (redraw on success,
+  failure, and every real `Validated` path event — real NAT rebinds count as
+  the disguise event).
+- `QuicFuscateConnection`: `disguise_migration_due()`,
+  `begin_disguise_migration(new_local)` -> `conn.migrate` (PATH_CHALLENGE via
+  the existing path-validation API), `take_disguise_migration_outcome()`,
+  `disguise_migration_pending()`, `note_disguise_migration_attempt()` (redraw
+  on start failures — no 5 ms retry storm).
+- Client runtime loop: housekeeping tick binds an ephemeral UDP socket via
+  `bind_connected_udp_socket` (extracted shared helper), swaps it in, and keeps
+  the old socket as `standby_socket` until validation settles — `Validated`
+  commits, `FailedValidation` rolls back to the standby socket so the old path
+  survives (plus `DISGUISE_MIGRATION_FAILURES` counter + Prometheus export).
+- DCID stays stable across the port change — there is no NEW_CONNECTION_ID
+  machinery; the wire event is a source-port change, matching a real NAT
+  rebind. Documented honestly.
+- Tests: `disguise_migration_never_due_for_speed_profiles`,
+  `disguise_migration_fires_once_per_draw_for_stealth`,
+  `elapsed_rotation_interval_starts_no_handshake_and_keeps_persona`,
+  `begin_disguise_migration_changes_local_port_and_keeps_persona`.
+- Server side needs no timer: peer port changes are adopted through
+  `observe_incoming_path` (PeerPath validation) as before.
 
 ## Acceptance
 

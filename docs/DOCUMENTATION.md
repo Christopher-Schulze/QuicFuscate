@@ -827,7 +827,7 @@ Runtime wiring is cohesive rather than feature-isolated:
 - Jitter direction: under ECN congestion (CE > 5%) or high RTT spikes, jitter increases to 85% of budget (more randomization defeats timing fingerprints). Only on the external-pacing clean path is it reduced.
 - `jitter_max_us` default: 5000 us (raised from 1500; 1500 was too small to meaningfully randomize timing against a modern DPI system).
 - Level-hint passthrough: Brain computes an `effective_level` (0/1/2) via hysteresis and passes it as `level_hint` to `derive_intelligent_runtime_policy`, enabling level-dependent padding and cover decisions.
-- Runtime overrides: `StealthManager` exposes `runtime_padding_rate`, `runtime_timing_rate`, and retained `runtime_rotation_rate` atomics. Padding and timing are set by `escalate_to_level(n)` (0=0%, 1=50% configurable padding and 0% timing, 2=100% padding and timing), then flow through `StealthRuntimePolicy` -> `StealthRuntimeDelta` -> connection config and are consumed by `compute_stealth_padding()` and `transport_stealth_jitter_delay()`. `runtime_rotation_rate` is intentionally kept at 0 for active sessions; fingerprint/persona rotation is next-session only.
+- Runtime overrides: `StealthManager` exposes `runtime_padding_rate` and `runtime_timing_rate` atomics. Padding and timing are set by `escalate_to_level(n)` (0=0%, 1=50% configurable padding and 0% timing, 2=100% padding and timing), then flow through `StealthRuntimePolicy` -> `StealthRuntimeDelta` -> connection config and are consumed by `compute_stealth_padding()` and `transport_stealth_jitter_delay()`. Fingerprint/persona rotation is next-session only; the mid-connection timer was removed (TODO-1056).
 - Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0->1 requires >=3 probes in 60s; 1->2 requires >=8 probes in 120s. A single probe does NOT trigger escalation. The state stores timestamp buckets at millisecond resolution, aggregates probes sharing a millisecond, keeps at most 120,001 buckets for the 120-second window, and maintains independent 60-/120-second counters. De-escalation drops at most one level per configurable quiet period (default: 300s), measured from the latest probe or level change. Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (default 50).
 - Explicit transport overrides win over Brain steering. If an operator sets ACK, pacing, jitter, padding, granularity, or mimic-bias overrides, the corresponding Intelligent-mode Brain actuator is locked out for that connection instead of silently re-overriding the operator choice at runtime.
 - FEC hints: updates the connection-local `BrainFecHints` state consumed by that connection's `FecTransportObserver`; no FEC policy crosses connection boundaries.
@@ -3787,6 +3787,18 @@ the authenticated Core H3 connection.
 Fingerprint/persona rotation is connection-scoped. The settings below remain useful as a sequence
 source, but an established connection does not change browser, operating system, TLS, H3, or QPACK
 persona mid-session. Rotation selects the next persona only for a new connection or explicit reconnect.
+
+#### Disguise Migration (TODO-1056)
+
+While a connection lives, the disguise event is a QUIC port migration — never a
+new handshake. `stealth`, `stealth_max`, and `dynamic` draw a uniform 120-600 s
+interval per connection and per event; on the draw the client runtime binds a
+fresh UDP socket on an ephemeral port and issues `PATH_CHALLENGE` validation
+through the path API. The old socket stays as standby until the path validates:
+on `FailedValidation` the runtime rolls back to the standby socket and the old
+path survives (`quicfuscate_disguise_migration_failures_total`). `off` and
+`performance` never migrate for disguise. The destination connection ID is
+stable across the port change — the wire signature matches a real NAT rebind.
 
 #### Fingerprint Rotation Configuration
 ```toml

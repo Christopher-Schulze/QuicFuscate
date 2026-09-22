@@ -321,57 +321,64 @@ mod stealth_coverage_tests {
         assert_eq!(rotator.targets(), ["cover-a.example", "cover-b.example"]);
     }
 
+    // =========================================================================
+    // TODO-1056: disguise migration timer (2-10 min draw, stealth modes only)
+    // =========================================================================
+
     #[test]
-    fn active_persona_does_not_rotate_mid_session() {
-        let mut cfg = StealthConfig::stealth_max();
-        cfg.fingerprint_rotation_interval = 1;
-        let m = make_manager(cfg);
-        let before = m.current_persona_name();
-        {
-            let mut last = m.last_rotation.lock().expect("last rotation lock");
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    fn disguise_migration_never_due_for_speed_profiles() {
+        use qf_common::time_source::test_support::ManualTimeSource;
+        for cfg in [StealthConfig::off(), StealthConfig::performance()] {
+            let clock =
+                ManualTimeSource::new(std::time::Instant::now(), std::time::SystemTime::now());
+            let _guard = crate::time_source::install_for_test(clock.clone());
+            let m = make_manager(cfg);
+            clock.advance(std::time::Duration::from_secs(3600));
+            assert!(!m.disguise_migration_due(), "speed profiles never migrate for disguise");
         }
-
-        m.maybe_rotate_fingerprint();
-
-        assert_eq!(m.current_persona_name(), before);
     }
 
     #[test]
-    fn slot_rotation_selects_only_configured_profiles_for_next_sessions() {
-        let mut cfg = StealthConfig::stealth();
-        cfg.enable_fingerprint_rotation = true;
-        cfg.fingerprint_rotation_mode = RotationMode::Slots;
-        cfg.fingerprint_rotation_interval = 1;
-        cfg.fingerprint_rotation_profiles = vec![
-            (BrowserProfile::Firefox, OsProfile::Linux),
-            (BrowserProfile::Safari, OsProfile::MacOS),
-        ];
-        let m = make_manager(cfg);
-        let active = m.current_persona_name();
+    fn disguise_migration_fires_once_per_draw_for_stealth() {
+        use qf_common::time_source::test_support::ManualTimeSource;
+        let clock = ManualTimeSource::new(std::time::Instant::now(), std::time::SystemTime::now());
+        let _guard = crate::time_source::install_for_test(clock.clone());
+        let m = make_manager(StealthConfig::stealth());
 
-        let first = m.next_session_profile().expect("configured slot pool");
-        assert_eq!(first.browser, BrowserProfile::Firefox);
-        assert_eq!(first.os, OsProfile::Linux);
+        // Draw is uniform in [120, 600]: not due before the minimum, always due
+        // past the maximum.
+        clock.advance(std::time::Duration::from_secs(119));
+        assert!(!m.disguise_migration_due(), "draw never fires before 120 s");
+        clock.advance(std::time::Duration::from_secs(482));
+        assert!(m.disguise_migration_due(), "draw must fire by 601 s");
 
-        {
-            let mut last = m.last_rotation.lock().expect("last rotation lock");
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
-        }
-        m.maybe_rotate_fingerprint();
-        let second = m.next_session_profile().expect("second configured slot");
-        assert_eq!(second.browser, BrowserProfile::Safari);
-        assert_eq!(second.os, OsProfile::MacOS);
-        assert_eq!(m.current_persona_name(), active);
+        // Recording the migration redraws the window — the next attempt is at
+        // least 120 s away again (no retry storm, no fixed cadence).
+        m.note_disguise_migration();
+        assert!(!m.disguise_migration_due(), "redraw starts a fresh window");
+        clock.advance(std::time::Duration::from_secs(119));
+        assert!(!m.disguise_migration_due(), "redraw respects the 120 s floor");
+        clock.advance(std::time::Duration::from_secs(482));
+        assert!(m.disguise_migration_due(), "redraw fires again by 601 s");
+    }
 
-        {
-            let mut last = m.last_rotation.lock().expect("last rotation lock");
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
-        }
-        m.maybe_rotate_fingerprint();
-        let wrapped = m.next_session_profile().expect("wrapped configured slot");
-        assert_eq!(wrapped.browser, BrowserProfile::Firefox);
-        assert_eq!(wrapped.os, OsProfile::Linux);
+    #[test]
+    fn elapsed_rotation_interval_starts_no_handshake_and_keeps_persona() {
+        use qf_common::time_source::test_support::ManualTimeSource;
+        let clock = ManualTimeSource::new(std::time::Instant::now(), std::time::SystemTime::now());
+        let _guard = crate::time_source::install_for_test(clock.clone());
+        // stealth_max historically rotated on a 120 s timer — advancing far past
+        // it must change neither the persona nor the TLS profile name; the only
+        // due signal is the disguise migration draw (TODO-1056).
+        let m = make_manager(StealthConfig::stealth_max());
+        let persona_before = m.current_persona_name();
+        let tls_before = m.runtime_tls_profile(None).name.clone();
+
+        clock.advance(std::time::Duration::from_secs(3600));
+
+        assert_eq!(m.current_persona_name(), persona_before, "no mid-session persona swap");
+        assert_eq!(m.runtime_tls_profile(None).name, tls_before, "no new handshake material");
+        assert!(m.disguise_migration_due(), "the only due signal is the migration draw");
     }
 
     #[test]

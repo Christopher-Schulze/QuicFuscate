@@ -14,12 +14,13 @@ pub struct StealthManager {
     cover_targets: Option<CoverTargetRotator>,
     /// Cryptographic manager for key derivation.
     _crypto_manager: Arc<CryptoManager>,
-    /// Last rotation timestamp
-    last_rotation: Arc<Mutex<std::time::Instant>>,
-    /// Browser/OS profile pool for rotation
-    profile_pool: Arc<Vec<(BrowserProfile, OsProfile)>>,
-    /// Current profile index for rotation
-    profile_index: Arc<AtomicUsize>,
+    /// Whether this connection migrates its UDP port for disguise (TODO-1056).
+    /// Enabled for `stealth`, `stealth_max`, and `dynamic`; off for `off` and
+    /// `performance` — speed profiles never move the path for camouflage.
+    disguise_migration_enabled: bool,
+    /// Next scheduled disguise migration instant (clock domain). Redrawn from
+    /// a uniform 120..=600 s window after every migration or real path change.
+    next_disguise_migration: Mutex<std::time::Instant>,
     /// Active probe detector
     probe_detector: Option<ActiveProbeDetector>,
     /// Flow shaper for jitter and dummy retransmits
@@ -46,10 +47,6 @@ pub struct StealthManager {
     /// Runtime override: timing obfuscation rate 0-100 (set on probe detection or escalation).
     /// Level 0 = 0%, Level 1 = 0%, Level 2 = 100%.
     runtime_timing_rate: AtomicU8,
-    /// Runtime override retained for telemetry/compatibility. Active fingerprint
-    /// rotation is intentionally kept at 0 for established connections; persona
-    /// changes are deferred to future sessions.
-    runtime_rotation_rate: AtomicU8,
     /// Optimization manager for memory pools
     _optimization_manager: Arc<OptimizationManager>,
     /// Reality Fallback Proxy for active probe handling
@@ -128,7 +125,12 @@ impl StealthManager {
 
         let cover_targets = Self::cover_targets_for_config(&config);
 
-        let profile_pool = Arc::new(config.rotation_profile_slots());
+        let disguise_migration_enabled = matches!(
+            config.mode,
+            StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Dynamic
+        );
+        let next_disguise_migration =
+            Mutex::new(clock.now() + Self::draw_disguise_migration_delay());
 
         let probe_detector = if config.dynamic_enabled
             || config.enable_traffic_padding
@@ -220,9 +222,8 @@ impl StealthManager {
             fingerprint,
             cover_targets,
             _crypto_manager: crypto_manager,
-            last_rotation: Arc::new(Mutex::new(clock.now())),
-            profile_pool,
-            profile_index: Arc::new(AtomicUsize::new(0)),
+            disguise_migration_enabled,
+            next_disguise_migration,
             probe_detector,
             flow_shaper,
             cover_traffic,
@@ -238,7 +239,6 @@ impl StealthManager {
             intelligent_level_hints,
             runtime_padding_rate: AtomicU8::new(0),
             runtime_timing_rate: AtomicU8::new(0),
-            runtime_rotation_rate: AtomicU8::new(0),
             _optimization_manager: optimization_manager,
             reality_proxy,
             fallback_rx: Arc::new(Mutex::new(rx)),
@@ -317,66 +317,33 @@ impl StealthManager {
         debug!("Profile consistency check completed for {}/{}", expected_browser, expected_os);
     }
 
-    /// Advances the next-session persona cursor when rotation policy is due.
-    ///
-    /// Active connections keep a frozen Browser/OS/TLS/H3 persona for their
-    /// lifetime. Mid-session identity changes are more fingerprintable than a
-    /// stable browser session because TLS, QUIC transport params, QPACK headers,
-    /// and user-agent state would no longer agree. Rotation therefore only
-    /// updates bookkeeping for future connection selection and never mutates
-    /// `self.fingerprint`.
-    pub fn maybe_rotate_fingerprint(&self) {
-        let escalated = self.escalated.load(Ordering::Relaxed);
-        let anti_mode = matches!(self.config.mode, StealthMode::StealthMax);
-        let mode_allows = match self.config.fingerprint_rotation_mode {
-            RotationMode::Fixed => false,
-            RotationMode::Slots | RotationMode::All => self.config.enable_fingerprint_rotation,
-        };
-        let runtime_override = self.runtime_rotation_rate.load(Ordering::Relaxed) > 50;
-        let effective_enable = mode_allows || (anti_mode && escalated) || runtime_override;
-        if !effective_enable {
-            return;
-        }
-
-        let interval =
-            if anti_mode && escalated { 30 } else { self.config.fingerprint_rotation_interval };
-        if interval == 0 {
-            return;
-        }
-
-        let now = self.clock.now();
-        let should_rotate = {
-            let last = self.last_rotation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.clock.elapsed_since(*last).as_secs() >= interval
-        };
-
-        if should_rotate {
-            if let Some(pool_len) =
-                (!self.profile_pool.is_empty()).then_some(self.profile_pool.len())
-            {
-                self.profile_index
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |index| {
-                        Some((index + 1) % pool_len)
-                    })
-                    .ok();
-            }
-            *self.last_rotation.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = now;
-            debug!("Deferred fingerprint rotation to the next connection; active persona remains frozen");
-        }
+    /// Draws the next disguise-migration delay: a uniform 120..=600 s window
+    /// (TODO-1056). A new draw happens per connection and after every
+    /// migration — never a fixed cadence a classifier could lock onto.
+    fn draw_disguise_migration_delay() -> std::time::Duration {
+        let jitter_secs = crate::transport::rand::fast_rand_u64_uniform(481);
+        std::time::Duration::from_secs(120 + jitter_secs)
     }
 
-    /// Returns the selected persona for the next connection.
+    /// Whether the disguise migration timer has fired (TODO-1056).
     ///
-    /// The active connection keeps its original fingerprint. Callers that
-    /// create a new connection may use this snapshot after a rotation tick.
-    pub fn next_session_profile(&self) -> Option<FingerprintProfile> {
-        let pool_len = self.profile_pool.len();
-        if pool_len == 0 {
-            return None;
+    /// The caller performs the actual migration through the path API. Speed
+    /// profiles (`off`, `performance`) never report due — they do not move the
+    /// path for camouflage.
+    pub(crate) fn disguise_migration_due(&self) -> bool {
+        if !self.disguise_migration_enabled {
+            return false;
         }
-        let index = self.profile_index.load(Ordering::Acquire) % pool_len;
-        let (browser, os) = self.profile_pool[index];
-        Some(FingerprintProfile::new(browser, os))
+        let next = self.next_disguise_migration.lock().unwrap_or_else(|p| p.into_inner());
+        self.clock.now() >= *next
+    }
+
+    /// Records that a disguise migration (or a real path change) happened and
+    /// draws the next migration instant (TODO-1056). Called on success and on
+    /// failure alike — a failed migration must not trigger a retry storm.
+    pub(crate) fn note_disguise_migration(&self) {
+        let next = self.clock.now() + Self::draw_disguise_migration_delay();
+        *self.next_disguise_migration.lock().unwrap_or_else(|p| p.into_inner()) = next;
     }
 
     /// Builds the shared wire byte ledger for a new connection (TODO-1052).
@@ -1054,10 +1021,8 @@ impl StealthManager {
             0 | 1 => 0u8,
             _ => 100u8,
         };
-        let rotation_rate = 0u8;
         self.runtime_padding_rate.store(padding_rate, Ordering::Relaxed);
         self.runtime_timing_rate.store(timing_rate, Ordering::Relaxed);
-        self.runtime_rotation_rate.store(rotation_rate, Ordering::Relaxed);
 
         if level >= 2 {
             // Level 2: full escalation tightens the cover-request cadence.
@@ -1066,8 +1031,8 @@ impl StealthManager {
             }
         }
         debug!(
-            "Stealth escalated to level {}: padding={}%, timing={}%, rotation={}%",
-            level, padding_rate, timing_rate, rotation_rate
+            "Stealth escalated to level {}: padding={}%, timing={}%",
+            level, padding_rate, timing_rate
         );
     }
 
@@ -1094,12 +1059,6 @@ impl StealthManager {
     #[cfg(test)]
     pub(crate) fn runtime_timing_rate(&self) -> u8 {
         self.runtime_timing_rate.load(Ordering::Relaxed)
-    }
-
-    /// Get current runtime rotation rate (0-100).
-    #[cfg(test)]
-    pub(crate) fn runtime_rotation_rate(&self) -> u8 {
-        self.runtime_rotation_rate.load(Ordering::Relaxed)
     }
 
     /// Get the current escalation level from the EscalationState (test accessor).

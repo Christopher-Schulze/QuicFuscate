@@ -386,6 +386,11 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_cover_ping_idle_keepalive_total {}",
             COVER_PING_IDLE_KEEPALIVE.get()
         );
+        let _ = writeln!(
+            out,
+            "quicfuscate_disguise_migration_failures_total {}",
+            DISGUISE_MIGRATION_FAILURES.get()
+        );
     } // end fec
 
     // MASQUE

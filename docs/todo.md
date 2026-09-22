@@ -501,7 +501,7 @@
 - Detail: `docs/todo/todo-1055-outer-hop-only-h3-masquerade.md`
 
 ### TODO-1056 - Persona change via connection migration, not a 120 s handshake
-- OPEN. No timer-driven ClientHello. Disguise is a QUIC port/CID migration on a 2 to 10 minute draw. A new browser persona requires a new connection.
+- DONE. The mid-connection rotation timer is gone (`maybe_rotate_fingerprint`, `runtime_rotation_rate`, 30 s escalation hack); persona rotation is next-session only. Disguise is now a QUIC port migration: uniform 120-600 s draw on stealth/stealth_max/dynamic, `begin_disguise_migration` drives the existing PATH_CHALLENGE path API, the runtime keeps the old socket as standby and rolls back on `FailedValidation`. `off`/`performance` never migrate; DCID stays stable (NAT-rebind signature).
 - Detail: `docs/todo/todo-1056-persona-rotation-via-migration.md`
 
 ### TODO-1057 - Shape the outer IP and UDP header to the claimed OS

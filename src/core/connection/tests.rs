@@ -235,6 +235,28 @@ fn outer_hop_persona_header_delta_debits_wire_budget() {
 }
 
 #[test]
+fn begin_disguise_migration_changes_local_port_and_keeps_persona() {
+    let mut connection = test_connection_with(StealthConfig::stealth());
+    let persona_before = connection.stealth_manager().current_persona_name();
+    let old_local = connection.local_addr;
+
+    // Migration onto a fresh local port starts path validation — the persona
+    // and TLS state stay frozen (no new handshake, TODO-1056).
+    let new_local: SocketAddr = "127.0.0.1:29299".parse().unwrap();
+    assert_ne!(new_local, old_local);
+    let path_id = connection
+        .begin_disguise_migration(new_local)
+        .expect("disguise migration starts path validation");
+    assert!(connection.disguise_migration_pending());
+    assert_eq!(connection.stealth_manager().current_persona_name(), persona_before);
+    assert!(connection.take_disguise_migration_outcome().is_none(), "validation is pending");
+    assert!(path_id > 0);
+
+    // Migrating back onto the active local address is refused.
+    assert!(connection.begin_disguise_migration(connection.local_addr).is_err());
+}
+
+#[test]
 fn webtransport_cover_plan_is_a_one_shot() {
     let manager = StealthManager::new(
         StealthConfig::stealth_max(),

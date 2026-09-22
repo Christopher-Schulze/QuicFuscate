@@ -49,9 +49,13 @@ pub struct StealthConfig {
     pub enable_timing_obfuscation: bool,
     /// Enable protocol mimicry (make QUIC look like other protocols).
     pub enable_protocol_mimicry: bool,
-    /// Enable dynamic fingerprint rotation.
+    /// Enable fingerprint rotation for the NEXT session only (TODO-1056).
+    /// The rotation worker advances the persona cursor a future dial reads;
+    /// no timer ever starts a new handshake mid-connection. Active-connection
+    /// disguise is the QUIC port migration draw, not persona rotation.
     pub enable_fingerprint_rotation: bool,
     /// Fingerprint rotation mode: Fixed (no rotation), Slots (configured slots), All (all profiles).
+    /// Applies to the next-session cursor only.
     pub fingerprint_rotation_mode: RotationMode,
     /// Wire-image shape for stealth padding (TODO-1052): `PersonaTrace`
     /// replays captured persona length classes, `FixedCell` normalizes to
@@ -65,7 +69,8 @@ pub struct StealthConfig {
     pub wire_cap_bytes_per_burst: u64,
     /// Maximum padding size in bytes.
     pub max_padding_size: usize,
-    /// Fingerprint rotation interval in seconds.
+    /// Next-session persona rotation interval in seconds (TODO-1056).
+    /// Bounds the cursor advance rate only — never a handshake timer.
     pub fingerprint_rotation_interval: u64,
     /// Typed browser/OS slots propagated from the engine configuration.
     pub fingerprint_rotation_profiles: Vec<(BrowserProfile, OsProfile)>,
@@ -309,7 +314,7 @@ impl StealthConfig {
             wire_cap_bytes_per_sec: 65536,
             wire_cap_bytes_per_burst: 16384,
             max_padding_size: 256,
-            fingerprint_rotation_interval: 120, // 2 minutes - aggressive enough to break persistent DPI correlations
+            fingerprint_rotation_interval: 120, // next-session cursor cadence (never mid-connection)
             fingerprint_rotation_profiles: Vec::new(),
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),

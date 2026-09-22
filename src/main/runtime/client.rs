@@ -1,4 +1,42 @@
 use super::*;
+use std::net::SocketAddr;
+
+/// Binds a connected, nonblocking UDP socket on `local_addr` toward
+/// `server_addr` with the project-standard buffer hints (TODO-1056: reused for
+/// disguise migration socket rebinding).
+fn bind_connected_udp_socket(
+    local_addr: SocketAddr,
+    server_addr: SocketAddr,
+) -> std::io::Result<tokio::net::UdpSocket> {
+    let std_socket = std::net::UdpSocket::bind(local_addr)?;
+    let socket_ref = socket2::SockRef::from(&std_socket);
+    if let Err(error) =
+        socket_ref.set_recv_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
+    {
+        log::debug!("UDP receive buffer hint rejected: {}", error);
+    }
+    if let Err(error) =
+        socket_ref.set_send_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
+    {
+        log::debug!("UDP send buffer hint rejected: {}", error);
+    }
+    std_socket.connect(server_addr)?;
+    std_socket.set_nonblocking(true)?;
+    tokio::net::UdpSocket::from_std(std_socket)
+}
+
+/// Enables kernel GRO on a freshly bound migration socket (Linux only, best effort).
+fn enable_client_gro(socket: &tokio::net::UdpSocket) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Err(error) = qf_transport_udp::enable_udp_gro_fd(socket.as_raw_fd()) {
+            log::debug!("UDP GRO unavailable on client socket: {error}");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = socket;
+}
 
 async fn run_circuit_client(
     config_path: &Path,
@@ -200,21 +238,7 @@ pub(super) async fn run_client(
         std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Local address invalid")
     })?;
 
-    let std_socket = std::net::UdpSocket::bind(local_addr)?;
-    let socket_ref = socket2::SockRef::from(&std_socket);
-    if let Err(error) =
-        socket_ref.set_recv_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
-    {
-        log::debug!("UDP receive buffer hint rejected: {}", error);
-    }
-    if let Err(error) =
-        socket_ref.set_send_buffer_size(quicfuscate::transport::UDP_SOCKET_BUFFER_BYTES)
-    {
-        log::debug!("UDP send buffer hint rejected: {}", error);
-    }
-    std_socket.connect(server_addr)?;
-    std_socket.set_nonblocking(true)?;
-    let socket = tokio::net::UdpSocket::from_std(std_socket)?;
+    let socket = bind_connected_udp_socket(local_addr, server_addr)?;
 
     info!("Client connecting to {}", server_addr);
 
@@ -775,13 +799,12 @@ pub(super) async fn run_client(
     // `recv_connected_burst`, which fills the persistent slots below in one
     // `recvmmsg` on Linux (each slot possibly a GRO super-buffer) and falls
     // back to a single-datagram `recv_connected_segments` elsewhere.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        if let Err(error) = qf_transport_udp::enable_udp_gro_fd(socket.as_raw_fd()) {
-            log::debug!("UDP GRO unavailable on client socket: {error}");
-        }
-    }
+    enable_client_gro(&socket);
+    let mut socket = socket;
+    // TODO-1056: while a disguise migration validates, the previous socket
+    // stays bound here so a failed validation rolls back to the old path
+    // instead of dropping the tunnel.
+    let mut standby_socket: Option<tokio::net::UdpSocket> = None;
     let rx_slot_count = if cfg!(target_os = "linux") { RX_BURST_SLOTS } else { 1 };
     let mut rx_bufs: Vec<Vec<u8>> =
         (0..rx_slot_count).map(|_| vec![0u8; RX_BURST_SLOT_CAP]).collect();
@@ -1087,6 +1110,62 @@ pub(super) async fn run_client(
                     );
                 }
                 last_runtime_progress = branch_started;
+
+                // TODO-1056: settle an in-flight disguise migration first —
+                // commit the new socket on validation, roll back to the
+                // standby socket on failure (the old path survives).
+                if let Some(outcome) = conn.take_disguise_migration_outcome() {
+                    match outcome {
+                        true => {
+                            standby_socket = None;
+                            info!("Disguise migration committed: new local UDP port");
+                        }
+                        false => {
+                            if let Some(old) = standby_socket.take() {
+                                socket = old;
+                                enable_client_gro(&socket);
+                            }
+                            warn!("Disguise migration failed validation; keeping old path");
+                        }
+                    }
+                }
+
+                // TODO-1056: disguise migration fires the jittered 2-10 min
+                // draw — a new local UDP port via the path-validation API,
+                // never a new handshake. Speed profiles never report due.
+                if conn.conn.is_established()
+                    && !conn.disguise_migration_pending()
+                    && conn.disguise_migration_due()
+                {
+                    let migration_bind = SocketAddr::new(local_addr.ip(), 0);
+                    match bind_connected_udp_socket(migration_bind, server_addr) {
+                        Ok(new_socket) => match new_socket.local_addr() {
+                            Ok(new_local) => match conn.begin_disguise_migration(new_local) {
+                                Ok(_) => {
+                                    standby_socket = Some(std::mem::replace(&mut socket, new_socket));
+                                    enable_client_gro(&socket);
+                                    info!(
+                                        "Disguise migration probing new local port {}",
+                                        new_local.port()
+                                    );
+                                }
+                                Err(error) => {
+                                    conn.note_disguise_migration_attempt();
+                                    warn!("Disguise migration start failed: {:?}", error);
+                                }
+                            },
+                            Err(error) => {
+                                conn.note_disguise_migration_attempt();
+                                warn!("Disguise migration local addr failed: {}", error);
+                            }
+                        },
+                        Err(error) => {
+                            conn.note_disguise_migration_attempt();
+                            warn!("Disguise migration socket bind failed: {}", error);
+                        }
+                    }
+                }
+
                 if conn.conn.is_established()
                     && tun_enable
                     && !conn.masque_tunnel_established()
