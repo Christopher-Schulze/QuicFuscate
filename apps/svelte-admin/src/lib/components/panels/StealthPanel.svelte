@@ -12,9 +12,11 @@
     stealthManual: StealthManualSettings;
     transportCc: CcSelection;
     transportMtuText: string;
+    coverTargetsText: string;
     onStealthChange: (v: StealthPresetUi) => void;
     onFecChange: (v: "auto" | "off") => void;
     onManualFlagChange: (key: keyof StealthManualSettings, value: boolean) => void;
+    onCoverTargetsChange: (v: string) => void;
     onCcChange: (v: CcSelection) => void;
     onMtuChange: (v: string) => void;
   }
@@ -25,9 +27,11 @@
     stealthManual,
     transportCc,
     transportMtuText,
+    coverTargetsText,
     onStealthChange,
     onFecChange,
     onManualFlagChange,
+    onCoverTargetsChange,
     onCcChange,
     onMtuChange,
   }: Props = $props();
@@ -47,7 +51,6 @@
   ];
 
   const MANUAL_FLAGS: [keyof StealthManualSettings, string][] = [
-    ["enable_domain_fronting", "Domain Fronting"],
     ["enable_http3_masquerading", "HTTP3 Masquerading"],
     ["use_tls_cover", "TLS Cover Extras"],
     ["use_qpack_headers", "QPACK Headers"],
@@ -126,6 +129,16 @@
               />
             </div>
           {/each}
+        </div>
+        <div class="mt-2.5 flex w-full items-center justify-between gap-3 rounded-lg glass-nav-pill px-2.5 py-1.5">
+          <div class="text-[11px] text-black whitespace-nowrap">Cover Targets</div>
+          <input
+            aria-label="Cover targets"
+            placeholder="host or host:port, comma separated"
+            value={coverTargetsText}
+            oninput={(e) => onCoverTargetsChange((e.target as HTMLInputElement).value)}
+            class="w-[220px] shrink-0 h-7 px-2 rounded-md glass-nav-pill glass-select-edge text-[11px] text-black mono border-0 outline-none shadow-none ring-0 bg-transparent"
+          />
         </div>
       </div>
     </div>

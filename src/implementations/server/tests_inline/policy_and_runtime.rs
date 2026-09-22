@@ -552,8 +552,8 @@ async fn test_run_loop_stops_from_admin_shutdown_without_start() {
             os: OsProfile::Linux,
             disable_doh: true,
             doh_provider: "",
-            disable_fronting: true,
-            front_domain: &[],
+            disable_cover: true,
+            cover_targets: &[],
             disable_http3: true,
         }),
         false,
@@ -819,7 +819,7 @@ fn blocked_ip_handler(
         ServerAdminControlPlane {
             actions: tx,
             listen_addr: "127.0.0.1:4433".to_string(),
-            front_domain: vec![],
+            cover_targets: vec![],
             qkeys: Arc::new(std::sync::Mutex::new(QKeyRegistry::new_in_memory(16, None))),
             graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
         },
@@ -919,7 +919,7 @@ fn test_server_admin_core_block_unblock_ip() {
         ServerAdminControlPlane {
             actions: tx,
             listen_addr: "127.0.0.1:4433".to_string(),
-            front_domain: vec![],
+            cover_targets: vec![],
             qkeys,
             graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
         },
@@ -973,7 +973,7 @@ fn test_server_admin_core_list_blocked_ips() {
         ServerAdminControlPlane {
             actions: tx,
             listen_addr: "127.0.0.1:4433".to_string(),
-            front_domain: vec![],
+            cover_targets: vec![],
             qkeys,
             graceful_shutdown: Arc::new(GracefulShutdown::new(5_000)),
         },

@@ -38,8 +38,7 @@ enable_doh = false
 doh_provider = "https://example.com/doh"
 enable_http3_masquerading = false
 use_qpack_headers = false
-enable_domain_fronting = false
-fronting_domains = ["front1.example", "front2.example"]
+reality_cover_targets = ["cover1.example", "cover2.example"]
 enable_traffic_padding = true
 enable_timing_obfuscation = true
 enable_protocol_mimicry = false
@@ -64,10 +63,9 @@ deny = ["image/*"]
     assert_eq!(cfg.doh_provider, "https://example.com/doh");
     assert!(!cfg.enable_http3_masquerading);
     assert!(!cfg.use_qpack_headers);
-    assert!(!cfg.enable_domain_fronting);
     assert_eq!(
-        cfg.fronting_domains,
-        vec!["front1.example".to_string(), "front2.example".to_string()]
+        cfg.reality_cover_targets,
+        vec!["cover1.example".to_string(), "cover2.example".to_string()]
     );
     assert!(cfg.enable_traffic_padding);
     assert!(cfg.enable_timing_obfuscation);

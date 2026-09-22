@@ -29,23 +29,23 @@ fn test_mode_feature_matrix_core_expectations() {
     let intelligent = StealthConfig::from_mode(StealthMode::Dynamic);
 
     assert!(!off.enable_http3_masquerading);
-    assert!(!off.enable_domain_fronting);
+    assert!(off.reality_cover_targets.is_empty());
     assert!(!off.enable_traffic_padding);
 
     assert!(perf.enable_http3_masquerading);
-    assert!(!perf.enable_domain_fronting);
+    assert!(perf.reality_cover_targets.is_empty());
     assert!(perf.use_tls_cover);
     assert!(!perf.enable_traffic_padding);
     assert!(!perf.enable_timing_obfuscation);
 
     assert!(stealth.enable_http3_masquerading);
-    assert!(!stealth.enable_domain_fronting);
+    assert!(stealth.reality_cover_targets.is_empty());
     assert!(stealth.enable_traffic_padding);
     assert!(stealth.enable_timing_obfuscation);
     assert!(stealth.use_tls_cover);
 
     assert!(anti.enable_http3_masquerading);
-    assert!(anti.enable_domain_fronting);
+    assert!(!anti.reality_cover_targets.is_empty());
     assert!(anti.enable_traffic_padding);
     assert!(anti.enable_timing_obfuscation);
     assert!(anti.enable_server_push_cover);
@@ -54,7 +54,7 @@ fn test_mode_feature_matrix_core_expectations() {
     assert_eq!(intelligent.mode, StealthMode::Dynamic);
     assert!(intelligent.dynamic_enabled);
     assert!(intelligent.enable_http3_masquerading);
-    assert!(!intelligent.enable_domain_fronting);
+    assert!(intelligent.reality_cover_targets.is_empty());
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn test_stealth_max_escalation_stack_is_cumulative_and_reversible() {
     assert!(stealth.use_tls_cover >= perf.use_tls_cover);
 
     assert!(anti.enable_http3_masquerading >= stealth.enable_http3_masquerading);
-    assert!(anti.enable_domain_fronting >= stealth.enable_domain_fronting);
+    assert!(anti.reality_cover_targets.len() >= stealth.reality_cover_targets.len());
     assert!(anti.enable_traffic_padding >= stealth.enable_traffic_padding);
     assert!(anti.enable_timing_obfuscation >= stealth.enable_timing_obfuscation);
     assert!(anti.enable_server_push_cover);
@@ -97,20 +97,20 @@ fn test_no_mode_silently_disables_required_primitives() {
     }
 
     assert!(
-        !StealthConfig::from_mode(StealthMode::Performance).enable_domain_fronting,
+        StealthConfig::from_mode(StealthMode::Performance).reality_cover_targets.is_empty(),
         "Performance mode must stay on the clean H3/QUIC path by default"
     );
     assert!(
-        !StealthConfig::from_mode(StealthMode::Stealth).enable_domain_fronting,
-        "Stealth mode must not front domains without explicit fronting domains"
+        StealthConfig::from_mode(StealthMode::Stealth).reality_cover_targets.is_empty(),
+        "Stealth mode must not emit cover authorities without explicit cover targets"
     );
     assert!(
-        !StealthConfig::from_mode(StealthMode::Dynamic).enable_domain_fronting,
+        StealthConfig::from_mode(StealthMode::Dynamic).reality_cover_targets.is_empty(),
         "Intelligent mode starts from the clean Performance baseline"
     );
     assert!(
-        StealthConfig::from_mode(StealthMode::StealthMax).enable_domain_fronting,
-        "Anti-DPI mode is the only preset that enables domain fronting by default"
+        !StealthConfig::from_mode(StealthMode::StealthMax).reality_cover_targets.is_empty(),
+        "Anti-DPI mode is the only preset that populates Reality cover targets by default"
     );
 }
 

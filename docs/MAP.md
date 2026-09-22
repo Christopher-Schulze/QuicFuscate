@@ -214,7 +214,7 @@ Level 0 (clean path): padding disabled (near-zero Intelligent-mode overhead). Le
 Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - direction fixed).
 
 ### Preset Values (src/stealth/parts/config.rs)
-- `performance()`: QPACK on (real Chrome always sends QPACK), domain fronting off
+- `performance()`: QPACK on (real Chrome always sends QPACK), cover targets off
 - `stealth()`: Server Push Cover enabled (intensity 0.25, 60s interval)
 - `anti_dpi()`: fingerprint rotation remains next-session policy owned by the shared runtime worker, not active-session mutation
 - `jitter_max_us` default in `StealthBrainConfig`: 5000 us (was 1500)
@@ -236,8 +236,10 @@ Jitter under pressure (CE>5% or rtt_spike>4): 85% of budget (was wrongly 20% - d
 ### Stealth Components - Test Coverage (Session 23, 2026-03-24)
 All 15 stealth technologies in `src/stealth/` have unit test coverage in `src/stealth/tests.rs`:
 - RateChoker: token-bucket shape(), full-bucket=ZERO, deficit=positive-wait
-- DomainFrontingManager: strict serial round-robin, concurrent coverage,
-  explicit random fallback, and ultra_stealth() smoke
+- CoverTargetRotator: strict serial round-robin, concurrent coverage,
+  explicit random fallback, and broad_providers() smoke (renamed from
+  DomainFrontingManager in TODO-1048; the rotator lives inline in
+  crates/qf-stealth/src/lib.rs)
 - Http3Masquerade: generate_headers() pseudo-headers, browser-profile UA divergence
 - FingerprintRotation (via StealthManager): Fixed mode stable, All-mode no-panic guard path
 - ActiveProbeDetector: GFW_TLS_Probe detection; legacy DPI_QUIC_Scan response selector retained without a matching pattern; benign-ignored; bounded `VecDeque<Instant>` with `max(threshold, 1)` FIFO history limit and 60-second retention. `EscalationState` owns a separate bounded 120-second millisecond-bucket history (TODO-808)
@@ -467,7 +469,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |   |       |-- LogsView.svelte
 |   |   |   |   |       |-- SettingsView.svelte
 |   |   |   |   |       `-- TunnelsView.svelte
-|   |   |   |   |-- domain-fronting-policy.ts
+|   |   |   |   |-- cover-sni-policy.ts
 |   |   |   |   |-- format.ts
 |   |   |   |   |-- ipc-contracts.ts
 |   |   |   |   |-- persistence-lifecycle.ts
@@ -658,7 +660,7 @@ This snapshot intentionally excludes gitignored paths and local generated direct
 |   |   |   |           |       `-- toast.test.ts
 |   |   |   |           |-- lib
 |   |   |   |           |   |-- clipboard.test.ts
-|   |   |   |           |   |-- domain-fronting-policy.test.ts
+|   |   |   |           |   |-- cover-sni-policy.test.ts
 |   |   |   |           |   |-- format.test.ts
 |   |   |   |           |   |-- policy-display.test.ts
 |   |   |   |           |   |-- qkey-utils.test.ts
@@ -1020,23 +1022,14 @@ This snapshot intentionally excludes gitignored paths and local generated direct
     |-- stealth
     |   |-- mod.rs
     |   |-- fingerprint.rs
-    |   |-- tls_cover.rs
-    |   |-- tests.rs
+    |   |-- http3_masquerade.rs
+    |   |-- manager.rs
+    |   |-- runtime.rs
     |   |-- test_support.rs
-    |   `-- parts/
-    |       |-- browser_profiles.rs
-    |       |-- chaff.rs
-    |       |-- config.rs
-    |       |-- cover_traffic.rs
-    |       |-- domain_fronting.rs
-    |       |-- escalation.rs
-    |       |-- flow_shaping.rs
-    |       |-- http3_masquerade.rs
-    |       |-- manager.rs
-    |       |-- probe_detector.rs
-    |       |-- stealth_coverage_tests.rs
-    |       |-- tls_client_hello.rs
-    |       `-- tls_cover_provider.rs
+    |   |-- tests.rs
+    |   |-- tls_cover.rs
+    |   `-- manager/
+    |       `-- coverage_tests.rs
     |-- time_source.rs
     |-- transport
     |   |-- anti_replay.rs
@@ -2550,7 +2543,7 @@ The audit remains open. These reconciliations document current evidence and owne
 ## Stealth Utility Workspace Leaf (2026-08-09, TODO-562)
 
 - `crates/qf-stealth/` is the canonical owner for root-independent domain-fronting and flow-shaping helpers formerly included from `src/stealth/parts/domain_fronting.rs` and `src/stealth/parts/flow_shaping.rs`: atomic CDN rotation, explicit random fallback, provider catalogs, bounded packet-history retention, jitter, and handshake-flight pacing. The root stealth module keeps compatibility projections; no frontend or Tauri implementation crosses into the child.
-- qf-stealth depends only on `qf-common` and `rand`; `quicfuscate -> qf-stealth` is one-way. The child consumes qf-common's `ProtocolClock` and owns `FlowShaper`, `StealthPacketClass`, `CdnProvider`, and `DomainFrontingManager` as doc-hidden compatibility contracts.
+- qf-stealth depends only on `qf-common` and `rand`; `quicfuscate -> qf-stealth` is one-way. The child consumes qf-common's `ProtocolClock` and owns `FlowShaper`, `StealthPacketClass`, `CdnProvider`, and `DomainFrontingManager` as doc-hidden compatibility contracts (the rotator was renamed `CoverTargetRotator` in TODO-1048).
 - Isolated qf-stealth all-target/all-feature checking and strict Clippy pass. Workspace all-target checking with `rust-tests`, strict workspace `rust-tests` Clippy, the complete workspace all-target `rust-tests` matrix, and the all-feature library/binary Clippy lane pass. The complete workspace matrix exits 0 with `118` result blocks, `3,011` passed, `0` failed, and `6` ignored.
 - Fresh seam evidence is `scripts/out/audits/workspace-seams-20260809T-qf-stealth-final/workspace-seams.json`: `35` workspace packages, `279` Rust files, `204,847` source lines, `130` module edges, `91` Cargo workspace dependency edges, and the unchanged 9-module product SCC (`brain`, `core`, `engine`, `fec`, `implementations`, `interface`, `qftls`, `stealth`, `transport`); `protected_changes=[]`.
 - Runtime guardrails are fully green at `scripts/out/audits/runtime-guardrails-20260809T-qf-stealth-final/audit-runtime-guardrails.log` with `Critical: 0` and `Warnings: 0`; AMX proof and SIMD feature contracts pass. The full all-feature/all-target Clippy lane remains blocked by the repository-owned Linux-only guard at `scripts/tests/rust/rt-transport-uring.rs:8` on macOS ARM64, with no guard weakened. Warning-free release verification passes with `RUSTFLAGS=-Dwarnings cargo build --release --bin quicfuscate --offline`; `target/release/quicfuscate --help` exits 0, the binary is `9,937,120` bytes with SHA-256 `1a647be6e7f9ecdd2a8c46a654b71d8942012796772caade4faaf05db2a371a7`, and final target usage is `9,732,580 KiB` with `4,883,940 KiB` free, below the 12-GiB cleanup threshold.

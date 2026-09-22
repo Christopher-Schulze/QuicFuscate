@@ -35,7 +35,7 @@ If you believe you have found a security vulnerability in QuicFuscate, please re
 The following areas are in scope:
 - QUIC transport layer (packet handling, frame parsing, crypto)
 - AEAD cipher implementations and key management
-- Stealth subsystem (TLS Cover, fingerprinting, domain fronting)
+- Stealth subsystem (TLS Cover, fingerprinting, Reality cover targets)
 - FEC encoder/decoder
 - Admin HTTP/Unix socket server
 - Kill-switch and DNS leak prevention

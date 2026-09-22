@@ -626,7 +626,7 @@ window_poor = 50
 mode = "max"
 enable_doh = true
 doh_provider = "https://example.invalid/dns-query"
-enable_domain_fronting = true
+reality_cover_targets = ["cover.example"]
 enable_http3_masquerading = true
 
 [optimization]
@@ -648,7 +648,7 @@ enable_pacing = false
             .expect("transport config");
 
     // Keep runtime overrides strict to prove merge behavior.
-    let front_domains = vec!["front.example".to_string()];
+    let cover_targets = vec!["cover.example".to_string()];
     quicfuscate::implementations::server::apply_runtime_config_reload(
         &cfg_path,
         Some(quicfuscate::engine::FecMode::Auto), // CLI override should win over config's initial mode
@@ -661,8 +661,8 @@ enable_pacing = false
             os: OsProfile::MacOS,
             disable_doh: true, // disable DoH
             doh_provider: "runtime-doh",
-            disable_fronting: true, // disable fronting
-            front_domain: &front_domains,
+            disable_cover: true, // disable cover targets
+            cover_targets: &cover_targets,
             disable_http3: true, // disable http3 masquerade
         },
     )
@@ -680,8 +680,8 @@ enable_pacing = false
     assert_eq!(sc.initial_os, OsProfile::MacOS);
     assert!(!sc.enable_doh);
     assert_eq!(sc.doh_provider, "runtime-doh");
-    assert!(!sc.enable_domain_fronting);
-    assert_eq!(sc.fronting_domains, front_domains);
+    // disable_cover wins over both the TOML targets and the policy list.
+    assert!(sc.reality_cover_targets.is_empty());
     assert!(!sc.enable_http3_masquerading);
 
     assert_eq!(transport.max_udp_payload_size(), 1400);
@@ -728,8 +728,8 @@ mtu = 100
             os: OsProfile::MacOS,
             disable_doh: false,
             doh_provider: "runtime-doh",
-            disable_fronting: false,
-            front_domain: &[],
+            disable_cover: false,
+            cover_targets: &[],
             disable_http3: false,
         },
     )
@@ -784,8 +784,8 @@ mtu = 100
             os: OsProfile::MacOS,
             disable_doh: false,
             doh_provider: "runtime-doh",
-            disable_fronting: false,
-            front_domain: &[],
+            disable_cover: false,
+            cover_targets: &[],
             disable_http3: false,
         },
     )

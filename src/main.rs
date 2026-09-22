@@ -1130,17 +1130,17 @@ struct SharedArgs {
     #[clap(long, default_value = "https://cloudflare-dns.com/dns-query")]
     doh_provider: String,
 
-    /// Domain used for fronting (can be specified multiple times)
-    #[clap(long, value_delimiter = ',')]
-    front_domain: Vec<String>,
+    /// Reality cover target used for cover-SNI and probe relay (can be specified multiple times)
+    #[clap(long, value_delimiter = ',', alias = "front-domain")]
+    cover_target: Vec<String>,
 
     /// Disable DNS over HTTPS
     #[clap(long)]
     disable_doh: bool,
 
-    /// Disable domain fronting
-    #[clap(long)]
-    disable_fronting: bool,
+    /// Disable cover targets (formerly domain fronting)
+    #[clap(long, alias = "disable-fronting")]
+    disable_cover: bool,
 
     /// Disable HTTP/3 masquerading
     #[clap(long)]

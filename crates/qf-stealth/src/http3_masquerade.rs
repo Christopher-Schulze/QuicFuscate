@@ -541,11 +541,11 @@ impl Http3Masquerade {
 
     /// Determines if referer should be included
     fn should_include_referer(&self, host: &str) -> bool {
-        // Include referer for cross-site navigation (domain fronting scenarios)
+        // Include referer for cross-site navigation (cover-target scenarios)
         self.get_sec_fetch_site(host) == "cross-site"
     }
 
-    /// Generates realistic referer based on fronting scenario
+    /// Generates realistic referer based on the cover-target scenario
     fn generate_realistic_referer(&self, host: &str) -> String {
         let simd = AsciiSimdBackend::detect();
 

@@ -1047,11 +1047,11 @@ impl ServerRuntime {
             ServerAdminControlPlane {
                 actions: self.admin_actions_sender(),
                 listen_addr: self.local_addr().to_string(),
-                front_domain: self
+                cover_targets: self
                     .live()
                     .standalone_runtime_metadata
                     .as_ref()
-                    .map(|metadata| metadata.front_domain.clone())
+                    .map(|metadata| metadata.cover_targets.clone())
                     .unwrap_or_default(),
                 qkeys: self.qkey_registry().clone(),
                 graceful_shutdown: self.graceful_shutdown.clone(),

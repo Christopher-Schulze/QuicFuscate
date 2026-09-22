@@ -3,7 +3,6 @@ import { parseCongestionControlAlgorithm } from "@quicfuscate/ui/congestion-cont
 import { parse as parseTomlDocument } from "smol-toml";
 
 export const DEFAULT_STEALTH_MANUAL: StealthManualSettings = {
-  enable_domain_fronting: true,
   enable_http3_masquerading: true,
   use_tls_cover: true,
   use_qpack_headers: true,
@@ -13,7 +12,10 @@ export const DEFAULT_STEALTH_MANUAL: StealthManualSettings = {
   enable_doh: true,
 };
 
-export const FRONTING_SNI_ALLOWLIST = [
+// Cover-SNI names an issued QKey may ask a client to present. Every entry is a
+// host whose certificate the deployment's hop presents or relays (TODO-1048);
+// mirrored from the server's BUILTIN_COVER_SNI_ALLOWLIST.
+export const COVER_SNI_ALLOWLIST = [
   "cdn.cloudflare.com", "cloudflare-dns.com", "one.one.one.one", "warp.plus", "workers.dev",
   "cdn.fastly.net", "fastly.com", "fastlylb.net", "fsly.net",
   "akamaized.net", "akamai.net", "akamaihd.net", "akamaitechnologies.com", "edgesuite.net",
@@ -257,6 +259,31 @@ export function readStealthFlag(contents: string, key: keyof StealthManualSettin
   const v = parseBool(readSectionValue(contents, "stealth", key));
   if (v != null) return v;
   return DEFAULT_STEALTH_MANUAL[key];
+}
+
+// Reads stealth.reality_cover_targets as editable comma text. The deprecated
+// fronting_domains alias is honored so legacy configs still display their
+// cover list (TODO-1048).
+export function readStealthCoverTargets(contents: string): string {
+  for (const key of ["reality_cover_targets", "fronting_domains"] as const) {
+    const raw = readSectionValue(contents, "stealth", key);
+    if (!raw) continue;
+    const items = [...raw.matchAll(/"([^"]*)"|'([^']*)'/g)]
+      .map((m) => (m[1] ?? m[2] ?? "").trim())
+      .filter((v) => v.length > 0);
+    if (items.length > 0) return items.join(", ");
+  }
+  return "";
+}
+
+// Serializes comma-separated cover-target text into a TOML array literal.
+export function coverTargetsToTomlValue(text: string): string {
+  const items = text
+    .split(",")
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0)
+    .map((v) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+  return `[${items.join(", ")}]`;
 }
 
 export function normalizeQKey(value: string): string {

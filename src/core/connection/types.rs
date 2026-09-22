@@ -213,7 +213,8 @@ pub struct ConnectionParams {
     pub local_addr: SocketAddr,
     /// Remote socket address.
     pub peer_addr: SocketAddr,
-    /// HTTP Host header value (may differ from SNI when domain fronting).
+    /// HTTP Host header value (equals the SNI host; TODO-1048 removed the
+    /// fronted-alias path that could diverge from it).
     pub host_header: String,
     /// TLS SNI hostname override (None uses host_header).
     pub sni_host: Option<String>,

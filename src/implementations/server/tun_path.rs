@@ -78,7 +78,7 @@ pub(super) struct StandaloneReloadPolicy {
 
 #[derive(Clone)]
 pub(super) struct StandaloneRuntimeMetadata {
-    pub(super) front_domain: Vec<String>,
+    pub(super) cover_targets: Vec<String>,
     pub(super) config_path: Option<std::path::PathBuf>,
     pub(super) reload_policy: StandaloneReloadPolicy,
 }
@@ -1366,10 +1366,17 @@ pub(super) fn drain_server_tun_packets(
 
 pub const QKEY_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const FINAL_CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
-pub const DF_SNI_MODE_FIXED: &str = "fixed";
-pub const DF_SNI_MODE_AUTO_ROTATING: &str = "auto_rotating";
+/// Cover-SNI strategy values embedded in issued QKeys. The string values are a
+/// stable wire contract (`df_sni_mode` JSON); the Rust names moved off the
+/// removed domain-fronting terminology in TODO-1048.
+pub const COVER_SNI_MODE_FIXED: &str = "fixed";
+pub const COVER_SNI_MODE_AUTO_ROTATING: &str = "auto_rotating";
+/// No cover rotation: the issued QKey names the server's own listen host.
+pub const COVER_SNI_MODE_OFF: &str = "off";
 
-pub(super) const BUILTIN_FRONTING_SNI_ALLOWLIST: &[&str] = &[
+/// Allowlist of cover names an issued QKey may ask the client to present. Each
+/// entry is a host whose certificate the deployment's hop presents or relays.
+pub(super) const BUILTIN_COVER_SNI_ALLOWLIST: &[&str] = &[
     "cdn.cloudflare.com",
     "cloudflare-dns.com",
     "one.one.one.one",

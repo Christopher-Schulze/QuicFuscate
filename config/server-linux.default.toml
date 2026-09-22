@@ -92,7 +92,7 @@ mode = "performance"
 # - manual:       operator picks each flag and the payload cipher.
 
 # Manual mode settings (only used when mode = "manual"):
-# enable_domain_fronting = true
+# reality_cover_targets = []      # cover hosts whose certificate this hop presents/relays
 # enable_http3_masquerading = true
 # use_tls_cover = true
 # use_qpack_headers = true
@@ -103,7 +103,7 @@ mode = "performance"
 # doh_provider = "https://cloudflare-dns.com/dns-query"
 # padding_strategy = "adaptive"    # Options: "random", "fixed", "adaptive", "browser_mimic"
 # max_padding_size = 256           # bytes
-# fronting_domains = []
+# fronting_domains = []           # deprecated alias for reality_cover_targets
 # initial_browser = "chrome"       # chrome, firefox, safari, edge
 # initial_os = "linux"             # windows, macos, linux, android, ios
 # enable_network_fingerprint_normalization = true

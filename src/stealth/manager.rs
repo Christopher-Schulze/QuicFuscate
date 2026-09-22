@@ -9,7 +9,9 @@ pub struct StealthManager {
     /// Immutable environment generation used by this runtime owner.
     env_snapshot: Arc<crate::env_utils::EnvSnapshot>,
     fingerprint: Arc<Mutex<FingerprintProfile>>,
-    domain_fronting: Option<DomainFrontingManager>,
+    /// Rotator over configured Reality cover targets (TODO-1048). Targets are
+    /// hosts whose certificate the hop legitimately presents or relays.
+    cover_targets: Option<CoverTargetRotator>,
     /// Cryptographic manager for key derivation.
     _crypto_manager: Arc<CryptoManager>,
     /// Last rotation timestamp
@@ -128,7 +130,7 @@ impl StealthManager {
             &env_snapshot,
         )));
 
-        let domain_fronting = Self::domain_fronting_for_config(&config);
+        let cover_targets = Self::cover_targets_for_config(&config);
 
         let profile_pool = Arc::new(config.rotation_profile_slots());
 
@@ -159,12 +161,11 @@ impl StealthManager {
         // emit H3 cover requests. Performance keeps H3/QPACK persona active
         // but must not generate extra cover traffic on the clean path.
         let cover_traffic = if Self::cover_traffic_scheduler_allowed(&config) {
-            // Use the fronted domain or fallback to a CDN domain
-            let target = if let Some(ref df) = domain_fronting {
-                df.get_fronted_domain()
-            } else {
-                "cdn.cloudflare.com".to_string()
-            };
+            // Cover traffic names a configured cover target, never a fronted
+            // alias: the authority must match what the hop actually serves.
+            let target = cover_targets
+                .as_ref()
+                .map_or_else(|| "cdn.cloudflare.com".to_string(), |ct| ct.next_cover_target());
             Some(CoverTrafficScheduler::new_with_clock(target, 5000, &clock)) // 5 second interval
         } else {
             None
@@ -176,14 +177,21 @@ impl StealthManager {
             config.server_push_intensity,
         )));
 
-        // REALITY PROXY INITIALIZATION
+        // REALITY PROXY INITIALIZATION (TODO-1048): the probe fallback relays
+        // to cover targets whenever Dynamic mode or explicit cover targets are
+        // configured. StealthMax presets populate the target list; other modes
+        // opt in by setting stealth.reality_cover_targets.
         let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let reality_proxy = if config.dynamic_enabled {
-            // Enable Reality if Dynamic mode is on
-            Some(Arc::new(crate::reality::RealityProxy::new_with_snapshot(tx, &env_snapshot)))
-        } else {
-            None
-        };
+        let reality_proxy =
+            if config.dynamic_enabled || !config.reality_cover_targets.is_empty() {
+                Some(Arc::new(crate::reality::RealityProxy::new_with_targets(
+                    tx,
+                    &env_snapshot,
+                    &config.reality_cover_targets,
+                )))
+            } else {
+                None
+            };
 
         if let (Some(owner), Some(proxy)) = (runtime_owner.as_ref(), reality_proxy.as_ref()) {
             owner.register_reality_proxy(proxy);
@@ -221,7 +229,7 @@ impl StealthManager {
             clock: clock.clone(),
             env_snapshot: Arc::clone(&env_snapshot),
             fingerprint,
-            domain_fronting,
+            cover_targets,
             _crypto_manager: crypto_manager,
             last_rotation: Arc::new(Mutex::new(clock.now())),
             profile_pool,
@@ -252,20 +260,14 @@ impl StealthManager {
         }
     }
 
-    fn domain_fronting_for_config(config: &StealthConfig) -> Option<DomainFrontingManager> {
-        if !config.enable_domain_fronting {
+    /// Build the cover-target rotator from configuration. An explicit
+    /// `reality_cover_targets` list (including the StealthMax preset's broad
+    /// provider set) yields a rotator; an empty list means no cover targets.
+    fn cover_targets_for_config(config: &StealthConfig) -> Option<CoverTargetRotator> {
+        if config.reality_cover_targets.is_empty() {
             return None;
         }
-        if !config.fronting_domains.is_empty() {
-            return Some(DomainFrontingManager::new(config.fronting_domains.clone()));
-        }
-        if matches!(config.mode, StealthMode::StealthMax) {
-            return Some(DomainFrontingManager::broad_provider_rotation());
-        }
-        warn!(
-            "Domain fronting requested without configured fronting domains outside Anti-DPI - disabling for a coherent H3 persona"
-        );
-        None
+        Some(CoverTargetRotator::new(config.reality_cover_targets.clone()))
     }
 
     /// Debug consistency check: validates TLS fingerprint matches header profile.
@@ -608,19 +610,6 @@ impl StealthManager {
         } else {
             config.set_stealth_mimic_bias(bias_default);
         }
-    }
-
-    /// Returns the SNI and Host header values for a connection.
-    /// Applies domain fronting if enabled.
-    pub(crate) fn get_connection_headers(&self, real_host: &str) -> (String, String) {
-        if self.config.enable_domain_fronting {
-            if let Some(df) = self.domain_fronting.as_ref() {
-                let fronted_domain = df.get_fronted_domain();
-                debug!("Domain fronting enabled. SNI: {}, Host: {}", fronted_domain, real_host);
-                return (fronted_domain, real_host.to_string());
-            }
-        }
-        (real_host.to_string(), real_host.to_string())
     }
 
     /// Processes an outgoing packet payload, applying configured stealth techniques.
@@ -1083,10 +1072,10 @@ impl StealthManager {
             return None;
         }
 
-        let authority = match self.domain_fronting.as_ref() {
-            Some(manager) => manager.get_fronted_domain(),
-            None => "cdn.cloudflare.com".to_string(),
-        };
+        let authority = self
+            .cover_targets
+            .as_ref()
+            .map_or_else(|| "cdn.cloudflare.com".to_string(), |ct| ct.next_cover_target());
         let base = self.config.server_push_base_path.trim_end_matches('/');
         Some((authority, format!("{base}/wt/session")))
     }
@@ -1323,16 +1312,19 @@ impl StealthManager {
     }
 
     /// Determine MASQUE proxy authority to use.
-    /// Priority: QUICFUSCATE_MASQUE_PROXY env -> first fronting domain (":443").
+    /// Priority: QUICFUSCATE_MASQUE_PROXY env -> first cover target (":443").
     pub(crate) fn masque_proxy(&self) -> Option<String> {
         if let Some(v) = StealthConfig::masque_proxy_override(&self.env_snapshot) {
             return Some(v);
         }
-        if !self.config.fronting_domains.is_empty() {
-            let d = &self.config.fronting_domains[0];
-            if !d.is_empty() {
-                return Some(format!("{}:443", d));
-            }
+        if let Some(target) =
+            self.config.reality_cover_targets.first().map(|d| d.trim()).filter(|d| !d.is_empty())
+        {
+            return Some(if target.contains(':') {
+                target.to_string()
+            } else {
+                format!("{target}:443")
+            });
         }
         None
     }

@@ -52,11 +52,11 @@
     normalizeQKey,
     compactDisplayValue,
     parsePort,
-    FRONTING_SNI_ALLOWLIST,
+    COVER_SNI_ALLOWLIST,
   } from "$lib/config-helpers";
   import type { AdminQKeyTimestamp, QKeyEntry } from "$lib/types";
 
-  type DomainFrontingMode = "auto" | "off" | "manual";
+  type CoverSniMode = "auto" | "off" | "manual";
   type QKeyStealthMode = "dynamic" | "Stealth MAX" | "manual" | "off";
   type QKeyFecMode = "auto" | "off";
   type IssuedQKey = {
@@ -82,8 +82,8 @@
   let issuedQKeyDialogOpen = $state(false);
   let qkeyName = $state("");
   let qkeyPortText = $state("");
-  let qkeyFrontingMode = $state<DomainFrontingMode>("auto");
-  let qkeyFixedDomain = $state<(typeof FRONTING_SNI_ALLOWLIST)[number]>(FRONTING_SNI_ALLOWLIST[0]);
+  let qkeyCoverSniMode = $state<CoverSniMode>("auto");
+  let qkeyFixedDomain = $state<(typeof COVER_SNI_ALLOWLIST)[number]>(COVER_SNI_ALLOWLIST[0]);
   let advancedOpen = $state(false);
   let qkeyStealthMode = $state<QKeyStealthMode>("dynamic");
   let qkeyFecMode = $state<QKeyFecMode>("auto");
@@ -146,8 +146,8 @@
 
   $effect(() => {
     if (!createDialogOpen) {
-      qkeyFrontingMode = "auto";
-      qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
+      qkeyCoverSniMode = "auto";
+      qkeyFixedDomain = COVER_SNI_ALLOWLIST[0];
       advancedOpen = false;
       qkeyStealthMode = "dynamic";
       qkeyFecMode = "auto";
@@ -254,11 +254,11 @@
         stealth?: string;
         fec?: string;
       } = {
-        sni_strategy: qkeyFrontingMode === "manual" ? "fixed" : qkeyFrontingMode === "off" ? "off" : "auto_rotating",
+        sni_strategy: qkeyCoverSniMode === "manual" ? "fixed" : qkeyCoverSniMode === "off" ? "off" : "auto_rotating",
       };
       if (name) payload.name = name;
       if (port != null) payload.port = port;
-      if (qkeyFrontingMode === "manual") payload.sni_domain = qkeyFixedDomain;
+      if (qkeyCoverSniMode === "manual") payload.sni_domain = qkeyFixedDomain;
       if (advancedOpen) {
         payload.stealth = qkeyStealthMode;
         payload.fec = qkeyFecMode;
@@ -280,8 +280,8 @@
       createDialogOpen = false;
       qkeyName = "";
       qkeyPortText = "";
-      qkeyFrontingMode = "auto";
-      qkeyFixedDomain = FRONTING_SNI_ALLOWLIST[0];
+      qkeyCoverSniMode = "auto";
+      qkeyFixedDomain = COVER_SNI_ALLOWLIST[0];
       advancedOpen = false;
       qkeyStealthMode = "dynamic";
       qkeyFecMode = "auto";
@@ -487,31 +487,31 @@
           <TextInput label="Port [1-65535]" value={qkeyPortText} onchange={(v) => qkeyPortText = v} maxLength={5} labelClassName="text-[11px] font-semibold text-black dashboard-heading-sans" />
           <div class="space-y-2">
             <div class="flex items-center justify-between">
-              <div class="text-[11px] font-semibold text-black dashboard-heading-sans">Domain Fronting [SNI]</div>
+              <div class="text-[11px] font-semibold text-black dashboard-heading-sans">Cover SNI</div>
                   <Select
-                    value={qkeyFrontingMode}
+                    value={qkeyCoverSniMode}
                     options={[
                   { value: "auto", label: "Auto [Rotating]" },
                   { value: "off", label: "Off" },
                   { value: "manual", label: "Manual" },
                 ]}
-                onchange={(v) => { qkeyFrontingMode = v as DomainFrontingMode; }}
-                ariaLabel="Domain Fronting mode"
+                onchange={(v) => { qkeyCoverSniMode = v as CoverSniMode; }}
+                ariaLabel="Cover SNI mode"
                 class="w-[120px]"
               />
             </div>
-            {#if qkeyFrontingMode === "manual"}
+            {#if qkeyCoverSniMode === "manual"}
               <div transition:slide|local={{ duration: 280, easing: cubicOut }}>
                 <div class="space-y-2">
                   <Select
                     value={qkeyFixedDomain}
-                    options={FRONTING_SNI_ALLOWLIST.map((d) => ({ value: d, label: d }))}
-                    onchange={(v) => { qkeyFixedDomain = v as (typeof FRONTING_SNI_ALLOWLIST)[number]; }}
+                    options={COVER_SNI_ALLOWLIST.map((d) => ({ value: d, label: d }))}
+                    onchange={(v) => { qkeyFixedDomain = v as (typeof COVER_SNI_ALLOWLIST)[number]; }}
                     ariaLabel="Fixed SNI domain"
                     class="w-full"
                     maxHeight="180px"
                   />
-                  <p class="text-[10px] text-black leading-relaxed">Select a fixed allowlisted SNI domain.</p>
+                  <p class="text-[10px] text-black leading-relaxed">Select a fixed allowlisted cover-SNI domain.</p>
                 </div>
               </div>
             {/if}

@@ -266,7 +266,10 @@ pub struct StealthSection {
     pub mode: StealthMode,
     /// Enable uTLS/ClientHello persona spoofing. Effective only when mode is not Off.
     pub use_utls: bool,
-    /// Enable domain fronting. Keep disabled unless fronting domains are explicitly configured.
+    /// Removed wire behavior (TODO-1048): an SNI that differs from the hop's
+    /// certificate name. The key stays parseable so existing files still load;
+    /// setting it to `true` fails validation with a pointer to
+    /// `reality_cover_targets`.
     pub enable_domain_fronting: bool,
     /// Enable HTTP/3 masquerading
     pub enable_http3_masquerading: bool,
@@ -288,8 +291,13 @@ pub struct StealthSection {
     pub padding_strategy: String,
     /// Maximum padding size
     pub max_padding_size: usize,
-    /// Custom fronting domains
+    /// Deprecated alias for `reality_cover_targets` (TODO-1048): entries are
+    /// treated as cover-target hostnames.
     pub fronting_domains: Vec<String>,
+    /// Reality cover targets: `host` or `host:port` entries whose certificate
+    /// the selected hop legitimately presents or relays. Probe traffic without
+    /// a valid tunnel secret is relayed to these endpoints.
+    pub reality_cover_targets: Vec<String>,
     /// Initial browser profile
     pub initial_browser: String,
     /// Initial OS profile
@@ -336,6 +344,7 @@ impl Default for StealthSection {
             normalize_target_size: 0,
             max_padding_size: 256,
             fronting_domains: Vec::new(),
+            reality_cover_targets: Vec::new(),
             initial_browser: "chrome".to_string(),
             initial_os: "windows".to_string(),
             enable_network_fingerprint_normalization: true,
@@ -376,8 +385,13 @@ impl StealthSection {
             StealthMode::Manual => qf_stealth::StealthMode::Manual,
             StealthMode::Dynamic => qf_stealth::StealthMode::Dynamic,
         };
+        if self.enable_domain_fronting {
+            return Err(ConfigError::Validation(
+                "stealth.enable_domain_fronting was removed in TODO-1048: SNI must equal the certificate name of the hop; set stealth.reality_cover_targets to the Reality cover hosts instead"
+                    .into(),
+            ));
+        }
         let mut runtime = qf_stealth::StealthConfig::from_mode(runtime_mode);
-        runtime.enable_domain_fronting = self.enable_domain_fronting;
         runtime.enable_http3_masquerading = self.enable_http3_masquerading;
         runtime.use_tls_cover = self.use_tls_cover;
         runtime.use_qpack_headers = self.use_qpack_headers;
@@ -390,7 +404,14 @@ impl StealthSection {
         runtime.enable_doh = self.enable_doh;
         runtime.doh_provider = self.doh_provider.clone();
         runtime.max_padding_size = self.max_padding_size;
-        runtime.fronting_domains = self.fronting_domains.clone();
+        // `fronting_domains` survives as a deprecated alias: its entries name
+        // cover hosts whose certificate the hop presents or relays.
+        runtime.reality_cover_targets = self
+            .reality_cover_targets
+            .iter()
+            .chain(self.fronting_domains.iter())
+            .cloned()
+            .collect();
         runtime.initial_browser = self.initial_browser.parse().map_err(|_| {
             ConfigError::Validation(format!(
                 "stealth.initial_browser has unsupported value '{}'",

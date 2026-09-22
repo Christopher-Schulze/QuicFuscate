@@ -58,7 +58,7 @@ describe("admin about view", () => {
     expect(screen.getByText("Protocol")).toBeInTheDocument();
     expect(screen.getByText("Custom QUIC v1 [RFC 9000]")).toBeInTheDocument();
     expect(screen.getByText("Cipher")).toBeInTheDocument();
-    expect(screen.getByText("AEGIS-128")).toBeInTheDocument();
+    expect(screen.getByText("AES-128-GCM | AEGIS-128L")).toBeInTheDocument();
     expect(screen.getByText("FEC")).toBeInTheDocument();
     expect(screen.getByText("Reed-Solomon | Fountain")).toBeInTheDocument();
     expect(screen.getByText("Stealth")).toBeInTheDocument();

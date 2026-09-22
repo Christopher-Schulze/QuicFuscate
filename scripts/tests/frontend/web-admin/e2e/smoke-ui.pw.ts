@@ -3,7 +3,7 @@ import { test, expect, type Page } from "@playwright/test";
 const CONFIG_TOML = [
   "[stealth]",
   "mode = \"manual\"",
-  "enable_domain_fronting = true",
+  "reality_cover_targets = ["cdn.cloudflare.com", "cloudfront.net"]",
   "enable_http3_masquerading = true",
   "use_tls_cover = true",
   "use_qpack_headers = true",
@@ -226,7 +226,7 @@ test.describe("Web Admin UI Smoke", () => {
     await dialog.getByLabel("Port [1-65535]", { exact: true }).fill("4433");
     await expect(dialogGenerate).toBeEnabled();
 
-    const sniSelectButton = dialog.getByRole("button", { name: "Domain Fronting mode", exact: true });
+    const sniSelectButton = dialog.getByRole("button", { name: "Cover SNI mode", exact: true });
     await expect(sniSelectButton).toBeVisible();
     await expect(sniSelectButton).toContainText("Auto [Rotating]");
     await dialog.getByRole("button", { name: "Cancel" }).click();

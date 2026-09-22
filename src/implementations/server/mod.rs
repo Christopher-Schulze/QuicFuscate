@@ -131,8 +131,8 @@ use crate::optimize::ZeroCopyBuffer;
 #[cfg(all(unix, not(target_os = "linux")))]
 use crate::optimize::ZeroCopyRecvBuffer;
 use crate::stealth::{
-    BrowserProfile, FingerprintProfile, OsFingerprintProfile, OsProfile, StealthConfig,
-    StealthMode, StealthRuntimeOwner,
+    BrowserProfile, CoverTargetRotator, FingerprintProfile, OsFingerprintProfile, OsProfile,
+    StealthConfig, StealthMode, StealthRuntimeOwner,
 };
 use qf_engine_types::{DataPlaneFault, EngineConfig, EngineError, RuntimePolicyGeneration};
 

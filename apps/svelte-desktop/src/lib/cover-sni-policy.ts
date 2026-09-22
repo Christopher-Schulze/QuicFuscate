@@ -1,4 +1,4 @@
-export function resolveDomainFrontingSniDisplay(
+export function resolveCoverSniDisplay(
   extra: string | null | undefined,
   fallbackSni: string,
 ): string {

@@ -785,7 +785,7 @@ impl SharedServerDomain {
 pub(super) struct ServerAdminControlPlane {
     pub(super) actions: mpsc::UnboundedSender<AdminAction>,
     pub(super) listen_addr: String,
-    pub(super) front_domain: Vec<String>,
+    pub(super) cover_targets: Vec<String>,
     pub(super) qkeys: Arc<std::sync::Mutex<QKeyRegistry>>,
     pub(super) graceful_shutdown: Arc<GracefulShutdown>,
 }
@@ -1168,7 +1168,7 @@ impl ServerAdminCore {
         match issue_unix_admin_qkey(
             &mut registry,
             &self.control_plane.listen_addr,
-            &self.control_plane.front_domain,
+            &self.control_plane.cover_targets,
         ) {
             Ok(qkey) => qkey,
             Err(e) => {
@@ -1183,7 +1183,7 @@ impl ServerAdminCore {
         let issued = match issue_http_admin_qkey(
             &mut registry,
             &self.control_plane.listen_addr,
-            &self.control_plane.front_domain,
+            &self.control_plane.cover_targets,
             req,
         ) {
             Ok(issued) => issued,

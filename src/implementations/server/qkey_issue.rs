@@ -5,8 +5,15 @@ pub fn require_qkey_for_new_clients() -> bool {
     true
 }
 
+/// Cover-SNI policy embedded in an issued QKey (TODO-1048).
+///
+/// `qkey_sni` is the SNI the client presents on the outer hop; it must name a
+/// host whose certificate that hop legitimately presents or relays. The
+/// `df_sni_*` JSON keys in `extra_json` are a stable wire contract consumed by
+/// already-shipped clients and stay unchanged; only the Rust-side naming moved
+/// off the removed domain-fronting terminology.
 #[derive(Debug, Clone)]
-pub struct QKeyDomainFrontingPolicy {
+pub struct QKeyCoverSniPolicy {
     pub qkey_sni: String,
     pub extra_json: String,
 }
@@ -66,61 +73,87 @@ impl QKeyAuthState {
     }
 }
 
-pub fn default_qkey_domain_fronting_policy(nonce_hex: &str) -> QKeyDomainFrontingPolicy {
-    QKeyDomainFrontingPolicy {
-        qkey_sni: BUILTIN_FRONTING_SNI_ALLOWLIST[0].to_string(),
+pub fn default_qkey_cover_sni_policy(nonce_hex: &str) -> QKeyCoverSniPolicy {
+    QKeyCoverSniPolicy {
+        qkey_sni: BUILTIN_COVER_SNI_ALLOWLIST[0].to_string(),
         extra_json: serde_json::json!({
             "nonce": nonce_hex,
-            "df_sni_mode": DF_SNI_MODE_AUTO_ROTATING,
-            "df_sni_pool": [BUILTIN_FRONTING_SNI_ALLOWLIST[0]],
+            "df_sni_mode": COVER_SNI_MODE_AUTO_ROTATING,
+            "df_sni_pool": [BUILTIN_COVER_SNI_ALLOWLIST[0]],
         })
         .to_string(),
     }
 }
 
-pub fn resolve_qkey_domain_fronting_policy(
-    front_domain: &[String],
+/// Resolve the cover-SNI policy for an issued QKey.
+///
+/// The returned SNI names a cover host whose certificate the hop presents or
+/// relays; `cover_domains` is the configured cover-target list used as the
+/// rotation pool. Entries outside the built-in allowlist are dropped so an
+/// issued QKey never asks a client to present an SNI the hop cannot serve.
+pub fn resolve_qkey_cover_sni_policy(
+    cover_domains: &[String],
     listen_addr: &str,
     requested_strategy: Option<&str>,
     requested_domain: Option<&str>,
     nonce_hex: &str,
-) -> Result<QKeyDomainFrontingPolicy, String> {
+) -> Result<QKeyCoverSniPolicy, String> {
     let allowlist: Vec<String> =
-        BUILTIN_FRONTING_SNI_ALLOWLIST.iter().map(|d| (*d).to_string()).collect();
+        BUILTIN_COVER_SNI_ALLOWLIST.iter().map(|d| (*d).to_string()).collect();
     let default_domain =
         allowlist.first().cloned().ok_or_else(|| "Missing SNI allowlist defaults".to_string())?;
     let mode_raw = requested_strategy.unwrap_or("").trim().to_ascii_lowercase();
     let mode = if mode_raw.is_empty()
         || mode_raw == "auto"
         || mode_raw == "rotating"
-        || mode_raw == DF_SNI_MODE_AUTO_ROTATING
+        || mode_raw == COVER_SNI_MODE_AUTO_ROTATING
     {
-        DF_SNI_MODE_AUTO_ROTATING
-    } else if mode_raw == DF_SNI_MODE_FIXED {
-        DF_SNI_MODE_FIXED
+        COVER_SNI_MODE_AUTO_ROTATING
+    } else if mode_raw == COVER_SNI_MODE_FIXED {
+        COVER_SNI_MODE_FIXED
+    } else if mode_raw == COVER_SNI_MODE_OFF {
+        COVER_SNI_MODE_OFF
     } else {
         return Err(
-            "Invalid Domain Fronting [SNI] strategy. Valid: fixed, auto_rotating".to_string()
+            "Invalid cover SNI strategy. Valid: fixed, auto_rotating, off".to_string()
         );
     };
     let server_host = extract_host_from_endpoint(listen_addr);
 
-    if mode == DF_SNI_MODE_FIXED {
+    if mode == COVER_SNI_MODE_OFF {
+        // "off" means no cover rotation at all: the issued QKey names the
+        // server's own listen host so the client SNI equals the certificate
+        // name of the hop it dials.
+        let host = server_host
+            .clone()
+            .ok_or_else(|| "Cover SNI 'off' requires a DNS listen host".to_string())?;
+        return Ok(QKeyCoverSniPolicy {
+            qkey_sni: host.clone(),
+            extra_json: serde_json::json!({
+                "nonce": nonce_hex,
+                "df_sni_mode": COVER_SNI_MODE_OFF,
+                "server_host": host,
+            })
+            .to_string(),
+        });
+    }
+
+    if mode == COVER_SNI_MODE_FIXED {
         let requested = requested_domain
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| "Domain Fronting [SNI] fixed mode requires a domain".to_string())?;
+            .ok_or_else(|| "Cover SNI fixed mode requires a domain".to_string())?;
         let domain = normalize_sni_host(requested)
-            .ok_or_else(|| "Invalid Domain Fronting [SNI] domain".to_string())?;
+            .ok_or_else(|| "Invalid cover SNI domain".to_string())?;
         if !allowlist.iter().any(|v| v == &domain) {
-            return Err("Domain Fronting [SNI] domain is not allowlisted".to_string());
+            return Err("Cover SNI domain is not allowlisted".to_string());
         }
         let domain_for_json = domain.clone();
-        return Ok(QKeyDomainFrontingPolicy {
+        return Ok(QKeyCoverSniPolicy {
             qkey_sni: domain,
             extra_json: serde_json::json!({
                 "nonce": nonce_hex,
-                "df_sni_mode": DF_SNI_MODE_FIXED,
+                "df_sni_mode": COVER_SNI_MODE_FIXED,
                 "df_sni_domain": domain_for_json,
                 "server_host": server_host,
             })
@@ -128,7 +161,7 @@ pub fn resolve_qkey_domain_fronting_policy(
         });
     }
 
-    let mut pool: Vec<String> = front_domain
+    let mut pool: Vec<String> = cover_domains
         .iter()
         .filter_map(|raw| normalize_sni_host(raw))
         .filter(|raw| allowlist.iter().any(|v| v == raw))
@@ -137,11 +170,11 @@ pub fn resolve_qkey_domain_fronting_policy(
         pool = allowlist;
     }
     let qkey_sni = pool.first().cloned().unwrap_or(default_domain);
-    Ok(QKeyDomainFrontingPolicy {
+    Ok(QKeyCoverSniPolicy {
         qkey_sni,
         extra_json: serde_json::json!({
             "nonce": nonce_hex,
-            "df_sni_mode": DF_SNI_MODE_AUTO_ROTATING,
+            "df_sni_mode": COVER_SNI_MODE_AUTO_ROTATING,
             "df_sni_pool": pool,
             "server_host": server_host,
         })
@@ -196,19 +229,19 @@ pub(super) fn extract_host_from_endpoint(endpoint: &str) -> Option<String> {
 pub fn issue_unix_admin_qkey(
     registry: &mut QKeyRegistry,
     listen_addr: &str,
-    front_domain: &[String],
+    cover_domains: &[String],
 ) -> Result<String, String> {
     let entry = issue_qkey(
         registry,
         listen_addr,
-        front_domain,
+        cover_domains,
         IssueQKeyParams {
             name: None,
             port: None,
             ttl_seconds: None,
             stealth: Some("dynamic"),
             fec: None,
-            sni_strategy: Some(DF_SNI_MODE_AUTO_ROTATING),
+            sni_strategy: Some(COVER_SNI_MODE_AUTO_ROTATING),
             sni_domain: None,
             bandwidth_policy: None,
             traffic_analysis_policy: None,
@@ -221,13 +254,13 @@ pub fn issue_unix_admin_qkey(
 pub fn issue_http_admin_qkey(
     registry: &mut QKeyRegistry,
     listen_addr: &str,
-    front_domain: &[String],
+    cover_domains: &[String],
     req: &IssueQKeyRequest,
 ) -> Result<IssuedQKey, String> {
     issue_qkey(
         registry,
         listen_addr,
-        front_domain,
+        cover_domains,
         IssueQKeyParams {
             name: req.name.as_deref(),
             port: req.port,
@@ -258,7 +291,7 @@ struct IssueQKeyParams<'a> {
 fn issue_qkey(
     registry: &mut QKeyRegistry,
     listen_addr: &str,
-    front_domain: &[String],
+    cover_domains: &[String],
     params: IssueQKeyParams<'_>,
     rng_context: &str,
 ) -> Result<IssuedQKey, String> {
@@ -272,8 +305,8 @@ fn issue_qkey(
         policy.validate().map_err(str::to_string)?;
     }
     let nonce_hex = random_hex_8(&format!("{rng_context}::nonce"));
-    let sni_policy = resolve_qkey_domain_fronting_policy(
-        front_domain,
+    let sni_policy = resolve_qkey_cover_sni_policy(
+        cover_domains,
         listen_addr,
         params.sni_strategy,
         params.sni_domain,
@@ -453,17 +486,26 @@ pub fn apply_runtime_stealth_overrides(
     os: OsProfile,
     disable_doh: bool,
     doh_provider: &str,
-    disable_fronting: bool,
-    front_domain: &[String],
+    disable_cover: bool,
+    cover_targets: &[String],
     disable_http3: bool,
 ) {
     apply_runtime_profile_identity(sc, profile, os);
     sc.enable_doh = !disable_doh;
     sc.doh_provider.clear();
     sc.doh_provider.push_str(doh_provider);
-    sc.fronting_domains = front_domain.to_vec();
-    sc.enable_domain_fronting = !disable_fronting
-        && (!sc.fronting_domains.is_empty() || matches!(sc.mode, StealthMode::StealthMax));
+    // TODO-1048: cover targets replace the removed fronting-domain flag.
+    // StealthMax without explicit targets keeps its broad-provider default;
+    // disabling cover clears the list so no cover authority is ever emitted.
+    sc.reality_cover_targets = if disable_cover {
+        Vec::new()
+    } else if !cover_targets.is_empty() {
+        cover_targets.to_vec()
+    } else if matches!(sc.mode, StealthMode::StealthMax) {
+        CoverTargetRotator::broad_providers().targets().to_vec()
+    } else {
+        Vec::new()
+    };
     sc.enable_http3_masquerading = !disable_http3;
     if disable_http3 {
         sc.use_qpack_headers = false;
@@ -865,8 +907,8 @@ pub(crate) fn apply_runtime_config_reload_with_generation(
         os,
         disable_doh,
         doh_provider,
-        disable_fronting,
-        front_domain,
+        disable_cover,
+        cover_targets,
         disable_http3,
     } = stealth_policy;
     let contents =
@@ -902,8 +944,8 @@ pub(crate) fn apply_runtime_config_reload_with_generation(
         os,
         disable_doh,
         doh_provider,
-        disable_fronting,
-        front_domain,
+        disable_cover,
+        cover_targets,
         disable_http3,
     );
 

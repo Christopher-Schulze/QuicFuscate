@@ -362,12 +362,16 @@ impl QuicFuscateEngine {
                         "engine server runtime",
                     );
                     let doh_provider = self.config.stealth.doh_provider.clone();
-                    let front_domain = self.config.stealth.fronting_domains.clone();
+                    let cover_targets = self.config.stealth.reality_cover_targets.clone();
                     let tun_enable =
                         self.config.interface.interface_type == super::config::InterfaceType::Tun;
                     let profile_interval = self.config.fingerprint_rotation.interval_secs;
                     let doh_disable = !self.config.stealth.enable_doh;
-                    let fronting_disable = !self.config.stealth.enable_domain_fronting;
+                    let cover_disable = self.config.stealth.reality_cover_targets.is_empty()
+                        && !matches!(
+                            self.config.stealth.mode,
+                            super::config::StealthMode::StealthMax
+                        );
                     let http3_disable = !self.config.stealth.enable_http3_masquerading;
                     let launch = PreparedStandaloneLaunch::new_headless_with_runtime_stealth(
                         transport,
@@ -382,8 +386,8 @@ impl QuicFuscateEngine {
                             os,
                             disable_doh: doh_disable,
                             doh_provider: doh_provider.as_str(),
-                            disable_fronting: fronting_disable,
-                            front_domain: &front_domain,
+                            disable_cover: cover_disable,
+                            cover_targets: &cover_targets,
                             disable_http3: http3_disable,
                         },
                         tun_enable,

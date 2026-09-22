@@ -10,7 +10,7 @@ type StubState = {
 const CONFIG_TOML = [
   "[stealth]",
   "mode = \"manual\"",
-  "enable_domain_fronting = true",
+  "reality_cover_targets = ["cdn.cloudflare.com", "cloudfront.net"]",
   "enable_http3_masquerading = true",
   "use_tls_cover = true",
   "use_qpack_headers = true",

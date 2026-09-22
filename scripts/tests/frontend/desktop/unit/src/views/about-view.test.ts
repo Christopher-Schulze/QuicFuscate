@@ -88,7 +88,7 @@ describe("desktop about view", () => {
       expect(screen.getByText("Rust + Tokio")).toBeInTheDocument();
       expect(screen.getByText("Protocol")).toBeInTheDocument();
       expect(screen.getByText("Cipher")).toBeInTheDocument();
-      expect(screen.getByText("AEGIS-128")).toBeInTheDocument();
+      expect(screen.getByText("AES-128-GCM | AEGIS-128L")).toBeInTheDocument();
     });
   });
 

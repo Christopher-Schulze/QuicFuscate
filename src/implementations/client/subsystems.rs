@@ -85,7 +85,7 @@ mod tests {
     fn test_init_subsystems_manual_mode() {
         let mut config = EngineConfig::default();
         config.stealth.mode = qf_engine_types::StealthMode::Manual;
-        config.stealth.enable_domain_fronting = true;
+        config.stealth.reality_cover_targets = vec!["cover.example".to_string()];
         config.stealth.enable_traffic_padding = true;
         config.stealth.max_padding_size = 512;
         let result = init_subsystems_with_runtime(&config, None);

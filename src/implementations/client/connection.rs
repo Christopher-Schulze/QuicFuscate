@@ -902,7 +902,7 @@ mod tests {
         let sc = ClientConnection::build_stealth_config(&config).unwrap();
         assert!(sc.max_padding_size > 0);
         assert_eq!(sc.mode, crate::stealth::StealthMode::Dynamic);
-        assert!(!sc.enable_domain_fronting);
+        assert!(sc.reality_cover_targets.is_empty());
         assert!(ClientConnection::should_use_utls(&config));
 
         let fc = ClientConnection::build_fec_config(&config).unwrap();

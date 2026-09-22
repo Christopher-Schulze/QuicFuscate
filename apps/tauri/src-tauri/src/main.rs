@@ -322,9 +322,9 @@ const MAX_REMOTE_CHARS: usize = 256;
 const MAX_SNI_CHARS: usize = 256;
 const MAX_LOCATION_CHARS: usize = 128;
 const MAX_QKEY_CHARS: usize = 16 * 1024;
-const QKEY_DF_SNI_MODE_FIXED: &str = "fixed";
-const QKEY_DF_SNI_MODE_AUTO_ROTATING: &str = "auto_rotating";
-const BUILTIN_FRONTING_SNI_ALLOWLIST: [&str; 6] = [
+const QKEY_COVER_SNI_MODE_FIXED: &str = "fixed";
+const QKEY_COVER_SNI_MODE_AUTO_ROTATING: &str = "auto_rotating";
+const BUILTIN_COVER_SNI_ALLOWLIST: [&str; 6] = [
     "cdn.cloudflare.com",
     "cloudflare-dns.com",
     "akamai.net",
@@ -395,13 +395,17 @@ fn extract_host_from_remote(remote: &str) -> Option<String> {
     normalize_sni_host(trimmed)
 }
 
+/// Cover-SNI policy parsed from an issued QKey's extra JSON (TODO-1048).
+/// The `df_sni_*` keys are the stable wire contract emitted by the server;
+/// `df_sni_mode = "off"` intentionally yields `None` so the caller keeps the
+/// QKey's own SNI (the server's listen host).
 #[derive(Debug, Clone)]
-enum DomainFrontingSniPolicy {
+enum CoverSniPolicy {
     Fixed(String),
     AutoRotating(Vec<String>),
 }
 
-fn parse_qkey_domain_fronting_sni_policy(extra: Option<&str>) -> Option<DomainFrontingSniPolicy> {
+fn parse_qkey_cover_sni_policy(extra: Option<&str>) -> Option<CoverSniPolicy> {
     let raw = extra?.trim();
     if raw.is_empty() {
         return None;
@@ -409,12 +413,12 @@ fn parse_qkey_domain_fronting_sni_policy(extra: Option<&str>) -> Option<DomainFr
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
     let obj = parsed.as_object()?;
     let mode = obj.get("df_sni_mode")?.as_str()?.trim().to_ascii_lowercase();
-    if mode == QKEY_DF_SNI_MODE_FIXED {
+    if mode == QKEY_COVER_SNI_MODE_FIXED {
         let domain = obj.get("df_sni_domain")?.as_str()?;
         let normalized = normalize_sni_host(domain)?;
-        return Some(DomainFrontingSniPolicy::Fixed(normalized));
+        return Some(CoverSniPolicy::Fixed(normalized));
     }
-    if mode == QKEY_DF_SNI_MODE_AUTO_ROTATING {
+    if mode == QKEY_COVER_SNI_MODE_AUTO_ROTATING {
         let mut pool: Vec<String> = obj
             .get("df_sni_pool")
             .and_then(|v| v.as_array())
@@ -424,9 +428,9 @@ fn parse_qkey_domain_fronting_sni_policy(extra: Option<&str>) -> Option<DomainFr
             .filter_map(normalize_sni_host)
             .collect();
         if pool.is_empty() {
-            pool = BUILTIN_FRONTING_SNI_ALLOWLIST.iter().map(|v| (*v).to_string()).collect();
+            pool = BUILTIN_COVER_SNI_ALLOWLIST.iter().map(|v| (*v).to_string()).collect();
         }
-        return Some(DomainFrontingSniPolicy::AutoRotating(pool));
+        return Some(CoverSniPolicy::AutoRotating(pool));
     }
     None
 }
@@ -1383,7 +1387,6 @@ fn build_client_engine_config_with_circuit(
         };
         if cfg.stealth.mode == quicfuscate::engine::StealthMode::Off {
             cfg.stealth.use_utls = false;
-            cfg.stealth.enable_domain_fronting = false;
             cfg.stealth.enable_http3_masquerading = false;
             cfg.stealth.use_tls_cover = false;
             cfg.stealth.use_qpack_headers = false;
@@ -1393,7 +1396,7 @@ fn build_client_engine_config_with_circuit(
             cfg.stealth.enable_doh = false;
             cfg.stealth.doh_provider.clear();
             cfg.stealth.max_padding_size = 0;
-            cfg.stealth.fronting_domains.clear();
+            cfg.stealth.reality_cover_targets.clear();
             cfg.stealth.enable_network_fingerprint_normalization = false;
             cfg.stealth.normalize_target_size = 0;
             cfg.fingerprint_rotation.enabled = false;
@@ -1408,14 +1411,15 @@ fn build_client_engine_config_with_circuit(
         };
     }
 
-    if let Some(policy) = parse_qkey_domain_fronting_sni_policy(qk.extra.as_deref()) {
+    if let Some(policy) = parse_qkey_cover_sni_policy(qk.extra.as_deref()) {
         let endpoint_host = extract_host_from_remote(&cfg.connection.remote)
             .unwrap_or_else(|| cfg.connection.sni.clone());
         cfg.connection.sni = endpoint_host;
-        cfg.stealth.enable_domain_fronting = true;
-        cfg.stealth.fronting_domains = match policy {
-            DomainFrontingSniPolicy::Fixed(domain) => vec![domain],
-            DomainFrontingSniPolicy::AutoRotating(pool) => pool,
+        // TODO-1048: the cover-SNI pool maps onto reality_cover_targets; the
+        // client rotates through names the hop legitimately serves or relays.
+        cfg.stealth.reality_cover_targets = match policy {
+            CoverSniPolicy::Fixed(domain) => vec![domain],
+            CoverSniPolicy::AutoRotating(pool) => pool,
         };
     }
 
@@ -1425,8 +1429,7 @@ fn build_client_engine_config_with_circuit(
             let normalized = normalize_sni_host(trimmed)
                 .ok_or_else(|| "Invalid debug SNI override".to_string())?;
             cfg.connection.sni = normalized;
-            cfg.stealth.enable_domain_fronting = false;
-            cfg.stealth.fronting_domains.clear();
+            cfg.stealth.reality_cover_targets.clear();
         }
     }
 

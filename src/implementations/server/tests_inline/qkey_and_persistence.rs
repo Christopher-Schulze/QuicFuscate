@@ -27,7 +27,7 @@ fn test_normalize_qkey_name_validates_length_and_chars() {
     assert!(normalize_qkey_name(Some("bad\x00name")).is_err());
 }
 
-// --- SNI / domain fronting helpers ---
+// --- SNI / cover-target helpers ---
 
 #[test]
 fn test_is_valid_sni_host_rejects_bad_values() {
@@ -499,28 +499,27 @@ fn test_resolve_qkey_remote_empty_address_error() {
 #[test]
 fn test_apply_runtime_stealth_overrides_sets_all_fields() {
     let mut sc = StealthConfig::default();
-    let front_domains = vec!["cdn.cloudflare.com".to_string()];
+    let cover_targets = vec!["cdn.cloudflare.com".to_string()];
     apply_runtime_stealth_overrides(
         &mut sc,
         BrowserProfile::Firefox,
         OsProfile::Windows,
         true, // disable_doh
         "custom-doh",
-        false, // disable_fronting
-        &front_domains,
+        false, // disable_cover
+        &cover_targets,
         true, // disable_http3
     );
     assert_eq!(sc.initial_browser, BrowserProfile::Firefox);
     assert_eq!(sc.initial_os, OsProfile::Windows);
     assert!(!sc.enable_doh);
     assert_eq!(sc.doh_provider, "custom-doh");
-    assert!(sc.enable_domain_fronting);
-    assert_eq!(sc.fronting_domains, front_domains);
+    assert_eq!(sc.reality_cover_targets, cover_targets);
     assert!(!sc.enable_http3_masquerading);
 }
 
 #[test]
-fn test_apply_runtime_stealth_overrides_keeps_fronting_explicit_only() {
+fn test_apply_runtime_stealth_overrides_keeps_cover_explicit_or_stealth_max_only() {
     let mut sc = StealthConfig::default();
     apply_runtime_stealth_overrides(
         &mut sc,
@@ -532,7 +531,7 @@ fn test_apply_runtime_stealth_overrides_keeps_fronting_explicit_only() {
         &[],
         false,
     );
-    assert!(!sc.enable_domain_fronting);
+    assert!(sc.reality_cover_targets.is_empty());
 
     sc.mode = StealthMode::StealthMax;
     apply_runtime_stealth_overrides(
@@ -545,7 +544,7 @@ fn test_apply_runtime_stealth_overrides_keeps_fronting_explicit_only() {
         &[],
         false,
     );
-    assert!(sc.enable_domain_fronting);
+    assert!(!sc.reality_cover_targets.is_empty());
 }
 
 // --- LiveServerDomain session tracking ---

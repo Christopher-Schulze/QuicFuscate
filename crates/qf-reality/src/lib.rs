@@ -78,6 +78,46 @@ impl RealityProxy {
         }
     }
 
+    /// Create a proxy whose relay targets come from configuration
+    /// (`stealth.reality_cover_targets`, TODO-1048). Entries are `host` or
+    /// `host:port`; a bare host is bound to port 443. Entries that fail
+    /// validation are dropped with a warning. An empty result falls back to
+    /// the environment / built-in target set.
+    pub fn new_with_targets(
+        tx: mpsc::Sender<FallbackResponse>,
+        environment: &qf_common::env_utils::EnvSnapshot,
+        configured: &[String],
+    ) -> Self {
+        let mut proxy = Self::new_with_snapshot(tx, environment);
+        let normalized: Vec<String> = configured
+            .iter()
+            .filter_map(|entry| {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    return None;
+                }
+                let candidate =
+                    if entry.contains(':') { entry.to_string() } else { format!("{entry}:443") };
+                if valid_reality_target(&candidate) {
+                    Some(candidate)
+                } else {
+                    log::warn!("RealityProxy: dropping invalid cover target '{entry}'");
+                    None
+                }
+            })
+            .collect();
+        if !normalized.is_empty() {
+            proxy.targets = normalized;
+        }
+        proxy
+    }
+
+    /// Number of active relay targets (test-only).
+    #[cfg(test)]
+    pub fn target_count(&self) -> usize {
+        self.targets.len()
+    }
+
     /// Selects a rugged upstream target.
     fn select_target(&self) -> &str {
         let idx = self.target_idx.fetch_add(1, Ordering::Relaxed);
@@ -1263,5 +1303,61 @@ mod tests {
                 &captured.inbound[..captured.inbound.len().min(payload.len())]
             );
         });
+    }
+
+    /// TODO-1048 acceptance: a probe without a tunnel secret is relayed to the
+    /// configured cover target and receives that endpoint's real bytes back
+    /// verbatim. The cover origin here is a local UDP listener; no public
+    /// network is touched.
+    #[test]
+    fn probe_relay_returns_cover_listener_bytes_verbatim() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            // Local "cover origin": answers the probe packet with fixed bytes
+            // that stand in for the origin's TLS handshake response.
+            let cover = UdpSocket::bind("127.0.0.1:0").await.expect("bind cover listener");
+            let cover_addr = cover.local_addr().expect("cover addr");
+            const COVER_BYTES: &[u8] = b"\x16\x03\x03COVER_ORIGIN_FLIGHT";
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let (len, peer) = cover.recv_from(&mut buf).await.expect("cover recv");
+                assert_eq!(&buf[..len], b"PROBE_PACKET");
+                cover.send_to(COVER_BYTES, peer).await.expect("cover send");
+            });
+
+            let environment = qf_common::env_utils::EnvSnapshot::capture();
+            let (tx, mut rx) = mpsc::channel(8);
+            let proxy =
+                RealityProxy::new_with_targets(tx, &environment, &[cover_addr.to_string()]);
+            let probe_source: SocketAddr = "10.9.8.7:4444".parse().unwrap();
+            proxy.forward_probe(b"PROBE_PACKET", probe_source);
+
+            let response = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("relay response timed out")
+                .expect("relay channel closed");
+            assert_eq!(response.target, probe_source);
+            assert_eq!(response.data, COVER_BYTES, "cover bytes must arrive unmodified");
+        });
+    }
+
+    /// Configured cover targets replace the built-in set; bare hosts bind to
+    /// :443 and malformed entries are dropped, falling back to defaults only
+    /// when nothing valid remains.
+    #[test]
+    fn configured_cover_targets_override_builtins() {
+        let environment = qf_common::env_utils::EnvSnapshot::capture();
+        let (tx, _rx) = mpsc::channel(8);
+        let proxy = RealityProxy::new_with_targets(
+            tx,
+            &environment,
+            &["cover-a.example".to_string(), "cover-b.example:8443".to_string()],
+        );
+        assert_eq!(proxy.target_count(), 2);
+        assert_eq!(proxy.targets, ["cover-a.example:443", "cover-b.example:8443"]);
     }
 }

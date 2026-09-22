@@ -4,7 +4,7 @@ title: Replace domain fronting with a real Reality fallback
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1047, TODO-1062]
 ---
@@ -70,3 +70,56 @@ One mechanism.
 
 - Relaying to a public site from tests must not hit the network. The acceptance test is local only.
 - A dedicated VPN IP is still the identity. This task removes the certificate mismatch. It does not hide the IP. Shared-IP hiding is TODO-1063 and TODO-1064.
+
+## Implementation (done)
+
+- `DomainFrontingManager` is `CoverTargetRotator` (inline module in
+  `crates/qf-stealth/src/lib.rs`): `Arc<[String]>` targets, atomic
+  round-robin, `next_cover_target`/`random_cover_target`/`from_providers`/
+  `broad_providers`. Same lock-free semantics, honest name.
+- `StealthConfig`: `enable_domain_fronting`/`fronting_domains` removed;
+  `reality_cover_targets: Vec<String>` is the live field. TOML still parses
+  `fronting_domains` as a deprecated alias and rejects
+  `enable_domain_fronting = true` with a pointer to the new key;
+  `QUICFUSCATE_FRONTING_DOMAINS` is a deprecated env alias,
+  `QUICFUSCATE_FRONTING=1` fails startup. `is_valid_cover_target` accepts
+  `host` or `host:port` and rejects whitespace/userinfo/garbage ports.
+- `qf-reality`: `RealityProxy::new_with_targets` takes configured targets,
+  normalizes bare hosts to `:443`, drops invalid entries with a log line,
+  and falls back to env/built-in targets when the list ends up empty. The
+  UDP acceptance test binds a local listener, sends probe bytes through the
+  relay, and asserts the echoed bytes return unmodified.
+- `StealthManager`: `cover_targets: Option<CoverTargetRotator>` replaces the
+  fronting manager. Cover traffic, WebTransport authority, and MASQUE
+  authority consume the rotator; the Reality proxy is armed when
+  `dynamic_enabled` or explicit targets exist. `handle_fallback` still
+  prefers the cached response and otherwise relays.
+- `src/core/connection.rs`: SNI is `server_name` verbatim; the
+  `get_connection_headers` fronted-alias path is gone. `host_header` is
+  documented as always equal to the SNI host.
+- Server/Runtime chain: `disable_fronting` -> `disable_cover`,
+  `front_domain` -> `cover_targets` across bootstrap policy, standalone
+  runtime metadata, admin control plane, and reload. CLI `--cover-target` /
+  `--disable-cover` keep `--front-domain` / `--disable-fronting` as
+  deprecated clap aliases.
+- QKey SNI policy renamed to `QKeyCoverSniPolicy` /
+  `resolve_qkey_cover_sni_policy` / `COVER_SNI_MODE_*`. A third strategy
+  `off` joins `fixed`/`auto_rotating`: it pins the QKey SNI to the listen
+  host and is rejected when the listen address has no DNS host. The
+  `df_sni_*` JSON keys stay — they are the stable wire contract parsed by
+  shipped clients.
+- Tauri client: `CoverSniPolicy`/`parse_qkey_cover_sni_policy` parse the
+  unchanged `df_sni_*` keys; the pool lands in
+  `cfg.stealth.reality_cover_targets`. `df_sni_mode = "off"` yields no
+  policy, so the client keeps the QKey SNI.
+- Frontend: `StealthManualSettings.enable_domain_fronting` removed; manual
+  stealth shows a "Cover Targets" comma-text input writing
+  `stealth.reality_cover_targets` (legacy `fronting_domains` is read for
+  display and blanked on write). `FRONTING_SNI_ALLOWLIST` ->
+  `COVER_SNI_ALLOWLIST`; QKey panel labels read "Cover SNI"; desktop
+  `domain-fronting-policy.ts` -> `cover-sni-policy.ts` with
+  `resolveCoverSniDisplay` (wire keys unchanged).
+- Verified: qf-stealth 124/124, qf-reality 25/25 (incl. local relay
+  acceptance), qf-engine-types 75/75, root lib 1776/1776, web-admin unit
+  412/412, desktop unit 442/442, shared-ui 100/100, Tauri `cargo check`
+  clean, `cargo check --all-targets` clean.

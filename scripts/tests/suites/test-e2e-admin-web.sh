@@ -289,7 +289,7 @@ window_good = 20
 mode = "auto"
 enable_doh = true
 enable_http3_masquerading = true
-enable_domain_fronting = false
+reality_cover_targets = []
 
 [optimization]
 memory_pool_size = 33554432
@@ -305,7 +305,7 @@ window_good = 20
 mode = "auto"
 enable_doh = true
 enable_http3_masquerading = true
-enable_domain_fronting = false
+reality_cover_targets = []
 
 [optimization]
 memory_pool_size = 16777216

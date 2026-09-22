@@ -65,7 +65,6 @@ export type StealthPresetUi = "dynamic" | "performance" | "stealth" | "Stealth M
 export type CcSelection = CongestionControlAlgorithm | "__custom__";
 
 export interface StealthManualSettings {
-  enable_domain_fronting: boolean;
   enable_http3_masquerading: boolean;
   use_tls_cover: boolean;
   use_qpack_headers: boolean;

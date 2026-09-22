@@ -25,7 +25,7 @@ QuicFuscate is a Cargo workspace. The product runtime stays in the root `quicfus
   - `src/core.rs` - QUIC session and I/O core
   - `crates/qf-crypto/` - packet protection. rustls AES-128-GCM is the handshake and stealth payload. `off` and `performance` use libaegis AEGIS-128L after authentication
   - `crates/qf-fec/` - FEC backend. The root `src/fec/` module is the compatibility projection
-  - `src/stealth/` - DoH, HTTP/3 masquerading, TLS Cover, fingerprinting, domain fronting, QPACK helpers
+  - `src/stealth/` - DoH, HTTP/3 masquerading, TLS Cover, fingerprinting, Reality cover targets, QPACK helpers
   - TLS fingerprints: deterministic in-memory ClientHello synthesis in `src/stealth/` (no on-disk profiles required). Optional external base64 dumps under top-level `browser_profiles/` are used by the TLS utility scripts for auditing only.
 - Script workflow
   - Consolidated build/test/audit/bench scripts under `scripts/{build,benchmarks,tests,utils}/`
@@ -121,7 +121,7 @@ Before opening a PR, all of the following must be true:
 
 ## Module Boundaries & Layout
 - Keep the FEC logic consolidated in `src/fec/`. New submodules only when extracting large inline blocks
-- Stealth functionality belongs in `src/stealth/` (DoH, TLS Cover, HTTP/3 masquerading, domain fronting, QPACK)
+- Stealth functionality belongs in `src/stealth/` (DoH, TLS Cover, HTTP/3 masquerading, Reality cover targets, QPACK)
 - QUIC stream/session internals stay in `src/core.rs`
 - TLS fingerprint handling belongs to `src/stealth/` (in-memory generation + caching)
 

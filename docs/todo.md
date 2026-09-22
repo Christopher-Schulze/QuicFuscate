@@ -469,7 +469,7 @@
 - Detail: `docs/todo/todo-1047-browser-capture-clienthello.md`
 
 ### TODO-1048 - Replace domain fronting with a real Reality fallback
-- OPEN. Drop SNI-vs-certificate fronting. Cover list is relayed for real. Probe without a secret gets the live cover handshake.
+- DONE. Domain fronting is gone from the wire path: SNI always equals the hop certificate name. `CoverTargetRotator` (qf-stealth) plus `stealth.reality_cover_targets` replace `enable_domain_fronting`/`fronting_domains` (legacy keys still parse; `true` fails validation). `RealityProxy::new_with_targets` relays probe bytes unchanged to configured cover hosts. QKey `df_sni_*` wire keys unchanged; `off` strategy added. CLI/frontend/docs migrated (`--cover-target`, `--disable-cover`; deprecated aliases retained).
 - Detail: `docs/todo/todo-1048-reality-replaces-domain-fronting.md`
 
 ### TODO-1049 - Delete dead first-party AES-GCM and ChaCha

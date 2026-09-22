@@ -1,14 +1,14 @@
 //! Root-independent stealth helpers shared by the product stealth manager.
 //!
 //! The root package keeps compatibility projections for the historical private
-//! types while this crate owns domain-fronting rotation and flow-shaping state.
+//! types while this crate owns cover-target rotation and flow-shaping state.
 
 #[doc(hidden)]
 pub use config::{PaddingStrategy, RotationMode, StealthMode};
 #[doc(hidden)]
 pub use cover_traffic::CoverTrafficScheduler;
 #[doc(hidden)]
-pub use domain_fronting::{CdnProvider, DomainFrontingManager};
+pub use cover_targets::{CdnProvider, CoverTargetRotator};
 #[doc(hidden)]
 pub use escalation::EscalationState;
 #[doc(hidden)]
@@ -84,13 +84,13 @@ pub mod tls_profile;
 #[doc(hidden)]
 pub mod traffic;
 
-mod domain_fronting {
+mod cover_targets {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    const DEFAULT_FRONTING_DOMAIN: &str = "cdn.cloudflare.com";
+    const DEFAULT_COVER_TARGET: &str = "cdn.cloudflare.com";
 
-    /// Supported CDN providers for domain-fronting rotation.
+    /// Supported CDN providers for cover-target rotation.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[doc(hidden)]
     pub enum CdnProvider {
@@ -145,36 +145,40 @@ mod domain_fronting {
         }
     }
 
-    /// Thread-safe domain rotation for configured or built-in CDN domains.
+    /// Thread-safe rotation over cover-target hostnames.
+    ///
+    /// Cover targets are names whose certificate the selected hop legitimately
+    /// presents or relays (TODO-1048): they name real endpoints, never an SNI
+    /// that disagrees with the certificate of the connection it is sent on.
     #[doc(hidden)]
-    pub struct DomainFrontingManager {
-        domains: Arc<[String]>,
+    pub struct CoverTargetRotator {
+        targets: Arc<[String]>,
         index: AtomicUsize,
     }
 
-    impl DomainFrontingManager {
-        /// Create a manager from an explicit domain list.
+    impl CoverTargetRotator {
+        /// Create a rotator from an explicit cover-target list.
         #[inline]
         #[doc(hidden)]
-        pub fn new(domains: Vec<String>) -> Self {
-            Self { domains: Arc::from(domains), index: AtomicUsize::new(0) }
+        pub fn new(targets: Vec<String>) -> Self {
+            Self { targets: Arc::from(targets), index: AtomicUsize::new(0) }
         }
 
-        /// Create a manager from all domains exposed by the given providers.
+        /// Create a rotator from all targets exposed by the given providers.
         #[inline]
         #[doc(hidden)]
         pub fn from_providers(providers: Vec<CdnProvider>) -> Self {
-            let domains = providers
+            let targets = providers
                 .into_iter()
                 .flat_map(|provider| provider.domains().into_iter().map(str::to_owned))
                 .collect();
-            Self::new(domains)
+            Self::new(targets)
         }
 
         /// Create the built-in broad provider rotation.
         #[inline]
         #[doc(hidden)]
-        pub fn broad_provider_rotation() -> Self {
+        pub fn broad_providers() -> Self {
             Self::from_providers(vec![
                 CdnProvider::Cloudflare,
                 CdnProvider::Fastly,
@@ -189,35 +193,35 @@ mod domain_fronting {
             ])
         }
 
-        /// Select the next configured domain using strict round-robin order.
+        /// Select the next configured cover target using strict round-robin order.
         #[inline]
         #[doc(hidden)]
-        pub fn get_fronted_domain(&self) -> String {
-            if self.domains.is_empty() {
-                return DEFAULT_FRONTING_DOMAIN.to_owned();
+        pub fn next_cover_target(&self) -> String {
+            if self.targets.is_empty() {
+                return DEFAULT_COVER_TARGET.to_owned();
             }
             let current = self.index.fetch_add(1, Ordering::Relaxed);
-            self.domains[current % self.domains.len()].clone()
+            self.targets[current % self.targets.len()].clone()
         }
 
-        /// Return the configured domains for compatibility projections and tests.
+        /// Return the configured cover targets for compatibility projections and tests.
         #[inline]
         #[doc(hidden)]
-        pub fn domains(&self) -> &[String] {
-            &self.domains
+        pub fn targets(&self) -> &[String] {
+            &self.targets
         }
 
-        /// Select a random configured domain, falling back to the Cloudflare default.
+        /// Select a random configured cover target, falling back to the default.
         #[inline]
         #[doc(hidden)]
-        pub fn random_domain(&self) -> String {
+        pub fn random_cover_target(&self) -> String {
             use rand::seq::IndexedRandom;
             let mut rng = rand::rng();
-            self.domains
+            self.targets
                 .as_ref()
                 .choose(&mut rng)
                 .cloned()
-                .unwrap_or_else(|| DEFAULT_FRONTING_DOMAIN.to_owned())
+                .unwrap_or_else(|| DEFAULT_COVER_TARGET.to_owned())
         }
     }
 }
@@ -410,29 +414,28 @@ mod flow_shaping {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserProfile, CdnProvider, DomainFrontingManager, FlowShaper, OsProfile,
-        StealthPacketClass,
+        BrowserProfile, CdnProvider, CoverTargetRotator, FlowShaper, OsProfile, StealthPacketClass,
     };
     use qf_common::time_source::ProtocolClock;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn domain_rotation_is_deterministic_and_empty_falls_back() {
-        let manager = DomainFrontingManager::new(vec!["a.example".into(), "b.example".into()]);
-        assert_eq!(manager.get_fronted_domain(), "a.example");
-        assert_eq!(manager.get_fronted_domain(), "b.example");
-        assert_eq!(manager.get_fronted_domain(), "a.example");
+    fn cover_target_rotation_is_deterministic_and_empty_falls_back() {
+        let rotator = CoverTargetRotator::new(vec!["a.example".into(), "b.example".into()]);
+        assert_eq!(rotator.next_cover_target(), "a.example");
+        assert_eq!(rotator.next_cover_target(), "b.example");
+        assert_eq!(rotator.next_cover_target(), "a.example");
         assert_eq!(
-            DomainFrontingManager::new(Vec::new()).get_fronted_domain(),
+            CoverTargetRotator::new(Vec::new()).next_cover_target(),
             "cdn.cloudflare.com"
         );
     }
 
     #[test]
     fn provider_catalogs_have_expected_domains() {
-        let manager = DomainFrontingManager::from_providers(vec![CdnProvider::Cloudflare]);
-        assert!(manager.domains().iter().any(|domain| domain.contains("cloudflare")));
-        assert!(DomainFrontingManager::broad_provider_rotation().domains().len() >= 20);
+        let rotator = CoverTargetRotator::from_providers(vec![CdnProvider::Cloudflare]);
+        assert!(rotator.targets().iter().any(|target| target.contains("cloudflare")));
+        assert!(CoverTargetRotator::broad_providers().targets().len() >= 20);
     }
 
     #[test]

@@ -12,9 +12,11 @@ function makeProps(overrides: Record<string, unknown> = {}) {
     stealthManual: { ...DEFAULT_STEALTH_MANUAL },
     transportCc: "bbr3" as const,
     transportMtuText: "1400",
+    coverTargetsText: "",
     onStealthChange: vi.fn(),
     onFecChange: vi.fn(),
     onManualFlagChange: vi.fn(),
+    onCoverTargetsChange: vi.fn(),
     onCcChange: vi.fn(),
     onMtuChange: vi.fn(),
     ...overrides,
@@ -70,13 +72,13 @@ describe("StealthPanel", () => {
 
   test("does not render manual flags when preset is not manual", () => {
     render(StealthPanel, { props: makeProps({ stealthPreset: "dynamic" }) });
-    expect(screen.queryByText("Domain Fronting")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cover Targets")).not.toBeInTheDocument();
     expect(screen.queryByText("HTTP3 Masquerading")).not.toBeInTheDocument();
   });
 
   test("renders manual flags when preset is manual", () => {
     render(StealthPanel, { props: makeProps({ stealthPreset: "manual" }) });
-    expect(screen.getByText("Domain Fronting")).toBeInTheDocument();
+    expect(screen.getByText("Cover Targets")).toBeInTheDocument();
     expect(screen.getByText("HTTP3 Masquerading")).toBeInTheDocument();
     expect(screen.getByText("TLS Cover Extras")).toBeInTheDocument();
     expect(screen.getByText("QPACK Headers")).toBeInTheDocument();
@@ -89,18 +91,18 @@ describe("StealthPanel", () => {
   test("manual flag switches reflect stealthManual state", () => {
     const stealthManual: StealthManualSettings = {
       ...DEFAULT_STEALTH_MANUAL,
-      enable_domain_fronting: true,
+      enable_http3_masquerading: true,
       enable_traffic_padding: false,
     };
     render(StealthPanel, { props: makeProps({ stealthPreset: "manual", stealthManual }) });
 
     const switches = screen.getAllByRole("switch");
-    const dfSwitch = switches.find((s) => s.getAttribute("aria-label") === "Domain Fronting");
+    const h3Switch = switches.find((s) => s.getAttribute("aria-label") === "HTTP3 Masquerading");
     const tpSwitch = switches.find((s) => s.getAttribute("aria-label") === "Traffic Padding");
 
-    expect(dfSwitch).toBeDefined();
+    expect(h3Switch).toBeDefined();
     expect(tpSwitch).toBeDefined();
-    expect(dfSwitch!.getAttribute("aria-checked")).toBe("true");
+    expect(h3Switch!.getAttribute("aria-checked")).toBe("true");
     expect(tpSwitch!.getAttribute("aria-checked")).toBe("false");
   });
 
@@ -111,9 +113,24 @@ describe("StealthPanel", () => {
     });
 
     const switches = screen.getAllByRole("switch");
-    const dfSwitch = switches.find((s) => s.getAttribute("aria-label") === "Domain Fronting");
-    expect(dfSwitch).toBeDefined();
-    await fireEvent.click(dfSwitch!);
-    expect(onManualFlagChange).toHaveBeenCalledWith("enable_domain_fronting", false);
+    const h3Switch = switches.find((s) => s.getAttribute("aria-label") === "HTTP3 Masquerading");
+    expect(h3Switch).toBeDefined();
+    await fireEvent.click(h3Switch!);
+    expect(onManualFlagChange).toHaveBeenCalledWith("enable_http3_masquerading", false);
+  });
+
+  test("cover-target input reflects text and calls onCoverTargetsChange", async () => {
+    const onCoverTargetsChange = vi.fn();
+    render(StealthPanel, {
+      props: makeProps({
+        stealthPreset: "manual",
+        coverTargetsText: "cdn.example.com",
+        onCoverTargetsChange,
+      }),
+    });
+    const input = screen.getByLabelText("Cover targets");
+    expect(input).toHaveValue("cdn.example.com");
+    await fireEvent.input(input, { target: { value: "cdn.example.com, cdn2.example.com" } });
+    expect(onCoverTargetsChange).toHaveBeenCalled();
   });
 });

@@ -383,9 +383,11 @@ impl QuicFuscateConnection {
         crate::transport::rand::rand_bytes(&mut scid_bytes);
         let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);
 
-        let (sni, default_host_header) = stealth_manager.get_connection_headers(server_name);
+        // TODO-1048: the SNI always equals the hop's certificate name; the
+        // removed domain-fronting path no longer substitutes a fronted alias.
+        let sni = server_name.to_string();
         let host_header =
-            http_authority.map(|authority| authority.to_owned()).unwrap_or(default_host_header);
+            http_authority.map(|authority| authority.to_owned()).unwrap_or_else(|| sni.clone());
 
         // When a QKey is provided, embed its 12-char hex ID as the QUIC Initial packet
         // token so the server can look up the QKey record during connection acceptance.
@@ -685,7 +687,7 @@ impl QuicFuscateConnection {
         }
 
         // Enable and configure RealTLS (always on, including Performance mode)
-        // Map stealth fingerprint to TLS profile and apply SNI from fronting
+        // Map stealth fingerprint to TLS profile and apply the connection SNI
         s.conn.set_environment_snapshot(environment.clone());
         if let Err(e) = s.conn.enable_tls("unified") {
             warn!("Failed to enable unified TLS provider: {:?}", e);
@@ -778,7 +780,7 @@ impl QuicFuscateConnection {
 
         // For TUN bridging, fall back to the connection's host header as the
         // MASQUE proxy authority when the stealth manager has no explicit
-        // MASQUE proxy / fronting-domain config. The proxy authority is just
+        // MASQUE proxy / cover-target config. The proxy authority is just
         // the H3 :authority header - the server validates it against itself.
         let proxy = self
             .stealth_manager
@@ -1392,8 +1394,8 @@ impl QuicFuscateConnection {
             .map_err(|_| crate::transport::Error::NoViablePath)
     }
 
-    /// Returns the Host header that should be used for HTTP requests when domain
-    /// fronting is active.
+    /// Returns the Host header used for HTTP requests on this connection.
+    /// With domain fronting removed (TODO-1048) it always equals the SNI host.
     pub fn host_header(&self) -> &str {
         &self.host_header
     }

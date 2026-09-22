@@ -42,8 +42,9 @@ Rules-File Guard (Stealth Module)
 -------------------------------------------------------------------------------
 - No placeholders in production code. All public methods must be fully
   implemented and concurrency-safe.
-- DomainFrontingManager uses atomics for lock-free selection; changes must keep
-  thread-safety and deterministic semantics.
+- CoverTargetRotator uses atomics for lock-free selection; changes must keep
+  thread-safety and deterministic semantics. Cover targets are hosts whose
+  certificate the hop legitimately presents or relays - never an SNI alias.
 - Stealth state transitions must remain concurrency-safe and free of dead
   compatibility paths; no stubs.
 - Deterministic ClientHello metadata must never be presented as a wire override;
@@ -98,7 +99,7 @@ pub use qf_stealth::{
 };
 pub use qf_stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 pub(crate) use qf_stealth::{
-    CoverTrafficScheduler, DomainFrontingManager, EscalationState, FlowShaper, StealthPacketClass,
+    CoverTargetRotator, CoverTrafficScheduler, EscalationState, FlowShaper, StealthPacketClass,
 };
 
 mod http3_masquerade;

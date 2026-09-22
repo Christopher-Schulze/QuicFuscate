@@ -10,11 +10,13 @@ import {
   stealthPresetFromMode,
   fecPresetFromConfig,
   readStealthFlag,
+  readStealthCoverTargets,
+  coverTargetsToTomlValue,
   normalizeQKey,
   compactDisplayValue,
   canonicalizeConfigForCompare,
   DEFAULT_STEALTH_MANUAL,
-  FRONTING_SNI_ALLOWLIST,
+  COVER_SNI_ALLOWLIST,
 } from "../../../../../apps/svelte-admin/src/lib/config-helpers";
 
 describe("normalizeTomlTextForUi", () => {
@@ -258,23 +260,62 @@ describe("fecPresetFromConfig", () => {
 
 describe("readStealthFlag", () => {
   test("reads explicit true flag", () => {
-    const config = `[stealth]\nenable_domain_fronting = true\n`;
-    expect(readStealthFlag(config, "enable_domain_fronting")).toBe(true);
+    const config = `[stealth]\nenable_http3_masquerading = true\n`;
+    expect(readStealthFlag(config, "enable_http3_masquerading")).toBe(true);
   });
 
   test("reads explicit false flag", () => {
-    const config = `[stealth]\nenable_domain_fronting = false\n`;
-    expect(readStealthFlag(config, "enable_domain_fronting")).toBe(false);
+    const config = `[stealth]\nenable_http3_masquerading = false\n`;
+    expect(readStealthFlag(config, "enable_http3_masquerading")).toBe(false);
   });
 
   test("returns default when key missing", () => {
     const config = `[stealth]\n`;
-    expect(readStealthFlag(config, "enable_domain_fronting")).toBe(DEFAULT_STEALTH_MANUAL.enable_domain_fronting);
+    expect(readStealthFlag(config, "enable_http3_masquerading")).toBe(DEFAULT_STEALTH_MANUAL.enable_http3_masquerading);
   });
 
   test("returns default when timing key missing", () => {
     const config = `[stealth]\n`;
     expect(readStealthFlag(config, "enable_timing_obfuscation")).toBe(DEFAULT_STEALTH_MANUAL.enable_timing_obfuscation);
+  });
+});
+
+describe("readStealthCoverTargets", () => {
+  test("reads reality_cover_targets list", () => {
+    const config = `[stealth]\nreality_cover_targets = ["cdn.example.com", "cdn2.example.com:8443"]\n`;
+    expect(readStealthCoverTargets(config)).toBe("cdn.example.com, cdn2.example.com:8443");
+  });
+
+  test("reads deprecated fronting_domains alias", () => {
+    const config = `[stealth]\nfronting_domains = ["legacy.example.com"]\n`;
+    expect(readStealthCoverTargets(config)).toBe("legacy.example.com");
+  });
+
+  test("prefers reality_cover_targets over the alias", () => {
+    const config = `[stealth]\nreality_cover_targets = ["new.example.com"]\nfronting_domains = ["old.example.com"]\n`;
+    expect(readStealthCoverTargets(config)).toBe("new.example.com");
+  });
+
+  test("returns empty string when no targets configured", () => {
+    expect(readStealthCoverTargets(`[stealth]\nmode = "dynamic"\n`)).toBe("");
+  });
+});
+
+describe("coverTargetsToTomlValue", () => {
+  test("serializes comma text to a TOML array", () => {
+    expect(coverTargetsToTomlValue("cdn.example.com, cdn2.example.com:8443")).toBe(
+      '["cdn.example.com", "cdn2.example.com:8443"]',
+    );
+  });
+
+  test("serializes empty text to an empty array", () => {
+    expect(coverTargetsToTomlValue("   ")).toBe("[]");
+  });
+
+  test("roundtrips through readStealthCoverTargets", () => {
+    const text = "cdn.example.com, cdn2.example.com:8443";
+    const config = `[stealth]\nreality_cover_targets = ${coverTargetsToTomlValue(text)}\n`;
+    expect(readStealthCoverTargets(config)).toBe(text);
   });
 });
 
@@ -372,15 +413,14 @@ describe("constants", () => {
     ]);
   });
 
-  test("FRONTING_SNI_ALLOWLIST is non-empty", () => {
-    expect(FRONTING_SNI_ALLOWLIST.length).toBeGreaterThan(10);
-    expect(FRONTING_SNI_ALLOWLIST).toContain("cdn.cloudflare.com");
-    expect(FRONTING_SNI_ALLOWLIST).toContain("cloudfront.net");
+  test("COVER_SNI_ALLOWLIST is non-empty", () => {
+    expect(COVER_SNI_ALLOWLIST.length).toBeGreaterThan(10);
+    expect(COVER_SNI_ALLOWLIST).toContain("cdn.cloudflare.com");
+    expect(COVER_SNI_ALLOWLIST).toContain("cloudfront.net");
   });
 
   test("DEFAULT_STEALTH_MANUAL has all required keys", () => {
     const keys: string[] = [
-      "enable_domain_fronting",
       "enable_http3_masquerading",
       "use_tls_cover",
       "use_qpack_headers",

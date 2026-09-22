@@ -59,7 +59,7 @@ QuicFuscate is a stealth transport and VPN runtime built on a custom QUIC-based 
 
 ## Highlights
 - Censorship-resistant runtime with browser-grade traffic observables
-  (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, profile-coherent timing/padding; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists)
+  (rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, Reality cover targets, DoH, profile-coherent timing/padding; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists)
 - Adaptive SIMD dispatch (AVX2/AVX-512/NEON) with runtime CPU feature detection for optimal performance paths
 - Handshake and stealth modes use rustls AES-128-GCM. `off` and `performance` pin libaegis AEGIS-128L for the post-auth payload. `manual` can choose either.
   PFS by default via ephemeral X25519 key exchange
@@ -120,9 +120,9 @@ Rule of thumb:
 ### Stealth Techniques
 - **Curated Browser Fingerprints**: Curated browser/OS persona metadata (Chrome, Firefox, Safari, Edge) drives the real rustls ClientHello; deterministic in-memory metadata remains available for compatibility and audit inspection without an on-disk profile requirement<br>
 - **Native TLS handshake profile selection + TLS Cover**: Applies native fingerprint-aligned TLS profiles and can emit a lightweight synthetic TLS Cover exchange for stealth traffic shaping<br>
-- **Domain Fronting**: Masks traffic by routing through trusted CDN providers
-  - Rotates across vetted provider domains to decouple the visible SNI from the true origin<br>
-  - Risk/Tradeoff: effectiveness depends on current provider policy and regional filtering behavior<br>
+- **Reality Cover Targets**: Probe traffic without a valid tunnel secret is relayed byte-transparent to configured cover hosts whose certificate the hop legitimately presents or relays
+  - The client SNI always equals the certificate name of the hop — the removed domain-fronting path decoupled them and is gone (TODO-1048)<br>
+  - Risk/Tradeoff: a target the hop cannot serve or relay produces relay failures, not a certificate mismatch<br>
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
   - Aligns ALPN, header sets, and framing to common web patterns<br>
 - **MASQUE Tunneling**: Core HTTP/3 CONNECT-UDP/capsule carrier for authenticated TUN traffic
@@ -133,7 +133,7 @@ Rule of thumb:
 - **Active Probe Detection + Reality Fallback**: Detects probe-like traffic patterns and relays suspicious flows through a legitimate upstream path to preserve realistic network behavior under active scanning<br>
 - **Server Push Cover Traffic**: Emits realistic HTTP/3 PUSH_PROMISE/DATA cover bursts with configurable intensity, base path, and burst interval for traffic-shaping realism<br>
 - **Profile Cycling**: Optional rotation across browser/OS profiles on an interval to diversify observable fingerprints<br>
-- **Cross-Layer Profile Coherence**: One active browser/OS profile coordinates TLS handshake selection, HTTP/3/QPACK shaping, MASQUE behavior, and fronting decisions for a homogeneous observable fingerprint<br>
+- **Cross-Layer Profile Coherence**: One active browser/OS profile coordinates TLS handshake selection, HTTP/3/QPACK shaping, MASQUE behavior, and cover-target selection for a homogeneous observable fingerprint<br>
 - **Spin Bit Controls**: Configuration-level controls exist; runtime wiring is currently partial and intentionally gated
 
 Native TLS handshake profile selection (RealTLS) is the primary handshake path and provides the cryptographic security layer.
@@ -286,7 +286,7 @@ Development focuses on hardening and operational validation across all runtime s
 QuicFuscate uses a modular, consolidated layout:
 - `src/core.rs` (QUIC session and I/O), `src/crypto/` (AEAD and handshake glue),
 - `src/fec/` (encoder/decoder/adaptive/GF tables),
-- `src/stealth/` (DoH, HTTP/3 masquerading, TLS Cover, fingerprinting, domain fronting, QPACK helpers, active-probe detection, server-push cover runtime controls).
+- `src/stealth/` (DoH, HTTP/3 masquerading, TLS Cover, fingerprinting, Reality cover-target rotation, QPACK helpers, active-probe detection, server-push cover runtime controls).
 - `src/reality.rs` (probe-time fallback proxying that preserves realistic upstream responses under active scanning).
 - `src/qftls.rs` (unified RealTLS rustls provider + optional TLS Cover orchestration).
 - `src/engine/` (embedded control plane API: lifecycle, commands/events, stats, runtime orchestration).
@@ -303,7 +303,7 @@ The transport subsystem uses `src/transport.rs` as the module root and focused s
 | Encryption          | rustls AES-128-GCM. `off` and `performance` use libaegis AEGIS-128L for the post-auth payload. `manual` can select either |
 | Key Exchange        | X25519 (ephemeral); Perfect Forward Secrecy by default                      |
 | Error Correction    | Hybrid Adaptive FEC (RLNC + Streaming)                                     |
-| Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, domain fronting, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists |
+| Stealth/Obfuscation | rustls-backed RealTLS, optional TLS Cover, HTTP/3/QPACK shaping, Reality cover targets, DoH, adaptive padding/timing/protocol mimicry, active-probe detection + Reality fallback, server-push cover traffic; Core H3/MASQUE is the production TUN carrier and no standalone XOR obfuscation layer exists |
 | Adaptive Intelligence | StealthBrain policy engine (ACK/timing/padding/FEC coordination plus Core H3/MASQUE preference hinting) |
 | Control Plane       | Server-authoritative QKey lifecycle (issue/revoke/persist), Admin Web/API policy enforcement |
 | Compression         | Adaptive zstd policy (signal-aware compression decisions, optional dictionary path) |
@@ -418,7 +418,7 @@ quicfuscate client \
   --local 127.0.0.1:1080 \
   --profile chrome \
   --cc-algorithm bbr3 \
-  --front-domain cdn.example.com \
+  --cover-target cdn.example.com \
   --verify-peer \
   --config ./config/quicfuscate.toml
 ```
@@ -449,9 +449,9 @@ Important flags (selection):
   --fec-mode <mode>       FEC mode (auto|off)
   --fec-config <path>     Load Adaptive FEC settings from TOML
   --doh-provider <url>    Custom DNS-over-HTTPS resolver
-  --front-domain <d>      Domain used for fronting (repeatable or comma-separated)
+  --cover-target <t>      Reality cover target, host or host:port (repeatable or comma-separated; --front-domain is a deprecated alias)
   --disable-doh           Disable DNS over HTTPS
-  --disable-fronting      Disable domain fronting
+  --disable-cover         Disable cover targets (--disable-fronting is a deprecated alias)
   --disable-http3         Disable HTTP/3 masquerading
   --profile-seq <list>    Comma-separated browser@os to cycle (e.g., chrome@windows,firefox@linux)
   --profile-interval <s>  Interval in seconds for profile switching

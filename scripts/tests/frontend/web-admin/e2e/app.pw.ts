@@ -87,8 +87,8 @@ test.describe("Web Admin UI", () => {
   test.beforeEach(async ({ page }) => {
     let serverConfig = [
       "[stealth]",
-      "mode = \"intelligent\"",
-      "enable_domain_fronting = false",
+      "mode = \"dynamic\"",
+      "reality_cover_targets = []",
       "enable_http3_masquerading = false",
       "use_tls_cover = false",
       "use_qpack_headers = false",

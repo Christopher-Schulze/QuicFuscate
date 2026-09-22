@@ -9,7 +9,7 @@
     updateTunnels,
   } from "$lib/stores/app.svelte";
   import { isTauri, engineConnect, engineDisconnect, engineRotate, qkeyParse } from "$lib/stores/tauri-bridge.svelte";
-  import { resolveDomainFrontingSniDisplay } from "$lib/domain-fronting-policy";
+  import { resolveCoverSniDisplay } from "$lib/cover-sni-policy";
   import { fly, scale } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import TunnelListItem from "./TunnelListItem.svelte";
@@ -128,7 +128,7 @@
               const stealth = normalizeMode(parsed.stealth as string | null);
               const fec = normalizeMode(parsed.fec as string | null);
               const extraPolicy = parseExtraPolicy(parsed.extra);
-              const sniDisplay = resolveDomainFrontingSniDisplay(
+              const sniDisplay = resolveCoverSniDisplay(
                 parsed.extra as string | null, typeof parsed.sni === "string" ? parsed.sni : "",
               );
               const isManual = stealth === "manual" || fec === "manual";

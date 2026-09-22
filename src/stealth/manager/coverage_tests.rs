@@ -25,7 +25,7 @@ mod stealth_coverage_tests {
         assert!(m.flow_shaper.is_none());
         assert!(m.probe_detector.is_none());
         assert!(m.cover_traffic.is_none());
-        assert!(m.domain_fronting.is_none());
+        assert!(m.cover_targets.is_none());
     }
 
     #[test]
@@ -46,7 +46,7 @@ mod stealth_coverage_tests {
         assert!(m.cover_traffic.is_some());
         // Stealth enables timing obfuscation -> FlowShaper present
         assert!(m.flow_shaper.is_some());
-        assert!(m.domain_fronting.is_none());
+        assert!(m.cover_targets.is_none());
     }
 
     #[test]
@@ -80,7 +80,10 @@ mod stealth_coverage_tests {
         assert_eq!(m.mode(), StealthMode::StealthMax);
         assert!(m.flow_shaper.is_some());
         assert!(m.cover_traffic.is_some());
-        assert!(m.domain_fronting.is_some());
+        assert!(m.cover_targets.is_some());
+        // StealthMax presets populate Reality cover targets (TODO-1048), so the
+        // probe-fallback relay is armed for this mode.
+        assert!(m.reality_proxy.is_some());
     }
 
     #[test]
@@ -268,7 +271,7 @@ mod stealth_coverage_tests {
     #[test]
     fn config_stealth_has_expected_defaults() {
         let cfg = StealthConfig::stealth();
-        assert!(!cfg.enable_domain_fronting);
+        assert!(cfg.reality_cover_targets.is_empty());
         assert!(cfg.enable_traffic_padding);
         assert!(cfg.enable_timing_obfuscation);
         assert!(cfg.enable_http3_masquerading);
@@ -279,11 +282,11 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn normal_modes_do_not_enable_domain_fronting_by_default() {
-        assert!(!StealthConfig::performance().enable_domain_fronting);
-        assert!(!StealthConfig::dynamic().enable_domain_fronting);
-        assert!(!StealthConfig::stealth().enable_domain_fronting);
-        assert!(StealthConfig::stealth_max().enable_domain_fronting);
+    fn normal_modes_do_not_configure_cover_targets_by_default() {
+        assert!(StealthConfig::performance().reality_cover_targets.is_empty());
+        assert!(StealthConfig::dynamic().reality_cover_targets.is_empty());
+        assert!(StealthConfig::stealth().reality_cover_targets.is_empty());
+        assert!(!StealthConfig::stealth_max().reality_cover_targets.is_empty());
     }
 
     #[test]
@@ -302,13 +305,20 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn domain_fronting_without_domains_is_disabled_outside_anti_dpi() {
+    fn cover_targets_absent_when_no_targets_configured() {
+        let cfg = StealthConfig::stealth();
+        let m = make_manager(cfg);
+        assert!(m.cover_targets.is_none());
+    }
+
+    #[test]
+    fn cover_targets_rotator_from_explicit_list() {
         let mut cfg = StealthConfig::stealth();
-        cfg.enable_domain_fronting = true;
-        cfg.fronting_domains.clear();
+        cfg.reality_cover_targets = vec!["cover-a.example".into(), "cover-b.example".into()];
 
         let m = make_manager(cfg);
-        assert!(m.domain_fronting.is_none());
+        let rotator = m.cover_targets.as_ref().expect("cover target rotator");
+        assert_eq!(rotator.targets(), ["cover-a.example", "cover-b.example"]);
     }
 
     #[test]
@@ -371,7 +381,7 @@ mod stealth_coverage_tests {
         assert!(!cfg.enable_timing_obfuscation);
         assert!(!cfg.enable_http3_masquerading);
         assert!(!cfg.use_tls_cover);
-        assert!(!cfg.enable_domain_fronting);
+        assert!(cfg.reality_cover_targets.is_empty());
         assert!(!cfg.enable_doh);
         assert!(!cfg.enable_cover_ping);
         assert!(!cfg.enable_server_push_cover);
@@ -469,69 +479,68 @@ mod stealth_coverage_tests {
     }
 
     // =========================================================================
-    // 6. DomainFrontingManager
+    // 6. CoverTargetRotator
     // =========================================================================
 
     #[test]
-    fn domain_fronting_round_robin_is_exact_in_serial_calls() {
-        let df = DomainFrontingManager::new(vec![
+    fn cover_target_round_robin_is_exact_in_serial_calls() {
+        let rotator = CoverTargetRotator::new(vec![
             "a.example".into(),
             "b.example".into(),
             "c.example".into(),
         ]);
         let expected =
             ["a.example", "b.example", "c.example", "a.example", "b.example", "c.example"];
-        for domain in expected {
-            assert_eq!(df.get_fronted_domain(), domain);
+        for target in expected {
+            assert_eq!(rotator.next_cover_target(), target);
         }
     }
 
     #[test]
-    fn domain_fronting_round_robin_preserves_concurrent_coverage() {
-        let df = Arc::new(DomainFrontingManager::new(vec![
+    fn cover_target_round_robin_preserves_concurrent_coverage() {
+        let rotator = Arc::new(CoverTargetRotator::new(vec![
             "a.example".into(),
             "b.example".into(),
             "c.example".into(),
         ]));
         let handles = (0..12)
             .map(|_| {
-                let df = Arc::clone(&df);
-                std::thread::spawn(move || df.get_fronted_domain())
+                let rotator = Arc::clone(&rotator);
+                std::thread::spawn(move || rotator.next_cover_target())
             })
             .collect::<Vec<_>>();
         let results = handles
             .into_iter()
-            .map(|handle| handle.join().expect("fronting selection thread must join"))
+            .map(|handle| handle.join().expect("cover target selection thread must join"))
             .collect::<Vec<_>>();
 
-        for domain in ["a.example", "b.example", "c.example"] {
-            assert_eq!(results.iter().filter(|selected| selected.as_str() == domain).count(), 4);
+        for target in ["a.example", "b.example", "c.example"] {
+            assert_eq!(results.iter().filter(|selected| selected.as_str() == target).count(), 4);
         }
     }
 
     #[test]
-    fn domain_fronting_random_domain_fallback() {
-        let df = DomainFrontingManager::new(Vec::new());
-        assert_eq!(df.get_fronted_domain(), "cdn.cloudflare.com");
-        let d = df.random_domain();
-        assert_eq!(d, "cdn.cloudflare.com");
+    fn cover_target_empty_list_falls_back_to_default() {
+        let rotator = CoverTargetRotator::new(Vec::new());
+        assert_eq!(rotator.next_cover_target(), "cdn.cloudflare.com");
+        assert_eq!(rotator.random_cover_target(), "cdn.cloudflare.com");
     }
 
     #[test]
-    fn domain_fronting_from_providers_populates() {
-        let df = DomainFrontingManager::from_providers(vec![CdnProvider::Cloudflare]);
-        assert!(!df.domains().is_empty());
-        // Should contain known Cloudflare domains
-        assert!(df.domains().iter().any(|d| d.contains("cloudflare")));
+    fn cover_target_from_providers_populates() {
+        let rotator = CoverTargetRotator::from_providers(vec![CdnProvider::Cloudflare]);
+        assert!(!rotator.targets().is_empty());
+        // Should contain known Cloudflare cover names
+        assert!(rotator.targets().iter().any(|d| d.contains("cloudflare")));
     }
 
     #[test]
-    fn domain_fronting_broad_rotation_has_many_domains() {
-        let df = DomainFrontingManager::broad_provider_rotation();
+    fn cover_target_broad_providers_has_many_targets() {
+        let rotator = CoverTargetRotator::broad_providers();
         assert!(
-            df.domains().len() >= 20,
-            "ultra stealth should have 20+ domains, got {}",
-            df.domains().len()
+            rotator.targets().len() >= 20,
+            "broad providers should have 20+ cover targets, got {}",
+            rotator.targets().len()
         );
     }
 

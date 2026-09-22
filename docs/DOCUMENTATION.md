@@ -422,7 +422,7 @@ This document provides comprehensive technical documentation for the system arch
   - `src/core.rs` (+ `src/core_parts/`): QUIC I/O and session management; maintains rolling `ConnectionStats` including VNNI-accelerated congestion aggregation (`aggregate_congestion`) for cwnd, bytes-in-flight and loss score.
   - `src/crypto/`: AEAD and handshake glue
   - `src/fec/`: Encoder/decoder/adaptive/GF tables
-  - `src/stealth/`: HTTP/3 masquerading, TLS Cover, domain fronting, QPACK helpers, active probe detection, runtime Server Push cover coordination
+  - `src/stealth/`: HTTP/3 masquerading, TLS Cover, Reality cover-target rotation, QPACK helpers, active probe detection, runtime Server Push cover coordination
   - `src/dns/`: canonical DNS packet parsing, upstream forwarding, cached DoH client, endpoint fallback, and DNS response construction
   - `src/implementations/client/dns_runtime.rs`: client-owned localhost UDP/53 proxy, pre-pinned DoH endpoint lifecycle, platform resolver mutation, and fail-closed restoration
   - `src/reality.rs`: Reality Fallback (Xray-style reverse proxy for active probe mitigation)
@@ -526,7 +526,7 @@ stealth toggles. TODO-464 through TODO-471 are complete and define the productio
 - TLS: RealTLS via rustls with optional TLS Cover that emits synthetic encrypted QUIC cover records from the active profile (no external uTLS/FFI in the cover layer). TLS Cover does not own or synthesize the real ClientHello. The Engine client path now passes the uTLS/persona decision instead of hardcoding it off; a shared filtered rustls provider removes ChaCha suites from real client offers and server-accepted suites.
 - HTTP/3/QPACK: ALPN, header sets, QPACK policy, and framing must align with the selected persona snapshot.
 - Core H3/MASQUE: production VPN/TUN payloads use the Core H3/MASQUE data plane. It is the sole active CONNECT-UDP/capsule carrier; the retired `stealth::MasqueManager` and stealth-local DoH resolver are preserved only under `archive/`.
-- Domain Fronting: useful only with explicit, vetted fronting configuration. Blind fronting defaults are disabled for `performance`, `stealth`, and clean `dynamic`.
+- Reality Cover Targets: `stealth.reality_cover_targets` names hosts whose certificate the hop legitimately presents or relays. Probe traffic without a valid tunnel secret is relayed there; the client SNI always equals the certificate name of the hop. Removed in TODO-1048: the old domain-fronting SNI/cert-mismatch path (`enable_domain_fronting` now fails validation; `fronting_domains` remains a deprecated alias for the target list).
 - DoH: DNS resolution stays inside the tunnel path and the canonical stealth runtime carries no standalone XOR obfuscation layer.
 - Active Probe Detection + Reality Fallback: probe-like traffic is detected and, when required, relayed via `RealityProxy` to preserve realistic upstream behavior under active scanning.
 - Cover Traffic: Cover PING, H3-framed cover requests, randomized bounded Server Push cover, and escalated WebTransport cover are valid layers.
@@ -689,7 +689,7 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 | Feature | performance | stealth | Stealth MAX | dynamic |
 |---|---:|---:|---:|---:|
 | uTLS/Persona | on | on | on | on |
-| Domain Fronting | off | explicit only | on with explicit domains or built-in aggressive list | off at Level 0; explicit/escalated only |
+| Reality Cover Targets | off | explicit only | on with explicit targets or built-in CDN list | off at Level 0; explicit/escalated only |
 | HTTP/3 Masquerading | on | on | on | on |
 | QPACK Headers | on | on | on | on |
 | Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | off at Level 0; dynamic at Level 1-2 |
@@ -710,7 +710,7 @@ Notes:
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
 - `qf-stealth` owns the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthManager` owns preset baselines and preserves the historical root adapter. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
-- Risk/Tradeoff: domain fronting behavior depends on current upstream provider policy and regional filtering rules. It is not a safe default cover signal on modern CDNs.
+- Risk/Tradeoff: cover targets must be hosts the hop can legitimately serve or relay to; a target the hop does not control produces relay failures, not a certificate mismatch. Relayed probe bytes are forwarded unchanged and consume upstream bandwidth.
 - Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
 - HTTP/3 transport compliance: both endpoint roles emit a transactional unidirectional control-stream type plus one SETTINGS frame (`2,6,...` client IDs and `3,7,...` server IDs); local field-section and QPACK-table settings are capped at 16 MiB, while the allocation-owning local blocked-stream setting is capped at 64; peer control ownership is validated before frame dispatch; peer SETTINGS values and duplicate identifiers are bounded; and frame type/length parsing uses checked QUIC varints. Drained transport stream-queue entries are removed before later writable streams so a control prologue cannot starve a response.
 - WebTransport cover negotiation is disabled by default and enabled only by the Anti-DPI or Intelligent level-2 application-cover policy. Enabled endpoints advertise and validate the draft-16 H3 settings used by the internal profile: server Extended CONNECT support, H3 DATAGRAM support, the draft-specific WebTransport setting, four peer unidirectional streams, four peer bidirectional streams, and a 1 MiB session data budget. External draft-16 interoperability is not claimed because the root TLS transport-parameter surface does not yet negotiate `max_datagram_frame_size` and `reset_stream_at`.
@@ -720,18 +720,18 @@ Notes:
 
 Production Mode Policy
 
-| Mode | Persona/uTLS | Core H3/MASQUE TUN | Domain fronting | Padding/timing | Cover traffic | Brain |
+| Mode | Persona/uTLS | Core H3/MASQUE TUN | Cover targets | Padding/timing | Cover traffic | Brain |
 |---|---|---|---|---|---|---|
 | Off | off | only if TUN requires it | off | off | off | minimal |
 | Performance | on | on | off | off | off | ACK/FEC hints only |
 | Intelligent | on | on | off by default, escalation only with vetted config | dynamic | dynamic, none/low at level 0 | full |
 | Stealth | on | on | explicit/vetted only | light | light and randomized | medium |
-| Anti-DPI | on | on | on with vetted front domains | strong | strong and randomized | full |
+| Anti-DPI | on | on | on with vetted cover targets | strong | strong and randomized | full |
 | Manual | operator-defined | operator-defined | operator-defined | operator-defined | operator-defined | operator-defined, persona freeze still applies |
 
 Production invariants:
 - Persona identity is frozen per connection. Rotation applies to the next connection or reconnect only.
-- Domain fronting is not a Performance default and not a blind Intelligent level-0 default.
+- Cover targets are not a Performance default and not a blind Intelligent level-0 default.
 - Server Push cover is randomized and bounded before it is treated as a strong cover layer.
 - WebTransport is an H3 application-cover profile, not a replacement for Core H3/MASQUE.
 
@@ -778,11 +778,11 @@ Final stealth stack:
 ```
 
 #### Stealth Modes - Semantics
-- Off: no stealth; DoH, fronting, HTTP/3 masquerading, padding, timing, QPACK, and TLS Cover extras are all disabled.
-- Performance: uTLS/persona on; DoH on; domain fronting off; HTTP/3 masquerading on; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
-- Stealth: uTLS/persona on; DoH on; domain fronting off unless explicit fronting domains are configured; HTTP/3 masquerading on; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off; server push cover light (intensity 0.25, 60 s interval).
-- Anti-DPI: uTLS/persona on; DoH on; fronting on with explicit domains or the built-in aggressive list; HTTP/3 masquerading on; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; server push cover enabled (intensity 0.8, 15 s interval); WebTransport cover enabled as an H3 application-cover session; real-time choke off by default.
-- Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no domain fronting); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; server-push burst interval is level-dependent (30 s at L0/L1, 15 s at L2); WebTransport cover is level-2 only.
+- Off: no stealth; DoH, cover targets, HTTP/3 masquerading, padding, timing, QPACK, and TLS Cover extras are all disabled.
+- Performance: uTLS/persona on; DoH on; cover targets off; HTTP/3 masquerading on; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
+- Stealth: uTLS/persona on; DoH on; cover targets only when `reality_cover_targets` is explicitly configured; HTTP/3 masquerading on; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off; server push cover light (intensity 0.25, 60 s interval).
+- Anti-DPI: uTLS/persona on; DoH on; cover targets from the explicit list or the built-in CDN set; HTTP/3 masquerading on; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; server push cover enabled (intensity 0.8, 15 s interval); WebTransport cover enabled as an H3 application-cover session; real-time choke off by default.
+- Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no cover targets); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; server-push burst interval is level-dependent (30 s at L0/L1, 15 s at L2); WebTransport cover is level-2 only.
 - Manual: all knobs as configured in TOML or env; no automatic escalation.
 
 #### Real-Time Rate Choke
@@ -1661,7 +1661,7 @@ quicfuscate server --listen 0.0.0.0:4433 --cc-algorithm cubic
 - **BBR3 + Stealth:** Full effect - gain table injection + pacing jitter. This is the recommended stealth configuration.
 - **BBR2 + Stealth:** Pacing jitter only (BBR2 uses its own gain cycle, not overridable). Still effective for timing obfuscation.
 - **CUBIC + Stealth:** CUBIC keeps its explicit cwnd/RTT pacing contract; the wrapper applies bounded profile jitter and optional 2% flow dampening after ACK processing.
-- **Reno + Stealth:** No effect - Reno does not pace, so there is no pacing rate to jitter. Other stealth features (TLS Cover, HTTP/3 masquerading, domain fronting, DoH) still operate independently at the connection layer.
+- **Reno + Stealth:** No effect - Reno does not pace, so there is no pacing rate to jitter. Other stealth features (TLS Cover, HTTP/3 masquerading, Reality cover targets, DoH) still operate independently at the connection layer.
 
 **Lifecycle:** The user selects the CC algorithm (Reno/CUBIC/BBR2/BBR3) and the stealth mode (Off/Performance/Stealth/AntiDPI/Intelligent/Manual) independently. When stealth mode first activates, `Recovery::set_stealth_mode(true, profile)` uses `std::mem::replace` to swap the current `CcImpl` variant in place - e.g. `CcImpl::Cubic` becomes `CcImpl::StealthCubic(StealthShaper::new(inner, profile))`. Later activation changes update that monomorphic wrapper in place. Deactivation disables its shaping and clears any CUBIC pacing override while preserving the enum variant. No manual configuration is needed.
 
@@ -2978,10 +2978,10 @@ QUICFUSCATE_CTL_SOCKET=/tmp/quicfuscate.sock quicfuscate-ctl clients
 ### Stealth Options (server)
 
 ```
-    --front-domain <d>     Domain used for fronting (repeatable or comma-separated)
+    --cover-target <t>     Reality cover target, host or host:port (repeatable or comma-separated; --front-domain is a deprecated alias)
     --doh-provider <url>   Custom DNS-over-HTTPS resolver
     --disable-doh          Disable DNS over HTTPS
-    --disable-fronting     Disable domain fronting
+    --disable-cover        Disable cover targets (--disable-fronting is a deprecated alias)
     --disable-http3        Disable HTTP/3 masquerading
     --profile-seq <list>   Comma-separated browser@os entries to cycle (e.g., chrome@windows,firefox@linux)
     --profile-interval <s> Interval in seconds for profile switching
@@ -3215,7 +3215,7 @@ Admin HTTP contract notes:
 #### Views (4 tabs):
 - **Dashboard**: Server status (version, uptime, bytes in/out, listen address), active clients with kick/block actions, blocked IP management (block/unblock), and Prometheus-style metrics display. Auto-refreshes status/clients every 5 s and metrics/blocked IPs every 15 s.
 - **Configuration**: Composite view with embedded panels:
-  - Stealth/FEC/Transport panel: stealth preset (`Auto`, `Performance`, `Stealth`, `AntiDPI`, `Manual`, `Off`), manual stealth mode expands inline and exposes the canonical per-feature toggles (domain fronting, HTTP3 masquerading, TLS Cover extras, QPACK headers, padding, timing obfuscation, protocol mimicry, DoH). No standalone XOR obfuscation control exists; the layer was removed (TODO-887). FEC preset (`Auto` or `Off`). Transport controls: congestion control algorithm and MTU validation (1200-9000). Unsaved-changes warning on page leave, explicit Save/Reset, and pacing pinned on in config writes.
+  - Stealth/FEC/Transport panel: stealth preset (`Auto`, `Performance`, `Stealth`, `AntiDPI`, `Manual`, `Off`), manual stealth mode expands inline and exposes the canonical per-feature toggles (HTTP3 masquerading, TLS Cover extras, QPACK headers, padding, timing obfuscation, protocol mimicry, DoH) plus a comma-separated cover-targets input that writes `stealth.reality_cover_targets`. No standalone XOR obfuscation control exists; the layer was removed (TODO-887). FEC preset (`Auto` or `Off`). Transport controls: congestion control algorithm and MTU validation (1200-9000). Unsaved-changes warning on page leave, explicit Save/Reset, and pacing pinned on in config writes.
   - QKey panel: generate server-issued QKeys with optional display name, reveal the raw credential once at issuance, copy it from that one-time dialog, then manage issued entries through a metadata-only list with single or bulk revoke. TTL is not exposed in the admin UI flow.
   - Admin settings panel: change username and password. Default credentials are detected and the UI warns until changed. The active minimum password length for updates is 6 characters.
   - Reference guide panel: configuration reference inline.
@@ -3327,10 +3327,10 @@ Global CLI flags (all commands):
 - `--profile-seq`: Comma-separated profiles for rotation
 - `--profile-interval`: Rotation interval in seconds
 - `--doh-provider`: DNS-over-HTTPS URL (default: https://cloudflare-dns.com/dns-query)
-- `--front-domain`: Domain fronting targets (comma-separated)
+- `--cover-target`: Reality cover targets (comma-separated; `--front-domain` remains a deprecated alias)
 
 - `--disable-doh`: Disable DNS over HTTPS
-- `--disable-fronting`: Disable domain fronting
+- `--disable-cover`: Disable cover targets (`--disable-fronting` remains a deprecated alias)
 - `--disable-http3`: Disable HTTP/3 masquerading
 
 Note: TLS provider selection and fingerprinting are internal.
@@ -3422,7 +3422,7 @@ Both client and server subcommands support extensive configuration:
 - Browser and OS fingerprinting profiles with rotation capabilities
 - FEC mode selection and memory pool tuning
 - UDP/io_uring fast paths; the removed AF_XDP experiment is not part of the runtime
-- Stealth features: uTLS persona shaping, DoH, explicit domain fronting, HTTP/3 masquerading, adaptive padding, timing shaping, bounded cover traffic
+- Stealth features: uTLS persona shaping, DoH, explicit Reality cover targets, HTTP/3 masquerading, adaptive padding, timing shaping, bounded cover traffic
 - TOML configuration file support
 - TLS debugging and certificate validation options
 
@@ -3468,7 +3468,7 @@ mode = "all"
 
 - Minimal - prioritize lowest overhead and disable stealth/FEC extras.
 - Balanced - default operational baseline for mixed latency/loss environments.
-- Maximum Stealth - anti-DPI posture with aggressive cover, explicit fronting policy, next-session persona rotation, and adaptive recovery enabled.
+- Maximum Stealth - anti-DPI posture with aggressive cover, explicit cover-target policy, next-session persona rotation, and adaptive recovery enabled.
 
 For full stealth-mode semantics and all `[stealth]` keys, use:
 - "Obfuscation-Modes Overview" and "Stealth Modes - Semantics"
@@ -3665,8 +3665,8 @@ Notes:
 - `QUICFUSCATE_BROWSER`: `chrome|firefox|safari|edge` (legacy alias: `QUICFUSCATE_BROWSER_PROFILE`)
 - `QUICFUSCATE_OS`: `windows|linux|macos|android|ios` (legacy alias: `QUICFUSCATE_OS_PROFILE`)
 - `QUICFUSCATE_DOH`: `0|1|true|false` (legacy alias: `QUICFUSCATE_DOH_ENABLED`)
-- `QUICFUSCATE_FRONTING`: `0|1|true|false`
-- `QUICFUSCATE_FRONTING_DOMAINS`: comma-separated fronting domain list
+- `QUICFUSCATE_REALITY_COVER_TARGETS`: comma-separated host or host:port cover-target list (deprecated alias: `QUICFUSCATE_FRONTING_DOMAINS`)
+- `QUICFUSCATE_FRONTING`: removed in TODO-1048; setting it to a true value fails startup with a pointer to `QUICFUSCATE_REALITY_COVER_TARGETS`
 - `QUICFUSCATE_H3_MASQUERADE`: `0|1|true|false`
 - `QUICFUSCATE_QPACK`: `0|1|true|false`
 - `QUICFUSCATE_STEALTH_PADDING`: `0|1|true|false`
@@ -3831,14 +3831,15 @@ Available combinations:
 3. **Adaptive**: adaptive padding based on size and granularity
 4. **BrowserMimic**: profile-biased padding using the mimic bias and granularity knobs
 
-### Domain Fronting
+### Reality Cover Targets
 
-Curated domain sets are defined in `CdnProvider` and `DomainFrontingManager::ultra_stealth` in `src/stealth/`. Production policy is explicit-only outside Anti-DPI:
+Curated cover sets are defined in `CdnProvider` and `CoverTargetRotator` in `qf-stealth` (`cover_targets.rs`). Every entry must be a host whose certificate the hop legitimately presents or relays — the removed domain-fronting path (TODO-1048) decoupled the visible SNI from the certificate name and is gone from the wire path. Production policy is explicit-only outside Anti-DPI:
 
-- Performance, Intelligent level 0, and Stealth do not enable domain fronting by default.
-- Fronting activates outside Anti-DPI only when explicit `fronting_domains` are configured and runtime policy has not disabled fronting.
-- Anti-DPI remains the aggressive profile and may use the built-in ultra list when fronting is enabled without explicit domains.
-- Active sessions do not rotate fronting hosts or browser/OS personas mid-connection.
+- Performance, Intelligent level 0, and Stealth do not configure cover targets by default.
+- Cover targets activate outside Anti-DPI only when explicit `reality_cover_targets` are configured and runtime policy has not disabled them (`disable_cover` / `--disable-cover`).
+- Anti-DPI remains the aggressive profile and may use the built-in CDN list when no explicit targets are configured.
+- Active sessions do not rotate cover hosts or browser/OS personas mid-connection.
+- Probe traffic without a valid tunnel secret is relayed unchanged to the selected cover target by `qf-reality`'s `RealityProxy`.
 
 ### Performance Optimizations
 
@@ -4062,7 +4063,7 @@ Cover Traffic integration:
 - Realistic profile-driven headers (excerpt):
   - `user-agent`, `accept`, `accept-language`, `accept-encoding: gzip, deflate, br`
   - Chromium: `sec-ch-ua`, `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `sec-fetch-site`, `sec-fetch-mode`, `sec-fetch-dest`, `upgrade-insecure-requests`
-  - Referer: depends on fronting/navigation (e.g., search portal or same-origin)
+  - Referer: depends on cover/navigation context (e.g., search portal or same-origin)
 
 #### Index Policy (Dynamic Table)
 - `Connection::set_qpack_index_policy()` preserves persona header ordering without inventing local-only table state.
@@ -4086,20 +4087,23 @@ Illustration (simplified)
 [user-agent=...]     -> 0x20 <huff("user-agent")> <huff(UA)>
 ```
 
-### Domain Fronting API
+### Cover Target API
 
-- `DomainFrontingManager::get_fronted_domain(&self) -> String` uses strict
+- `CoverTargetRotator::next_cover_target(&self) -> String` uses strict
   round-robin selection. Serial calls are deterministic; concurrent calls
   reserve unique sequence slots but their completion order follows scheduling.
-- `DomainFrontingManager::random_domain(&self) -> String` is the explicit
+- `CoverTargetRotator::random_cover_target(&self) -> String` is the explicit
   unpredictable selection path and is not selected by configuration implicitly.
-- Both methods return `cdn.cloudflare.com` when the manager has no domains.
-- Production cover-scheduler initialization, SNI/Host fronting, and
+- Both methods return `cdn.cloudflare.com` when the rotator has no targets.
+- Production cover-scheduler initialization, probe relay, and
   WebTransport cover consume strict round-robin. MASQUE proxy authority stays
-  on the first configured domain plus `:443` as a stable connection endpoint.
-- Domains are stored as `Arc<[String]>`; the current public selection methods
+  on the first configured target plus `:443` as a stable connection endpoint.
+- Targets are stored as `Arc<[String]>`; the current public selection methods
   return owned `String` values and therefore retain their existing clone
   contract.
+- Configured targets are validated as `host` or `host:port` and invalid entries
+  are rejected at `StealthConfig::validate` / dropped with a log line in
+  `RealityProxy::new_with_targets`.
 
 ## Verification Harness Contracts
 
@@ -4674,7 +4678,7 @@ Canonical cross-cutting engineering principles, policies, and deterministic offl
 
 #### Principles and Policies
 - Security: AEAD-only; strict nonce/tag checks.
-- Stealth: TLS Cover + RealTLS (rustls) and HTTP/3/QPACK mirror real browsers (JA3/JA4). Domain fronting coherence.
+- Stealth: TLS Cover + RealTLS (rustls) and HTTP/3/QPACK mirror real browsers (JA3/JA4). Cover-target coherence (SNI equals the hop certificate name).
 - Performance: centralized CPU feature detection and dispatch; SIMD and zero-copy where safe.
 - Modularity: single sources of truth; avoid duplication and scattered hot-paths.
 - Determinism: offline, script-driven workflows; reproducible builds/benches; stable telemetry schemas; no secrets in logs.
@@ -6389,7 +6393,7 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 ## Stealth Utility Workspace Leaf (2026-08-09, TODO-562)
 
 - `crates/qf-stealth/` now owns root-independent domain-fronting and flow-shaping helpers formerly included from `src/stealth/parts/domain_fronting.rs` and `src/stealth/parts/flow_shaping.rs`: atomic CDN rotation, explicit random fallback, provider catalogs, bounded packet-history retention, jitter, and handshake-flight pacing. The root stealth module preserves historical compatibility projections; no stealth-manager, implementation, frontend, or Tauri implementation crosses into the child.
-- The child depends only on `qf-common` and `rand`; the product edge is `quicfuscate -> qf-stealth`. qf-common owns the shared `ProtocolClock`; qf-stealth owns `FlowShaper`, `StealthPacketClass`, `CdnProvider`, and `DomainFrontingManager` as doc-hidden contracts.
+- The child depends only on `qf-common` and `rand`; the product edge is `quicfuscate -> qf-stealth`. qf-common owns the shared `ProtocolClock`; qf-stealth owns `FlowShaper`, `StealthPacketClass`, `CdnProvider`, and `DomainFrontingManager` as doc-hidden contracts (renamed `CoverTargetRotator` in TODO-1048).
 - Isolated qf-stealth all-target/all-feature checking and strict Clippy pass. Workspace all-target checking with `rust-tests`, strict workspace `rust-tests` Clippy, the complete workspace all-target `rust-tests` matrix, and the all-feature library/binary Clippy lane pass. The complete matrix exits 0 with `118` result blocks, `3,011` passed, `0` failed, and `6` ignored; `protected_changes=[]`.
 - Fresh seam evidence is `scripts/out/audits/workspace-seams-20260809T-qf-stealth-final/workspace-seams.json`: `35` workspace packages, `279` Rust files, `204,847` source lines, `130` module edges, `91` Cargo workspace dependency edges, and the unchanged 9-module product SCC (`brain`, `core`, `engine`, `fec`, `implementations`, `interface`, `qftls`, `stealth`, `transport`).
 - The complete all-feature/all-target Clippy lane remains intentionally platform-blocked by the repository-owned Linux-only integration guard at `scripts/tests/rust/rt-transport-uring.rs:8` on macOS ARM64; no guard was weakened. Runtime guardrails are fully green with `Critical: 0` and `Warnings: 0` at `scripts/out/audits/runtime-guardrails-20260809T-qf-stealth-final/audit-runtime-guardrails.log`; AMX proof and SIMD feature contracts pass.

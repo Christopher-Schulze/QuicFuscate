@@ -23,6 +23,8 @@
     setSectionValue,
     readSectionValue,
     readStealthFlag,
+    readStealthCoverTargets,
+    coverTargetsToTomlValue,
     stealthPresetFromMode,
     fecPresetFromConfig,
     normalizeCcSelection,
@@ -53,6 +55,7 @@
   let stealthPreset = $state<StealthPresetUi>("dynamic");
   let fecPreset = $state<"auto" | "off">("auto");
   let stealthManual = $state<StealthManualSettings>({ ...DEFAULT_STEALTH_MANUAL });
+  let coverTargetsText = $state("");
   let transportCc = $state<CcSelection>("bbr3");
   let transportMtuText = $state("1400");
 
@@ -70,7 +73,6 @@
     configText = normalizedText;
     stealthPreset = stealthPresetFromMode(readSectionValue(normalizedText, "stealth", "mode"));
     stealthManual = {
-      enable_domain_fronting: readStealthFlag(normalizedText, "enable_domain_fronting"),
       enable_http3_masquerading: readStealthFlag(normalizedText, "enable_http3_masquerading"),
       use_tls_cover: readStealthFlag(normalizedText, "use_tls_cover"),
       use_qpack_headers: readStealthFlag(normalizedText, "use_qpack_headers"),
@@ -79,6 +81,7 @@
       enable_protocol_mimicry: readStealthFlag(normalizedText, "enable_protocol_mimicry"),
       enable_doh: readStealthFlag(normalizedText, "enable_doh"),
     };
+    coverTargetsText = readStealthCoverTargets(normalizedText);
     fecPreset = fecPresetFromConfig(normalizedText);
     transportCc = normalizeCcSelection(readSectionValue(normalizedText, "transport", "cc_algorithm"));
     transportMtuText = readSectionValue(normalizedText, "transport", "mtu")?.trim() ?? "";
@@ -177,6 +180,22 @@
     markConfigEdit();
     stealthManual = { ...stealthManual, [key]: value };
     configText = setSectionValue(configText, "stealth", key, value ? "true" : "false");
+    dirty = true;
+    setConfigDirty(true);
+  }
+
+  // Cover targets are a host list, not a flag: the UI edits comma text and the
+  // write lands as stealth.reality_cover_targets (TODO-1048). A stale legacy
+  // fronting_domains key is blanked so the alias cannot shadow the new list.
+  function applyStealthCoverTargets(value: string) {
+    markConfigEdit();
+    coverTargetsText = value;
+    configText = setSectionValue(
+      configText, "stealth", "reality_cover_targets", coverTargetsToTomlValue(value),
+    );
+    if (readSectionValue(configText, "stealth", "fronting_domains") != null) {
+      configText = setSectionValue(configText, "stealth", "fronting_domains", "[]");
+    }
     dirty = true;
     setConfigDirty(true);
   }
@@ -309,9 +328,11 @@
       {stealthManual}
       {transportCc}
       {transportMtuText}
+      {coverTargetsText}
       onStealthChange={applyStealthPreset}
       onFecChange={applyFecPreset}
       onManualFlagChange={applyStealthManualFlag}
+      onCoverTargetsChange={applyStealthCoverTargets}
       onCcChange={applyTransportCc}
       onMtuChange={(v) => {
         markConfigEdit();

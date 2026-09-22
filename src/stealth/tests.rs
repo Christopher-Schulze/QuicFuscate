@@ -562,24 +562,24 @@ fn rate_choker_deficit_causes_positive_wait() {
     assert!(wait > std::time::Duration::ZERO, "wait after drain must be > 0");
 }
 
-// --- DomainFrontingManager Tests ---
+// --- CoverTargetRotator Tests ---
 
 #[test]
-fn domain_fronting_result_always_in_list() {
-    let domains =
+fn cover_target_result_always_in_list() {
+    let targets =
         vec!["alpha.example".to_string(), "beta.example".to_string(), "gamma.example".to_string()];
-    let mgr = super::DomainFrontingManager::new(domains.clone());
+    let rotator = super::CoverTargetRotator::new(targets.clone());
     for _ in 0..30 {
-        let d = mgr.get_fronted_domain();
-        assert!(domains.contains(&d), "returned domain '{}' not in configured list", d);
+        let t = rotator.next_cover_target();
+        assert!(targets.contains(&t), "returned target '{}' not in configured list", t);
     }
 }
 
 #[test]
-fn domain_fronting_broad_rotation_returns_non_empty() {
-    let mgr = super::DomainFrontingManager::broad_provider_rotation();
-    let d = mgr.get_fronted_domain();
-    assert!(!d.is_empty(), "broad provider rotation must return a non-empty domain");
+fn cover_target_broad_providers_returns_non_empty() {
+    let rotator = super::CoverTargetRotator::broad_providers();
+    let t = rotator.next_cover_target();
+    assert!(!t.is_empty(), "broad providers must return a non-empty cover target");
 }
 
 // --- Http3Masquerade Tests ---

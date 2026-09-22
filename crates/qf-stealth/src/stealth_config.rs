@@ -1,7 +1,7 @@
 // --- 7. Stealth Manager and Configuration ---
 
 use crate::{
-    BrowserProfile, DomainFrontingManager, FingerprintProfile, OsProfile, PaddingStrategy,
+    BrowserProfile, CoverTargetRotator, FingerprintProfile, OsProfile, PaddingStrategy,
     RotationMode, StealthMode, TlsClientHelloProfileCatalog,
 };
 use qf_common::env_utils::EnvSnapshot;
@@ -11,8 +11,13 @@ use qf_common::env_utils::EnvSnapshot;
 pub struct StealthConfig {
     /// Selected high-level mode for behavior decisions.
     pub mode: StealthMode,
-    /// Enable domain fronting to hide the real destination.
-    pub enable_domain_fronting: bool,
+    /// Cover-target hostnames for the Reality relay path (TODO-1048).
+    ///
+    /// Each entry is a `host` or `host:port` whose certificate the hop
+    /// legitimately presents or relays. These are never used to emit an SNI
+    /// that differs from the certificate name of the connection it travels on -
+    /// the SNI!=certificate domain-fronting behavior was removed in TODO-1048.
+    pub reality_cover_targets: Vec<String>,
     /// Initial browser profile for fingerprinting.
     pub initial_browser: BrowserProfile,
     /// Initial OS profile for fingerprinting.
@@ -51,8 +56,6 @@ pub struct StealthConfig {
     pub choke_burst_ms: u32,
     /// Enable Dynamic mode (start as Base and escalate intelligently).
     pub dynamic_enabled: bool,
-    /// Domain list for fronting rotation (empty = use built-in CDN providers).
-    pub fronting_domains: Vec<String>,
     /// Enable HTTP/3 header masquerading to mimic browser requests.
     pub enable_http3_masquerading: bool,
     /// Enable TLS Cover extras (synthetic cert chain, cover PSK).
@@ -224,7 +227,7 @@ impl StealthConfig {
     pub fn stealth() -> Self {
         Self {
             mode: StealthMode::Stealth,
-            enable_domain_fronting: false,
+            reality_cover_targets: vec![],
             // Fields removed during consolidation
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
@@ -250,7 +253,6 @@ impl StealthConfig {
             choke_burst_ms: 0,
             // Dynamic disabled
             dynamic_enabled: false,
-            fronting_domains: vec![],
             enable_http3_masquerading: true,
             use_tls_cover: true,
             use_qpack_headers: true,
@@ -279,11 +281,12 @@ impl StealthConfig {
 
     /// Creates Anti-DPI mode - all features with aggressive settings.
     pub fn stealth_max() -> Self {
-        let domains = DomainFrontingManager::broad_provider_rotation();
+        let targets = CoverTargetRotator::broad_providers();
         Self {
             mode: StealthMode::StealthMax,
-            enable_domain_fronting: true,
-            fronting_domains: domains.domains().to_vec(),
+            // Reality cover targets replace the removed domain-fronting flag:
+            // probe traffic relays to hosts that present their own certificate.
+            reality_cover_targets: targets.targets().to_vec(),
             enable_http3_masquerading: true,
             use_tls_cover: true,
             use_qpack_headers: true,
@@ -370,7 +373,7 @@ impl StealthConfig {
     pub fn off() -> Self {
         Self {
             mode: StealthMode::Off,
-            enable_domain_fronting: false,
+            reality_cover_targets: vec![],
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
             enable_network_fingerprint_normalization: false,
@@ -390,7 +393,6 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
-            fronting_domains: vec![],
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
@@ -414,7 +416,7 @@ impl StealthConfig {
     pub fn manual() -> Self {
         Self {
             mode: StealthMode::Manual,
-            enable_domain_fronting: false,
+            reality_cover_targets: vec![],
             initial_browser: BrowserProfile::Chrome,
             initial_os: OsProfile::Windows,
             enable_network_fingerprint_normalization: true,
@@ -434,7 +436,6 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
-            fronting_domains: vec![],
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
@@ -458,11 +459,9 @@ impl StealthConfig {
     pub fn performance() -> Self {
         Self {
             mode: StealthMode::Performance,
-            // Domain fronting is not a safe baseline cover signal on modern CDNs.
-            // Keep the clean path as ordinary H3/QUIC unless explicit fronting
-            // domains are configured.
-            enable_domain_fronting: false,
-            fronting_domains: vec![],
+            // No cover targets on the clean path: ordinary H3/QUIC unless
+            // explicit Reality cover targets are configured.
+            reality_cover_targets: vec![],
             enable_http3_masquerading: true,
             use_tls_cover: true,
             // QPACK on: real Chrome sends QPACK; omitting it breaks the browser fingerprint
@@ -576,6 +575,7 @@ impl StealthConfig {
             use_qpack_headers: Option<bool>,
             enable_domain_fronting: Option<bool>,
             fronting_domains: Option<Vec<String>>,
+            reality_cover_targets: Option<Vec<String>>,
             enable_traffic_padding: Option<bool>,
             enable_timing_obfuscation: Option<bool>,
             enable_protocol_mimicry: Option<bool>,
@@ -653,11 +653,19 @@ impl StealthConfig {
             if let Some(v) = sec.use_qpack_headers {
                 cfg.use_qpack_headers = v;
             }
-            if let Some(v) = sec.enable_domain_fronting {
-                cfg.enable_domain_fronting = v;
+            if sec.enable_domain_fronting == Some(true) {
+                return Err(
+                    "stealth.enable_domain_fronting was removed in TODO-1048: SNI must equal the certificate name of the hop; set stealth.reality_cover_targets to the Reality cover hosts instead"
+                        .into(),
+                );
             }
             if let Some(v) = sec.fronting_domains {
-                cfg.fronting_domains = v;
+                // Deprecated alias: entries become cover targets - hostnames the
+                // hop presents or relays, never an SNI/certificate mismatch.
+                cfg.reality_cover_targets = v;
+            }
+            if let Some(v) = sec.reality_cover_targets {
+                cfg.reality_cover_targets = v;
             }
             if let Some(v) = sec.enable_traffic_padding {
                 cfg.enable_traffic_padding = v;
@@ -788,7 +796,6 @@ impl StealthConfig {
         if matches!(self.mode, StealthMode::Off)
             && (self.enable_http3_masquerading
                 || self.use_qpack_headers
-                || self.enable_domain_fronting
                 || self.enable_traffic_padding
                 || self.enable_timing_obfuscation
                 || self.enable_protocol_mimicry
@@ -798,13 +805,12 @@ impl StealthConfig {
         {
             return Err("off mode cannot enable stealth transport/runtime features".into());
         }
-        if self.enable_domain_fronting
-            && self.fronting_domains.is_empty()
-            && !matches!(self.mode, StealthMode::StealthMax)
+        if let Some(invalid) =
+            self.reality_cover_targets.iter().find(|t| !is_valid_cover_target(t))
         {
-            log::warn!(
-                "domain fronting is enabled without fronting_domains; it will be disabled outside Anti-DPI"
-            );
+            return Err(format!(
+                "stealth.reality_cover_targets entry '{invalid}' is not a valid host or host:port"
+            ));
         }
         if !self.use_tls_cover {
             // Informative notice: TLS Cover extras are automatically disabled
@@ -825,8 +831,8 @@ impl StealthConfig {
     /// - QUICFUSCATE_USE_TLS_COVER_EXTRAS: 0|1|true|false
     /// - QUICFUSCATE_DOH / QUICFUSCATE_DOH_ENABLED: 0|1|true|false
     /// - QUICFUSCATE_DOH_PROVIDER: URL
-    /// - QUICFUSCATE_FRONTING: 0|1|true|false
-    /// - QUICFUSCATE_FRONTING_DOMAINS: comma-separated domain list
+    /// - QUICFUSCATE_REALITY_COVER_TARGETS: comma-separated host or host:port list
+    ///   (QUICFUSCATE_FRONTING_DOMAINS is accepted as a deprecated alias)
     /// - QUICFUSCATE_H3_MASQUERADE: 0|1|true|false
     /// - QUICFUSCATE_QPACK: 0|1|true|false
     /// - QUICFUSCATE_STEALTH_PADDING: 0|1|true|false
@@ -896,11 +902,16 @@ impl StealthConfig {
         if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_DOH_PROVIDER"]) {
             self.doh_provider = v;
         }
-        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_FRONTING"]) {
-            self.enable_domain_fronting = b;
+        if Self::env_bool_first(environment, ["QUICFUSCATE_FRONTING"]) == Some(true) {
+            log::warn!(
+                "QUICFUSCATE_FRONTING was removed in TODO-1048 (SNI must equal the hop certificate name); set QUICFUSCATE_REALITY_COVER_TARGETS instead"
+            );
         }
-        if let Some(domains) = Self::env_csv_first(environment, ["QUICFUSCATE_FRONTING_DOMAINS"]) {
-            self.fronting_domains = domains;
+        if let Some(domains) = Self::env_csv_first(
+            environment,
+            ["QUICFUSCATE_REALITY_COVER_TARGETS", "QUICFUSCATE_FRONTING_DOMAINS"],
+        ) {
+            self.reality_cover_targets = domains;
         }
         if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_H3_MASQUERADE"]) {
             self.enable_http3_masquerading = b;
@@ -1026,7 +1037,7 @@ mod tests {
         assert_eq!(config.initial_browser, BrowserProfile::Firefox);
         assert_eq!(config.initial_os, OsProfile::Linux);
         assert_eq!(config.max_padding_size, 384);
-        assert!(config.enable_domain_fronting);
+        assert!(!config.reality_cover_targets.is_empty());
     }
 
     #[test]
@@ -1074,4 +1085,74 @@ mod tests {
             Err("realtime choke requires choke_target_mbps > 0".to_owned())
         );
     }
+
+    #[test]
+    fn reality_cover_targets_validate_host_or_host_port() {
+        let mut config = StealthConfig::manual();
+        config.reality_cover_targets =
+            vec!["cdn.example".to_string(), "relay.example:8443".to_string()];
+        assert!(config.validate().is_ok());
+
+        config.reality_cover_targets = vec!["bad host".to_string()];
+        assert!(config.validate().is_err());
+        config.reality_cover_targets = vec!["host:notaport".to_string()];
+        assert!(config.validate().is_err());
+        config.reality_cover_targets = vec![":443".to_string()];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn removed_domain_fronting_key_fails_toml_parse() {
+        let toml = "[stealth]\nenable_domain_fronting = true\n";
+        match StealthConfig::from_toml(toml) {
+            Err(err) => assert!(err.to_string().contains("reality_cover_targets")),
+            Ok(_) => panic!("fronting must be rejected"),
+        }
+    }
+
+    #[test]
+    fn legacy_fronting_domains_map_to_cover_targets() {
+        let toml = "[stealth]\nfronting_domains = [\"a.example\", \"b.example\"]\n";
+        let cfg = StealthConfig::from_toml(toml).expect("legacy alias maps");
+        assert_eq!(cfg.reality_cover_targets, vec!["a.example", "b.example"]);
+    }
+}
+
+/// A Reality cover target is a `host` or `host:port` whose certificate the hop
+/// presents or relays. Hostnames must not carry whitespace, userinfo, path or
+/// port garbage - the entry names a real endpoint.
+fn is_valid_cover_target(target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let (host, port) = match target.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.starts_with('[') {
+                // [v6]:port form
+                let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) else {
+                    return false;
+                };
+                if inner.parse::<std::net::Ipv6Addr>().is_err() {
+                    return false;
+                }
+                (host, Some(port))
+            } else {
+                if host.contains(':') {
+                    return false;
+                }
+                (host, Some(port))
+            }
+        }
+        None => (target, None),
+    };
+    if let Some(port) = port {
+        if !port.parse::<u16>().is_ok_and(|p| p > 0) {
+            return false;
+        }
+    }
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    !host.is_empty()
+        && !host.chars().any(char::is_whitespace)
+        && !host.contains(['/', '?', '#', '@'])
 }

@@ -141,7 +141,7 @@
           <div class="rounded-lg border border-edge bg-white/72 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_3px_rgba(0,0,0,0.04)]">
             <p class="text-[10px] font-semibold text-black/80 dashboard-heading-sans">SNI shown here is local placeholder metadata</p>
             <p class="mt-1 text-[10px] leading-relaxed text-black/65">
-              Authoritative Domain Fronting [SNI] policy is embedded in server-issued QKeys.
+              Authoritative cover-SNI policy is embedded in server-issued QKeys.
               Manual shell entries become connect-ready only after importing a QKey.
             </p>
           </div>

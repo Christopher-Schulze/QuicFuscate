@@ -47,8 +47,12 @@ struct QKeyCreatePayload {
     stealth: Option<String>,
     #[serde(default)]
     fec: Option<String>,
+    /// Cover-SNI strategy for the issued QKey: `auto_rotating` (default),
+    /// `fixed` (requires `sni_domain`), or `off` (client SNI = listen host).
+    /// Field names are a stable admin-API contract (TODO-1048).
     #[serde(default)]
     sni_strategy: Option<String>,
+    /// Cover-SNI domain for `sni_strategy = "fixed"`; must be allowlisted.
     #[serde(default)]
     sni_domain: Option<String>,
     #[serde(default)]
@@ -64,7 +68,10 @@ pub struct IssueQKeyRequest {
     pub ttl_seconds: Option<u64>,
     pub stealth: Option<String>,
     pub fec: Option<String>,
+    /// Cover-SNI strategy (`auto_rotating` | `fixed` | `off`); see the wire
+    /// struct above for the field contract (TODO-1048).
     pub sni_strategy: Option<String>,
+    /// Cover-SNI domain for `sni_strategy = "fixed"`; must be allowlisted.
     pub sni_domain: Option<String>,
     pub bandwidth_policy: Option<BandwidthPolicy>,
     pub traffic_analysis_policy: Option<crate::transport::config::TrafficAnalysisPolicy>,

@@ -32,8 +32,8 @@ pub struct RuntimeStealthPolicy<'a> {
     pub os: OsProfile,
     pub disable_doh: bool,
     pub doh_provider: &'a str,
-    pub disable_fronting: bool,
-    pub front_domain: &'a [String],
+    pub disable_cover: bool,
+    pub cover_targets: &'a [String],
     pub disable_http3: bool,
 }
 
@@ -43,8 +43,8 @@ pub(crate) struct OwnedRuntimeStealthPolicy {
     os: OsProfile,
     disable_doh: bool,
     doh_provider: String,
-    disable_fronting: bool,
-    front_domain: Vec<String>,
+    disable_cover: bool,
+    cover_targets: Vec<String>,
     disable_http3: bool,
 }
 
@@ -55,8 +55,8 @@ impl OwnedRuntimeStealthPolicy {
             os: policy.os,
             disable_doh: policy.disable_doh,
             doh_provider: policy.doh_provider.to_string(),
-            disable_fronting: policy.disable_fronting,
-            front_domain: policy.front_domain.to_vec(),
+            disable_cover: policy.disable_cover,
+            cover_targets: policy.cover_targets.to_vec(),
             disable_http3: policy.disable_http3,
         }
     }
@@ -67,8 +67,8 @@ impl OwnedRuntimeStealthPolicy {
             os: self.os,
             disable_doh: self.disable_doh,
             doh_provider: self.doh_provider.as_str(),
-            disable_fronting: self.disable_fronting,
-            front_domain: &self.front_domain,
+            disable_cover: self.disable_cover,
+            cover_targets: &self.cover_targets,
             disable_http3: self.disable_http3,
         }
     }
@@ -80,8 +80,8 @@ impl OwnedRuntimeStealthPolicy {
             self.os,
             self.disable_doh,
             self.doh_provider.as_str(),
-            self.disable_fronting,
-            &self.front_domain,
+            self.disable_cover,
+            &self.cover_targets,
             self.disable_http3,
         );
     }
@@ -282,7 +282,7 @@ impl PreparedStandaloneRuntimeConfig {
             profiles,
             profile_interval_secs,
             standalone_runtime_metadata: StandaloneRuntimeMetadata {
-                front_domain: stealth_policy.front_domain.clone(),
+                cover_targets: stealth_policy.cover_targets.clone(),
                 config_path,
                 reload_policy: StandaloneReloadPolicy {
                     fec_mode_override,

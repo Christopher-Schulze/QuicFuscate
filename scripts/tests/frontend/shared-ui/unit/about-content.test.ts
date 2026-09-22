@@ -31,7 +31,7 @@ describe("AboutContent", () => {
     expect(screen.getByText("Protocol")).not.toBeNull();
     expect(screen.getByText("Custom QUIC v1 [RFC 9000]")).not.toBeNull();
     expect(screen.getByText("Cipher")).not.toBeNull();
-    expect(screen.getByText("AEGIS-128")).not.toBeNull();
+    expect(screen.getByText("AES-128-GCM | AEGIS-128L")).not.toBeNull();
   });
 
   test("renders CPU features when provided", () => {

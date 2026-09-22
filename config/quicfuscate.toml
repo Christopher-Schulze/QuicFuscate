@@ -176,9 +176,12 @@ mode = "dynamic"
 # uTLS persona spoofing - match ClientHello and QUIC transport parameters to the configured browser persona.
 use_utls = true
 
-# Domain fronting - Hide real destination behind explicitly configured CDN domains.
-# Disabled by default because modern CDNs commonly block or flag SNI/Host mismatches.
-enable_domain_fronting = false
+# Reality cover targets - hosts or host:port entries whose certificate this hop
+# legitimately presents or relays. Probe traffic without a valid tunnel secret
+# is forwarded to these endpoints, so the SNI always matches a real certificate.
+# The old enable_domain_fronting flag was removed in TODO-1048: setting it is a
+# configuration error because it produced SNI/certificate mismatches.
+reality_cover_targets = []
 
 # HTTP/3 masquerading - Make QUIC traffic look like HTTP/3
 enable_http3_masquerading = true
@@ -219,8 +222,8 @@ doh_provider = "https://cloudflare-dns.com/dns-query"
 padding_strategy = "adaptive"
 max_padding_size = 256  # bytes (256 for auto, 2048 for max)
 
-# Custom fronting domains (leave empty to use default CDN rotation)
-fronting_domains = []
+# Custom cover targets are configured via reality_cover_targets above.
+# (The deprecated fronting_domains alias is still accepted and maps onto it.)
 
 # Browser and OS profiles for fingerprinting
 initial_browser = "chrome"  # chrome, firefox, safari, edge
