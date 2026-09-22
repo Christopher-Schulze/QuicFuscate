@@ -1,7 +1,6 @@
 //! Weighted HTTP/3 cover-request scheduling.
 
 use qf_common::time_source::ProtocolClock;
-use qf_transport_types::h3::Header;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -55,8 +54,11 @@ impl CoverTrafficScheduler {
         }
     }
 
-    /// Generate next cover request if due
-    pub fn get_next_request(&self) -> Option<Vec<Header>> {
+    /// Return the next cover request target `(authority, path)` once its
+    /// weighted interval has elapsed, or `None` while the interval is still
+    /// running. The request headers themselves are built by the stealth
+    /// manager from the persona fixture (TODO-1055: one header code path).
+    pub fn next_cover_target(&self) -> Option<(String, String)> {
         if let Ok(mut last) = self.last_request.lock() {
             let elapsed = self.clock.elapsed_since(*last).as_millis() as u64;
             let interval = self.interval_ms.load(Ordering::Relaxed);
@@ -81,63 +83,23 @@ impl CoverTrafficScheduler {
             random_val -= weight;
         }
 
-        Some(self.build_request_headers(selected_type))
-    }
-
-    fn build_request_headers(&self, req_type: &CoverRequestType) -> Vec<Header> {
-        use rand::Rng;
-        // One thread-local handle per built request - `rand::rng()` is cheap,
-        // but three separate lookups per cover request are still avoidable.
-        let mut rng = rand::rng();
-        let method: &[u8] = match req_type {
-            CoverRequestType::HeadResource => b"HEAD",
-            _ => b"GET",
-        };
-
-        let path: &[u8] = match req_type {
-            CoverRequestType::GetIndex => b"/",
-            CoverRequestType::GetFavicon => b"/favicon.ico",
-            CoverRequestType::GetRobots => b"/robots.txt",
-            CoverRequestType::GetManifest => b"/manifest.json",
+        let path: &str = match selected_type {
+            CoverRequestType::GetIndex => "/",
+            CoverRequestType::GetFavicon => "/favicon.ico",
+            CoverRequestType::GetRobots => "/robots.txt",
+            CoverRequestType::GetManifest => "/manifest.json",
             CoverRequestType::GetStyle => {
-                let styles: [&[u8]; 3] =
-                    [b"/css/main.css", b"/css/style.css", b"/assets/styles.css"];
+                let styles: [&str; 3] = ["/css/main.css", "/css/style.css", "/assets/styles.css"];
                 styles[rng.random_range(0..styles.len())]
             }
             CoverRequestType::GetScript => {
-                let scripts: [&[u8]; 3] = [b"/js/app.js", b"/js/main.js", b"/assets/bundle.js"];
+                let scripts: [&str; 3] = ["/js/app.js", "/js/main.js", "/assets/bundle.js"];
                 scripts[rng.random_range(0..scripts.len())]
             }
-            CoverRequestType::HeadResource => b"/api/health",
+            CoverRequestType::HeadResource => "/api/health",
         };
 
-        let mut headers = vec![
-            Header::new(b":method", method),
-            Header::new(b":scheme", b"https"),
-            Header::new(b":authority", self.target_domain.as_bytes()),
-            Header::new(b":path", path),
-        ];
-
-        // Add realistic browser headers
-        headers.push(Header::new(
-            b"accept",
-            match req_type {
-                CoverRequestType::GetStyle => b"text/css,*/*;q=0.1",
-                CoverRequestType::GetScript => b"*/*",
-                CoverRequestType::GetFavicon => b"image/webp,image/apng,image/*,*/*;q=0.8",
-                _ => b"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        ));
-
-        headers.push(Header::new(b"accept-encoding", b"gzip, deflate, br"));
-        headers.push(Header::new(b"accept-language", b"en-US,en;q=0.9"));
-
-        // Add cache headers with some variation
-        if rng.random_bool(0.7) {
-            headers.push(Header::new(b"cache-control", b"no-cache"));
-        }
-
-        headers
+        Some((self.target_domain.clone(), path.to_string()))
     }
 
     /// Updates the request interval in milliseconds (thread-safe)
@@ -159,7 +121,7 @@ mod tests {
     #[test]
     fn new_scheduler_waits_for_its_first_interval() {
         let scheduler = CoverTrafficScheduler::new("cdn.example.com".to_owned(), 60_000);
-        assert!(scheduler.get_next_request().is_none());
+        assert!(scheduler.next_cover_target().is_none());
     }
 
     #[test]

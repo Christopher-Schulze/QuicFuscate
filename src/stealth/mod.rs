@@ -63,9 +63,9 @@ use crate::crypto::CryptoManager; // Assumed for integration
 use crate::optimize::OptimizationManager; // Assumed for integration
 use crate::telemetry;
 pub(crate) use qf_engine_types::RuntimePolicyGeneration;
+pub use qf_stealth::RateChoker;
 #[cfg(test)]
 pub(crate) use qf_stealth::TlsCoverCipherPreference;
-pub use qf_stealth::{RateChoker, ServerPushState, ServerPushTriggerReason};
 
 // Integrated test module (keeps src layout monolithic; tests live alongside)
 // Test module removed - tests are inline

@@ -22,7 +22,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_scope_selection() {
-  qf_validate_scope_selection "$ONLY" "h3-qpack,server-push,fec,migration,zero-rtt,stealth,integration-control,integration-fec,integration-stealth,integration-loss,integration-performance,integration"
+  qf_validate_scope_selection "$ONLY" "h3-qpack,fec,migration,zero-rtt,stealth,integration-control,integration-fec,integration-stealth,integration-loss,integration-performance,integration"
   return $?
 }
 
@@ -130,14 +130,6 @@ if scope_selected h3-qpack; then
     "QUICFUSCATE_H3_MASQUERADE=1 QUICFUSCATE_QPACK=1" \
     "test:rt-harness-cli" \
     "harness_qpack_encode_runs_with_small_input"
-fi
-
-# Server push pipeline end-to-end
-if scope_selected server-push; then
-  run_case "E2E H3 Server Push (Promise->Headers->Data->FIN)" \
-    "QUICFUSCATE_H3_MASQUERADE=1" \
-    "test:it-stealth-mode-matrix" \
-    "test_should_trigger_server_push_mode_matrix"
 fi
 
 # Internal machine-room FEC streaming recovery under 6% loss

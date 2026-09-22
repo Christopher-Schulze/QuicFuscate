@@ -703,35 +703,6 @@ fn active_probe_detector_benign_packet_ignored() {
     assert!(result.is_none(), "benign QUIC packet must not trigger probe detection");
 }
 
-// --- ServerPushState Tests ---
-
-#[test]
-fn server_push_cover_plan_none_after_burst() {
-    let optimization = Arc::new(OptimizationManager::new());
-    let crypto = Arc::new(CryptoManager::new());
-    let mut cfg = StealthConfig::stealth_max();
-    cfg.enable_server_push_cover = true;
-    cfg.server_push_burst_interval = 30; // 30-second interval
-    let mgr = StealthManager::new(cfg, optimization, crypto);
-
-    // Simulate a burst: observe it, which resets last_burst to now
-    mgr.observe_server_push_burst("/assets/app.js", 3, 0.5, 0, 0);
-    // Immediately after, the interval has not elapsed - plan should be None
-    let plan = mgr.server_push_cover_plan_for_test();
-    assert!(plan.is_none(), "cover plan must be None immediately after a burst resets the timer");
-}
-
-#[test]
-fn server_push_cover_plan_disabled_returns_none() {
-    let optimization = Arc::new(OptimizationManager::new());
-    let crypto = Arc::new(CryptoManager::new());
-    let mut cfg = StealthConfig::stealth();
-    cfg.enable_server_push_cover = false;
-    let mgr = StealthManager::new(cfg, optimization, crypto);
-    let plan = mgr.server_push_cover_plan_for_test();
-    assert!(plan.is_none(), "server_push_cover_plan must be None when cover is disabled");
-}
-
 // =============================================================================
 // TODO-416: Gradual Stealth Escalation Tests
 // =============================================================================

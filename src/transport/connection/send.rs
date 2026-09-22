@@ -783,6 +783,12 @@ impl Connection {
         self.wire_ledger = ledger;
     }
 
+    /// Borrow the installed wire ledger mutably (crate-internal; tests).
+    #[cfg(test)]
+    pub(crate) fn wire_ledger_mut(&mut self) -> Option<&mut qf_stealth::BudgetLedger> {
+        self.wire_ledger.as_mut()
+    }
+
     /// Atomically ask the ledger to pay `bytes` for a repair datagram.
     /// `true` = paid, the caller may emit; `false` = denied, the caller
     /// must drop or delay the repair — repairs are never sent over the

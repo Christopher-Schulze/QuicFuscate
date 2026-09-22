@@ -81,20 +81,18 @@ pub struct StealthConfig {
     pub choke_burst_ms: u32,
     /// Enable Dynamic mode (start as Base and escalate intelligently).
     pub dynamic_enabled: bool,
-    /// Enable HTTP/3 header masquerading to mimic browser requests.
+    /// Allow persona-shaped HTTP/3 request headers on outer-hop requests:
+    /// MASQUE CONNECT requests and cover-target requests carry the active
+    /// persona's header names. Inner tunnel streams (TUN carrier, auth
+    /// exchanges) never carry browser headers — under AEAD nobody could
+    /// read them anyway (TODO-1055).
     pub enable_http3_masquerading: bool,
     /// Enable TLS Cover extras (synthetic cert chain, cover PSK).
     pub use_tls_cover: bool,
-    /// Enable QPACK-encoded headers in HTTP/3 masquerade frames.
+    /// Allow the persona's QPACK profile (table capacity, blocked streams,
+    /// static-index subset) when outer-hop headers are encoded. When false,
+    /// the H3 layer runs with a minimal QPACK profile (TODO-1055).
     pub use_qpack_headers: bool,
-    /// **NEW**: Enable HTTP/3 Server Push Cover Traffic
-    pub enable_server_push_cover: bool,
-    /// Server Push cover traffic intensity (0.0 = disabled, 1.0 = maximum)
-    pub server_push_intensity: f32,
-    /// Base path for fake resources (e.g., "/assets", "/static")
-    pub server_push_base_path: String,
-    /// Minimum delay between cover traffic bursts (seconds)
-    pub server_push_burst_interval: u64,
     /// Enable payload compression before encryption.
     pub compress_enabled: bool,
     /// Minimum payload length in bytes before compression is attempted.
@@ -141,10 +139,6 @@ impl StealthConfig {
         T: std::str::FromStr,
     {
         environment.parse_first(names)
-    }
-
-    fn env_f32_first<const N: usize>(environment: &EnvSnapshot, names: [&str; N]) -> Option<f32> {
-        environment.parse_finite_f32_first(names)
     }
 
     fn env_csv_first<const N: usize>(
@@ -273,12 +267,6 @@ impl StealthConfig {
             enable_http3_masquerading: true,
             use_tls_cover: true,
             use_qpack_headers: true,
-            // Server Push Cover Traffic: light in Stealth mode.
-            // Real H/3 CDNs send PUSH_PROMISE on assets; omitting it breaks the browser fingerprint.
-            enable_server_push_cover: true,
-            server_push_intensity: 0.25,
-            server_push_base_path: "/assets".to_string(),
-            server_push_burst_interval: 60,
             compress_enabled: true,
             compress_min_len: 256,
             compress_level: 5,
@@ -329,11 +317,6 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
-            // Server Push Cover Traffic: ON in Anti-DPI mode (maximum stealth)
-            enable_server_push_cover: true,
-            server_push_intensity: 0.8, // High intensity
-            server_push_base_path: "/cdn".to_string(),
-            server_push_burst_interval: 15, // Frequent bursts
             // Aggressive compression defaults for Anti-DPI traffic (textual payloads)
             compress_enabled: true,
             compress_min_len: 128,
@@ -419,11 +402,6 @@ impl StealthConfig {
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
-            // Server Push Cover Traffic: OFF in Off mode
-            enable_server_push_cover: false,
-            server_push_intensity: 0.0,
-            server_push_base_path: "/assets".to_string(),
-            server_push_burst_interval: 0,
             compress_enabled: false,
             compress_min_len: 1024,
             compress_level: 3,
@@ -464,11 +442,6 @@ impl StealthConfig {
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
-            // Server Push Cover Traffic: Manual configuration
-            enable_server_push_cover: false,
-            server_push_intensity: 0.3,
-            server_push_base_path: "/static".to_string(),
-            server_push_burst_interval: 60,
             compress_enabled: false,
             compress_min_len: 256,
             compress_level: 5,
@@ -520,11 +493,6 @@ impl StealthConfig {
             choke_target_mbps: 0,
             choke_burst_ms: 0,
             dynamic_enabled: false,
-            // Server Push Cover Traffic: OFF in Performance mode (performance priority)
-            enable_server_push_cover: false,
-            server_push_intensity: 0.0,
-            server_push_base_path: "/assets".to_string(),
-            server_push_burst_interval: 0,
             compress_enabled: false,
             compress_min_len: 512,
             compress_level: 3,
@@ -617,6 +585,8 @@ impl StealthConfig {
             choke_target_mbps: Option<u32>,
             choke_burst_ms: Option<u32>,
             dynamic_enabled: Option<bool>,
+            // Removed in TODO-1055 — keys stay parseable for config
+            // compatibility; `enable_server_push_cover = true` is rejected.
             enable_server_push_cover: Option<bool>,
             server_push_intensity: Option<f32>,
             server_push_base_path: Option<String>,
@@ -727,18 +697,19 @@ impl StealthConfig {
             if let Some(v) = sec.dynamic_enabled {
                 cfg.dynamic_enabled = v;
             }
-            if let Some(v) = sec.enable_server_push_cover {
-                cfg.enable_server_push_cover = v;
+            if sec.enable_server_push_cover == Some(true) {
+                return Err(
+                    "stealth.enable_server_push_cover was removed in TODO-1055: fake PUSH_PROMISE bursts only spent the wire budget on header bytes no observer could read; persona-shaped requests run on the outer MASQUE hop and debit the wire ledger"
+                        .into(),
+                );
             }
-            if let Some(v) = sec.server_push_intensity {
-                cfg.server_push_intensity = v;
-            }
-            if let Some(v) = sec.server_push_base_path {
-                cfg.server_push_base_path = v;
-            }
-            if let Some(v) = sec.server_push_burst_interval {
-                cfg.server_push_burst_interval = v;
-            }
+            // server_push_intensity, server_push_base_path and
+            // server_push_burst_interval are parsed and ignored.
+            let _ = (
+                sec.server_push_intensity,
+                sec.server_push_base_path,
+                sec.server_push_burst_interval,
+            );
             if let Some(v) = sec.normalize_target_size {
                 cfg.normalize_target_size = v;
             }
@@ -793,9 +764,7 @@ impl StealthConfig {
         if self.use_qpack_headers && !self.enable_http3_masquerading {
             return Err("qpack headers require HTTP/3 masquerading to be enabled".into());
         }
-        if self.enable_server_push_cover && !self.enable_http3_masquerading {
-            return Err("server push cover requires HTTP/3 masquerading to be enabled".into());
-        }
+
         if self.enable_realtime_choke && self.choke_target_mbps == 0 {
             return Err("realtime choke requires choke_target_mbps > 0".into());
         }
@@ -827,8 +796,7 @@ impl StealthConfig {
                 || self.enable_timing_obfuscation
                 || self.enable_protocol_mimicry
                 || self.enable_realtime_choke
-                || self.dynamic_enabled
-                || self.enable_server_push_cover)
+                || self.dynamic_enabled)
         {
             return Err("off mode cannot enable stealth transport/runtime features".into());
         }
@@ -866,10 +834,10 @@ impl StealthConfig {
     /// - QUICFUSCATE_STEALTH_PADDING_STRATEGY / QUICFUSCATE_PADDING_STRATEGY: random|fixed|adaptive|browser|browser-mimic|1|2|3|4
     /// - QUICFUSCATE_FINGERPRINT_ROTATION: 0|1|true|false
     /// - QUICFUSCATE_FINGERPRINT_ROTATION_INTERVAL: integer seconds
-    /// - QUICFUSCATE_SERVER_PUSH_COVER: 0|1|true|false
-    /// - QUICFUSCATE_SERVER_PUSH_INTENSITY: float
-    /// - QUICFUSCATE_SERVER_PUSH_BASE_PATH: path
-    /// - QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL: integer seconds
+    ///
+    /// Removed in TODO-1055 (parsed and ignored / `true` warns):
+    /// QUICFUSCATE_SERVER_PUSH_COVER, QUICFUSCATE_SERVER_PUSH_INTENSITY,
+    /// QUICFUSCATE_SERVER_PUSH_BASE_PATH, QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL.
     pub fn apply_env_overrides(&mut self) {
         let environment = EnvSnapshot::capture();
         self.apply_env_overrides_with_snapshot(&environment);
@@ -933,6 +901,11 @@ impl StealthConfig {
                 "QUICFUSCATE_FRONTING was removed in TODO-1048 (SNI must equal the hop certificate name); set QUICFUSCATE_REALITY_COVER_TARGETS instead"
             );
         }
+        if Self::env_bool_first(environment, ["QUICFUSCATE_SERVER_PUSH_COVER"]) == Some(true) {
+            log::warn!(
+                "QUICFUSCATE_SERVER_PUSH_COVER was removed in TODO-1055: fake PUSH_PROMISE bursts only spent the wire budget on header bytes no observer could read"
+            );
+        }
         if let Some(domains) = Self::env_csv_first(
             environment,
             ["QUICFUSCATE_REALITY_COVER_TARGETS", "QUICFUSCATE_FRONTING_DOMAINS"],
@@ -983,26 +956,6 @@ impl StealthConfig {
         }
         if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_STEALTH_DYNAMIC"]) {
             self.dynamic_enabled = b;
-        }
-        if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_SERVER_PUSH_COVER"]) {
-            self.enable_server_push_cover = b;
-        }
-        if let Some(n) = Self::env_f32_first(environment, ["QUICFUSCATE_SERVER_PUSH_INTENSITY"]) {
-            if (0.0..=1.0).contains(&n) {
-                self.server_push_intensity = n;
-            } else {
-                log::warn!(
-                    "QUICFUSCATE_SERVER_PUSH_INTENSITY must be between 0.0 and 1.0; ignoring override"
-                );
-            }
-        }
-        if let Some(v) = Self::env_first(environment, ["QUICFUSCATE_SERVER_PUSH_BASE_PATH"]) {
-            self.server_push_base_path = v;
-        }
-        if let Some(n) =
-            Self::env_parse_first(environment, ["QUICFUSCATE_SERVER_PUSH_BURST_INTERVAL"])
-        {
-            self.server_push_burst_interval = n;
         }
         self.normalize_protocol_mimicry_bundle();
     }

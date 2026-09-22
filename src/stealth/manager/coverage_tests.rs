@@ -252,12 +252,10 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn config_validate_rejects_server_push_without_h3() {
-        let mut cfg = StealthConfig::manual();
-        cfg.enable_server_push_cover = true;
-        cfg.enable_http3_masquerading = false;
-        let err = cfg.validate().expect_err("push without h3");
-        assert!(err.contains("server push cover requires"));
+    fn config_toml_rejects_enable_server_push_cover() {
+        let toml = "[stealth]\nenable_server_push_cover = true\n";
+        let err = StealthConfig::from_toml(toml).err().expect("server push cover must be rejected");
+        assert!(err.to_string().contains("removed in TODO-1055"));
     }
 
     #[test]
@@ -386,7 +384,6 @@ mod stealth_coverage_tests {
         assert!(cfg.reality_cover_targets.is_empty());
         assert!(!cfg.enable_doh);
         assert!(!cfg.enable_cover_ping);
-        assert!(!cfg.enable_server_push_cover);
         assert!(!cfg.dynamic_enabled);
         assert_eq!(cfg.max_padding_size, 0);
     }
@@ -469,16 +466,13 @@ mod stealth_coverage_tests {
             ("QUICFUSCATE_STEALTH_PADDING_STRATEGY", "unsupported"),
             ("QUICFUSCATE_PADDING_STRATEGY", "browser"),
             ("QUICFUSCATE_STEALTH_PADDING", "malformed"),
-            ("QUICFUSCATE_SERVER_PUSH_INTENSITY", "2.0"),
         ]);
         let mut config = StealthConfig::stealth();
-        let default_intensity = config.server_push_intensity;
 
         config.apply_env_overrides_with_snapshot(&environment);
 
         assert_eq!(config.wire_shape, WireShape::PersonaTrace);
         assert!(config.enable_traffic_padding);
-        assert_eq!(config.server_push_intensity, default_intensity);
     }
 
     // =========================================================================
@@ -738,20 +732,8 @@ mod stealth_coverage_tests {
     }
 
     // =========================================================================
-    // 10. Server Push cover traffic
+    // 10. Cover session policy
     // =========================================================================
-
-    #[test]
-    fn server_push_cover_not_active_in_off_mode() {
-        let m = make_manager(StealthConfig::off());
-        assert!(!m.server_push_cover_active());
-    }
-
-    #[test]
-    fn server_push_cover_active_in_anti_dpi() {
-        let m = make_manager(StealthConfig::stealth_max());
-        assert!(m.server_push_cover_active());
-    }
 
     #[test]
     fn webtransport_cover_policy_is_escalated_only() {
@@ -771,39 +753,14 @@ mod stealth_coverage_tests {
     fn h3_cover_header_emission_policy_matches_modes() {
         let performance = make_manager(StealthConfig::performance());
         assert!(!performance.cover_header_emission_allowed());
-        assert!(performance.cover_headers_due().is_none());
+        assert!(performance.cover_request_due().is_none());
 
         let intelligent = make_manager(StealthConfig::dynamic());
         assert!(!intelligent.cover_header_emission_allowed());
-        assert!(intelligent.cover_headers_due().is_none());
+        assert!(intelligent.cover_request_due().is_none());
 
         intelligent.set_brain_level_for_test(1);
         assert!(intelligent.cover_header_emission_allowed());
-    }
-
-    #[test]
-    fn server_push_burst_estimation_zero_promises() {
-        let m = make_manager(StealthConfig::stealth());
-        let bytes = m.estimate_server_push_cover_bytes("/assets", 0, 0.5);
-        assert_eq!(bytes, 0);
-    }
-
-    #[test]
-    fn server_push_burst_estimation_positive_promises() {
-        let m = make_manager(StealthConfig::stealth());
-        let bytes = m.estimate_server_push_cover_bytes("/assets", 5, 0.5);
-        assert!(bytes > 0);
-        // More promises = more bytes
-        let bytes2 = m.estimate_server_push_cover_bytes("/assets", 10, 0.5);
-        assert!(bytes2 > bytes);
-    }
-
-    #[test]
-    fn server_push_trigger_reason_classification() {
-        let m = make_manager(StealthConfig::stealth());
-        assert_eq!(m.server_push_trigger_reason(100, 0), ServerPushTriggerReason::Loss);
-        assert_eq!(m.server_push_trigger_reason(10, 2), ServerPushTriggerReason::Gating);
-        assert_eq!(m.server_push_trigger_reason(10, 0), ServerPushTriggerReason::Time);
     }
 
     // =========================================================================
@@ -990,7 +947,7 @@ mod stealth_coverage_tests {
         let sched = CoverTrafficScheduler::new("cdn.example.com".into(), 60_000);
         // First call succeeds (initial last_request is "now")
         // It should return Some on first eligible call after interval
-        let req = sched.get_next_request();
+        let req = sched.next_cover_target();
         // The initial last_request is Instant::now(), so 0ms elapsed < 60000ms interval => None
         assert!(req.is_none());
     }

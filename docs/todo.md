@@ -497,7 +497,7 @@
 - Detail: `docs/todo/todo-1054-cover-ping-follows-persona-trace.md`
 
 ### TODO-1055 - QPACK, User-Agent, and server push only on the outer hop
-- OPEN. Inner tunnel turns masquerade and push off. Outer MASQUE/H3 hop may use the persona headers and must debit the byte budget.
+- DONE. Inner `/tun` streams carry pseudo + functional `x-qf-*` headers only; outer-hop MASQUE/H3 requests take the persona header list and debit the wire ledger. `use_qpack_headers` now really gates the QPACK dynamic table. Fake server-push generation removed end to end (sender, brain triggers, telemetry, `Event::PushPromise`); receive side hardened: no `MAX_PUSH_ID` advertisement, push streams → `StreamCreationError`, `PUSH_PROMISE` → `IdError`, `CANCEL_PUSH`/`MAX_PUSH_ID` parsed and dropped. `enable_server_push_cover = true` is a config error. WebTransport cover is a one-shot outer-hop emit.
 - Detail: `docs/todo/todo-1055-outer-hop-only-h3-masquerade.md`
 
 ### TODO-1056 - Persona change via connection migration, not a 120 s handshake

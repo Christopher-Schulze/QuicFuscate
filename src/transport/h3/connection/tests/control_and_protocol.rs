@@ -394,57 +394,67 @@ fn paired_qpack_capacity_violation_maps_to_encoder_stream_error() {
 }
 
 #[test]
-fn duplicate_push_stream_identifier_is_rejected() {
+fn peer_push_streams_are_rejected() {
+    // This endpoint never advertises MAX_PUSH_ID, so any push stream is a
+    // protocol violation (RFC 9114 §6.2.2 → H3_STREAM_CREATION_ERROR).
     let (mut client, mut server, recv_info, mut client_h3, _server_h3) =
         make_paired_h3_connections();
     let mut packet = [0u8; 2048];
-    server.stream_send(7, &[0x01, 0x00], false).expect("first push stream");
+    server.stream_send(7, &[0x01, 0x00], false).expect("push stream");
     assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
-    assert!(matches!(client_h3.poll(&mut client), Err(Error::Done)));
+    assert!(matches!(client_h3.poll(&mut client), Err(Error::StreamCreationError)));
+}
 
-    server.stream_send(11, &[0x01, 0x00], false).expect("duplicate push id");
+#[test]
+fn push_promise_without_max_push_id_is_rejected() {
+    // PUSH_PROMISE without a negotiated MAX_PUSH_ID violates RFC 9114 §7.2.5
+    // (→ H3_ID_ERROR).
+    let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
+        make_paired_h3_connections();
+    let request_stream_id = client_h3
+        .send_request(
+            &mut client,
+            &[
+                Header::new(b":method", b"GET"),
+                Header::new(b":scheme", b"https"),
+                Header::new(b":authority", b"example.test"),
+                Header::new(b":path", b"/"),
+            ],
+            false,
+        )
+        .expect("request");
+    let mut packet = [0u8; 4096];
+    assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
+    assert!(matches!(
+        server_h3.poll(&mut server),
+        Ok(Some((id, Event::Headers { .. }))) if id == request_stream_id
+    ));
+
+    let mut frame = Vec::new();
+    Connection::encode_varint(0x05, &mut frame);
+    Connection::encode_varint(1, &mut frame);
+    frame.push(0x00); // push_id
+    server.stream_send(request_stream_id, &frame, false).expect("PUSH_PROMISE frame");
     assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
     assert!(matches!(client_h3.poll(&mut client), Err(Error::IdError)));
 }
 
 #[test]
-fn fragmented_push_stream_identifier_is_retained() {
-    let (mut client, mut server, recv_info, mut client_h3, _server_h3) =
-        make_paired_h3_connections();
-    let mut packet = [0u8; 2048];
-    server.stream_send(7, &[0x01], false).expect("push stream type");
-    assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
-    assert!(matches!(client_h3.poll(&mut client), Err(Error::Done)));
-    assert_eq!(
-        client_h3.streams.get(&7).map(|stream| stream.frame_buffer.as_slice()),
-        Some(&[0x01][..])
-    );
-
-    server.stream_send(7, &[42], false).expect("push identifier");
-    assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
-    assert!(matches!(client_h3.poll(&mut client), Err(Error::Done)));
-    assert!(client_h3.received_push_ids.contains(&42));
-    assert!(client_h3
-        .streams
-        .get(&7)
-        .is_some_and(|stream| stream._stream_type == StreamType::Push));
-}
-
-#[test]
-fn decreasing_max_push_id_is_rejected() {
+fn max_push_id_grants_are_discarded() {
+    // A peer MAX_PUSH_ID grants this endpoint permission to push; since it
+    // never generates push, the grant is read and dropped without error.
     let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
         make_paired_h3_connections();
-    assert_eq!(server_h3.peer_max_push_id, Some(MAX_STEALTH_PUSH_ID));
     let mut payload = Vec::new();
-    Connection::encode_varint(MAX_STEALTH_PUSH_ID - 1, &mut payload);
+    Connection::encode_varint(63, &mut payload);
     let mut frame = Vec::new();
     Connection::encode_varint(0x0d, &mut frame);
     Connection::encode_varint(payload.len() as u64, &mut frame);
     frame.extend_from_slice(&payload);
-    client.stream_send(2, &frame, false).expect("decreasing MAX_PUSH_ID");
+    client.stream_send(2, &frame, false).expect("MAX_PUSH_ID");
     let mut packet = [0u8; 2048];
     assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
-    assert!(matches!(server_h3.poll(&mut server), Err(Error::IdError)));
+    assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
 }
 
 #[test]
@@ -468,74 +478,6 @@ fn increasing_goaway_identifier_is_rejected() {
             assert!(matches!(result, Ok(Some((2, Event::GoAway)))));
         }
     }
-}
-
-#[test]
-fn server_push_uses_distinct_push_and_unidirectional_stream_ids() {
-    let (mut client, mut server, recv_info, mut client_h3, mut server_h3) =
-        make_paired_h3_connections();
-    let request_stream_id = client_h3
-        .send_request(
-            &mut client,
-            &[
-                Header::new(b":method", b"GET"),
-                Header::new(b":scheme", b"https"),
-                Header::new(b":authority", b"example.test"),
-                Header::new(b":path", b"/"),
-            ],
-            false,
-        )
-        .expect("request");
-    let mut packet = [0u8; 4096];
-    assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
-    assert!(matches!(
-        server_h3.poll(&mut server),
-        Ok(Some((id, Event::Headers { .. }))) if id == request_stream_id
-    ));
-    assert_eq!(server_h3.peer_request_stream_id, Some(request_stream_id));
-
-    let push_id =
-        server_h3.create_stealth_push_promise("/cover.css", "text/css", 256).expect("push promise");
-    server_h3.push_streams.get_mut(&push_id).unwrap().scheduled_at =
-        std::time::Instant::now() - std::time::Duration::from_millis(1);
-    server_h3.process_scheduled_push_streams(&mut server);
-
-    let promise = server_h3.push_streams.get(&push_id).expect("promise state");
-    let push_stream_id = promise.push_stream_id.expect("allocated push stream");
-    assert_eq!(push_id, 0);
-    assert_eq!(push_stream_id, 7);
-    assert_ne!(Some(push_stream_id), server_h3.control_stream_id);
-    assert_eq!(promise.state, PushState::DataSending);
-    assert!(server_h3
-        .streams
-        .get(&push_stream_id)
-        .is_some_and(|stream| stream._stream_type == StreamType::Push));
-
-    let mut promise_seen = false;
-    let mut push_headers_seen = false;
-    for _ in 0..8 {
-        let _ = pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet);
-        loop {
-            match client_h3.poll(&mut client) {
-                Ok(Some((id, Event::PushPromise { push_id: received, .. }))) => {
-                    assert_eq!(id, request_stream_id);
-                    assert_eq!(received, push_id);
-                    promise_seen = true;
-                }
-                Ok(Some((id, Event::Headers { .. }))) if id == push_stream_id => {
-                    push_headers_seen = true;
-                }
-                Ok(Some(_)) => {}
-                Ok(None) | Err(Error::Done) => break,
-                Err(error) => panic!("client push processing failed: {error:?}"),
-            }
-        }
-        if promise_seen && push_headers_seen {
-            break;
-        }
-    }
-    assert!(promise_seen, "PUSH_PROMISE must arrive on the request stream");
-    assert!(push_headers_seen, "push stream must carry its response HEADERS");
 }
 
 #[test]

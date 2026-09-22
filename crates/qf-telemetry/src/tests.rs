@@ -77,26 +77,6 @@ fn cpu_profile_mask_covers_all_profiles() {
 }
 
 #[test]
-fn server_push_metrics_exported_in_telemetry_text() {
-    SERVER_PUSH_BURSTS_TOTAL.store(7, Ordering::Relaxed);
-    SERVER_PUSH_TOTAL_COVER_BYTES.store(12345, Ordering::Relaxed);
-    SERVER_PUSH_BURSTS_LAST_MINUTE.store(3, Ordering::Relaxed);
-    SERVER_PUSH_CURRENT_INTENSITY_PPM.store(650_000, Ordering::Relaxed);
-    SERVER_PUSH_TRIGGER_LOSS_TOTAL.store(2, Ordering::Relaxed);
-    SERVER_PUSH_TRIGGER_TIME_TOTAL.store(4, Ordering::Relaxed);
-    SERVER_PUSH_TRIGGER_GATING_TOTAL.store(1, Ordering::Relaxed);
-
-    let out = export_telemetry_text();
-    assert!(out.contains("quicfuscate_server_push_bursts_total 7"));
-    assert!(out.contains("quicfuscate_server_push_total_cover_bytes 12345"));
-    assert!(out.contains("quicfuscate_server_push_bursts_last_minute 3"));
-    assert!(out.contains("quicfuscate_server_push_current_intensity_ppm 650000"));
-    assert!(out.contains("quicfuscate_server_push_trigger_loss_total 2"));
-    assert!(out.contains("quicfuscate_server_push_trigger_time_total 4"));
-    assert!(out.contains("quicfuscate_server_push_trigger_gating_total 1"));
-}
-
-#[test]
 fn io_uring_counters_exported_in_telemetry_text() {
     let calls_before = IO_URING_SUBMIT_CALLS.get();
     let packets_before = IO_URING_SUBMIT_PACKETS.get();

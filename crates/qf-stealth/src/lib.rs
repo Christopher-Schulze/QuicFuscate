@@ -42,7 +42,7 @@ pub use tls_cover::{
 #[doc(hidden)]
 pub use tls_profile::{profile_from_fingerprint, TlsProfile};
 #[doc(hidden)]
-pub use traffic::{RateChoker, ServerPushState, ServerPushTriggerReason};
+pub use traffic::RateChoker;
 pub use wire_budget::{BudgetLedger, PersonaTrace, WireBudget, WireShape};
 
 #[doc(hidden)]

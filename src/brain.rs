@@ -1,12 +1,8 @@
 // QuicFuscate Brain (single-file, removable feature)
 
 use crossbeam_utils::CachePadded;
-#[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
-use log::info;
 use log::trace;
 use parking_lot::{Mutex, RwLock};
-#[cfg(any(test, feature = "rust-tests", feature = "orchestrator"))]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -139,20 +135,7 @@ pub struct StealthBrain {
     packet_time_base: Instant,
     pending_size_bins: Box<[CachePadded<AtomicU64>]>,
     pending_iat_bins: Box<[CachePadded<AtomicU64>]>,
-    // Server Push cover-traffic knobs and telemetry inputs
-    #[cfg(any(test, feature = "rust-tests"))]
-    server_push_enabled: AtomicBool,
-    #[cfg(any(test, feature = "rust-tests"))]
-    server_push_last_trigger: Mutex<Instant>,
-    #[cfg(any(test, feature = "rust-tests"))]
-    stealth_active: AtomicBool,
     loss_rate: AtomicU32, // 0..1000 => 0.0%..100.0% in 0.1% units
-    #[cfg(any(test, feature = "rust-tests"))]
-    cpu_usage_percent: AtomicU32, // 0..100
-    #[cfg(any(test, feature = "rust-tests"))]
-    memory_pressure: AtomicU32, // 0..100
-    #[cfg(any(test, feature = "rust-tests"))]
-    bandwidth_bps: AtomicU64, // measured/estimated outbound bandwidth
 }
 
 impl StealthBrain {
@@ -192,19 +175,7 @@ impl StealthBrain {
             packet_time_base,
             pending_size_bins: new_atomic_bins(size_bins),
             pending_iat_bins: new_atomic_bins(iat_bins),
-            #[cfg(any(test, feature = "rust-tests"))]
-            server_push_enabled: AtomicBool::new(false),
-            #[cfg(any(test, feature = "rust-tests"))]
-            server_push_last_trigger: Mutex::new(crate::time_source::now_instant()),
-            #[cfg(any(test, feature = "rust-tests"))]
-            stealth_active: AtomicBool::new(false),
             loss_rate: AtomicU32::new(0),
-            #[cfg(any(test, feature = "rust-tests"))]
-            cpu_usage_percent: AtomicU32::new(0),
-            #[cfg(any(test, feature = "rust-tests"))]
-            memory_pressure: AtomicU32::new(0),
-            #[cfg(any(test, feature = "rust-tests"))]
-            bandwidth_bps: AtomicU64::new(0),
         })
     }
 
@@ -918,51 +889,6 @@ impl TransportObserver for StealthBrain {
     }
 }
 
-impl StealthBrain {
-    /// **NEW**: Enable Server Push Cover Traffic coordination
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn enable_server_push(&self, enabled: bool) {
-        self.server_push_enabled.store(enabled, Ordering::Relaxed);
-        if enabled {
-            info!("Brain: Server Push Cover Traffic enabled");
-        }
-    }
-
-    /// **NEW**: Check if Server Push should be triggered based on brain heuristics
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn should_trigger_server_push(&self) -> bool {
-        let should_trigger = should_trigger_server_push_internal(
-            self.server_push_enabled.load(Ordering::Relaxed),
-            self.loss_rate.load(Ordering::Relaxed),
-            self.stealth_active.load(Ordering::Relaxed),
-            self.cpu_usage_percent.load(Ordering::Relaxed),
-            self.memory_pressure.load(Ordering::Relaxed),
-            self.bandwidth_bps.load(Ordering::Relaxed),
-            &self.server_push_last_trigger,
-        );
-        if should_trigger {
-            let loss_rate = self.loss_rate.load(Ordering::Relaxed) as f32 / 1000.0;
-            let stealth_active = self.stealth_active.load(Ordering::Relaxed);
-            trace!(
-                "Brain: Triggering Server Push (loss_rate={:.3}, stealth={})",
-                loss_rate,
-                stealth_active
-            );
-        }
-
-        should_trigger
-    }
-
-    /// Returns recommended server push intensity (0.0 - 1.0) based on loss and bandwidth.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn get_server_push_intensity(&self) -> f32 {
-        server_push_intensity_internal(
-            self.loss_rate.load(Ordering::Relaxed),
-            self.bandwidth_bps.load(Ordering::Relaxed),
-        )
-    }
-}
-
 #[cfg(test)]
 mod intelligent_hysteresis_tests {
     use super::*;
@@ -1140,26 +1066,6 @@ mod time_source_tests {
         let config = Config::new_with_version(PROTOCOL_VERSION).expect("config");
         Connection::new_client(&[7; 8], addr(local_port), addr(peer_port), config)
             .expect("valid test connection configuration")
-    }
-
-    #[test]
-    fn server_push_time_gate_uses_time_source() {
-        let base_instant = Instant::now();
-        let base_system = UNIX_EPOCH + Duration::from_secs(10);
-        let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
-        let _time_guard = crate::time_source::install_for_test(manual.clone());
-
-        let brain = StealthBrain::new(StealthBrainConfig::default());
-        brain.enable_server_push(true);
-        brain.stealth_active.store(true, Ordering::Relaxed);
-        brain.cpu_usage_percent.store(10, Ordering::Relaxed);
-        brain.memory_pressure.store(10, Ordering::Relaxed);
-        brain.bandwidth_bps.store(25_000_000, Ordering::Relaxed);
-
-        assert!(!brain.should_trigger_server_push());
-
-        manual.advance(Duration::from_secs(31));
-        assert!(brain.should_trigger_server_push());
     }
 
     #[test]
@@ -1410,55 +1316,6 @@ mod time_source_tests {
                 .sum::<u64>(),
             0
         );
-    }
-}
-
-#[cfg(feature = "orchestrator")]
-#[cfg(test)]
-mod orchestrator_tests {
-    use super::*;
-
-    #[test]
-    fn test_orchestrator_construction() {
-        let config = StealthBrainConfig { jitter_max_us: 100, ..Default::default() };
-
-        let orchestrator = DeepIntegrationOrchestrator::new(config, 1024, 65536);
-        assert!(!orchestrator.server_push_enabled());
-
-        // Test server push enablement
-        orchestrator.enable_server_push(true);
-        assert!(orchestrator.server_push_enabled());
-    }
-
-    #[test]
-    fn test_server_push_intensity_calculation() {
-        let config = StealthBrainConfig::default();
-        let orchestrator = DeepIntegrationOrchestrator::new(config, 1024, 65536);
-
-        // Test with different loss rates
-        orchestrator.update_runtime_signals(50, 20, 20, 100_000_000, true); // 5%, 100 Mbps
-
-        let intensity = orchestrator.get_server_push_intensity();
-        assert!(intensity > 0.3 && intensity <= 1.0);
-    }
-
-    #[test]
-    fn test_server_push_trigger_conditions() {
-        let config = StealthBrainConfig::default();
-        let orchestrator = DeepIntegrationOrchestrator::new(config, 1024, 65536);
-
-        orchestrator.enable_server_push(true);
-
-        // High loss should trigger
-        orchestrator.update_runtime_signals(60, 50, 50, 10_000_000, true); // 6%
-
-        let should_trigger = orchestrator.should_trigger_server_push();
-        assert!(should_trigger);
-
-        // High CPU should prevent trigger
-        orchestrator.update_runtime_signals(60, 90, 50, 10_000_000, true);
-        let should_not_trigger = orchestrator.should_trigger_server_push();
-        assert!(!should_not_trigger);
     }
 }
 

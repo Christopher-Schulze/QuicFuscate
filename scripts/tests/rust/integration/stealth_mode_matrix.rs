@@ -2,15 +2,6 @@ use quicfuscate::crypto::CryptoManager;
 use quicfuscate::optimize::OptimizationManager;
 use quicfuscate::stealth::{StealthConfig, StealthManager, StealthMode};
 use std::sync::Arc;
-use std::time::Duration;
-
-fn manager_for_mode(mode: StealthMode) -> StealthManager {
-    StealthManager::new(
-        StealthConfig::from_mode(mode),
-        Arc::new(OptimizationManager::new()),
-        Arc::new(CryptoManager::new()),
-    )
-}
 
 fn manager_for_config(cfg: StealthConfig) -> StealthManager {
     StealthManager::new(cfg, Arc::new(OptimizationManager::new()), Arc::new(CryptoManager::new()))
@@ -48,7 +39,7 @@ fn test_mode_feature_matrix_core_expectations() {
     assert!(!anti.reality_cover_targets.is_empty());
     assert!(anti.enable_traffic_padding);
     assert!(anti.enable_timing_obfuscation);
-    assert!(anti.enable_server_push_cover);
+    assert!(anti.use_qpack_headers);
     assert!(anti.use_tls_cover);
 
     assert_eq!(intelligent.mode, StealthMode::Dynamic);
@@ -70,12 +61,11 @@ fn test_stealth_max_escalation_stack_is_cumulative_and_reversible() {
     assert!(anti.reality_cover_targets.len() >= stealth.reality_cover_targets.len());
     assert!(anti.enable_traffic_padding >= stealth.enable_traffic_padding);
     assert!(anti.enable_timing_obfuscation >= stealth.enable_timing_obfuscation);
-    assert!(anti.enable_server_push_cover);
+    assert!(anti.use_qpack_headers >= stealth.use_qpack_headers);
 
     let back_to_perf = StealthConfig::from_mode(StealthMode::Performance);
     assert!(!back_to_perf.enable_traffic_padding);
     assert!(!back_to_perf.enable_timing_obfuscation);
-    assert!(!back_to_perf.enable_server_push_cover);
 }
 
 #[test]
@@ -116,10 +106,8 @@ fn test_no_mode_silently_disables_required_primitives() {
 
 #[test]
 fn test_conflicting_stealth_feature_combinations_are_rejected() {
-    let mut invalid_push = StealthConfig::stealth();
-    invalid_push.enable_http3_masquerading = false;
-    invalid_push.enable_server_push_cover = true;
-    assert!(invalid_push.validate().is_err());
+    let removed_push = StealthConfig::from_toml("[stealth]\nenable_server_push_cover = true\n");
+    assert!(removed_push.is_err(), "enable_server_push_cover was removed in TODO-1055");
 
     let mut invalid_choke = StealthConfig::stealth();
     invalid_choke.enable_realtime_choke = true;
@@ -132,13 +120,6 @@ fn test_conflicting_stealth_feature_combinations_are_rejected() {
 }
 
 #[test]
-fn test_intelligent_runtime_push_requires_nonzero_level_hint() {
-    let manager = manager_for_mode(StealthMode::Dynamic);
-    manager.enable_server_push_runtime_for_test(true, Some(0.8));
-    assert!(manager.server_push_cover_plan_for_test().is_none());
-}
-
-#[test]
 fn test_intelligent_masque_preference_uses_hint_fallback() {
     let manager =
         manager_for_config_with_core_masque(StealthConfig::from_mode(StealthMode::Dynamic));
@@ -148,40 +129,4 @@ fn test_intelligent_masque_preference_uses_hint_fallback() {
 
     manager.sync_masque_preference_with_hint_for_test(1);
     assert!(manager.masque_preferred());
-}
-
-#[test]
-fn test_should_trigger_server_push_mode_matrix() {
-    let off = manager_for_mode(StealthMode::Off);
-    assert!(off.server_push_cover_plan_for_test().is_none());
-
-    let mut perf_cfg = StealthConfig::performance();
-    perf_cfg.server_push_burst_interval = 1;
-    let perf = manager_for_config(perf_cfg);
-    perf.enable_server_push_runtime_for_test(true, Some(0.5));
-    std::thread::sleep(Duration::from_millis(1100));
-    assert!(perf.server_push_cover_plan_for_test().is_some());
-
-    let mut stealth_cfg = StealthConfig::stealth();
-    stealth_cfg.server_push_burst_interval = 1;
-    let stealth = manager_for_config(stealth_cfg);
-    stealth.enable_server_push_runtime_for_test(true, Some(0.7));
-    std::thread::sleep(Duration::from_millis(1100));
-    assert!(stealth.server_push_cover_plan_for_test().is_some());
-
-    let mut anti_cfg = StealthConfig::stealth_max();
-    anti_cfg.server_push_burst_interval = 1;
-    let anti = manager_for_config(anti_cfg);
-    std::thread::sleep(Duration::from_millis(1100));
-    assert!(anti.server_push_cover_plan_for_test().is_some());
-
-    let mut intelligent_cfg = StealthConfig::from_mode(StealthMode::Dynamic);
-    intelligent_cfg.server_push_burst_interval = 1;
-    let intelligent = manager_for_config(intelligent_cfg);
-    intelligent.enable_server_push_runtime_for_test(true, Some(0.8));
-    std::thread::sleep(Duration::from_millis(1100));
-    assert!(
-        intelligent.server_push_cover_plan_for_test().is_none(),
-        "intelligent mode should not trigger without brain level hint >= 1"
-    );
 }

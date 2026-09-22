@@ -432,7 +432,7 @@ This document provides comprehensive technical documentation for the system arch
   - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned GSO/GRO, `UdpFastPath`, sendmmsg/recvmmsg, and sendmsg_x batching in `crates/qf-transport-udp/src/lib.rs` + `fastpath.rs`; `src/optimize/udp.rs` and `src/transport/udpfast.rs` retain root compatibility projections
-- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` — each per-packet counter and every histogram bin is `crossbeam_utils::CachePadded`, so dataplane writes and housekeeping drains no longer share cachelines (TODO-997) — sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, transition-reason helpers, and server-push state helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
+- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` — each per-packet counter and every histogram bin is `crossbeam_utils::CachePadded`, so dataplane writes and housekeeping drains no longer share cachelines (TODO-997) — sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, and transition-reason helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
 
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
 - `src/compress.rs`: Compression manager (zstd-only) with adaptive policy, telemetry-backed decisions, and optional dictionaries
@@ -785,9 +785,9 @@ Final stealth stack:
 #### Stealth Modes - Semantics
 - Off: no stealth; DoH, cover targets, HTTP/3 masquerading, padding, timing, QPACK, and TLS Cover extras are all disabled.
 - Performance: uTLS/persona on; DoH on; cover targets off; HTTP/3 masquerading on; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
-- Stealth: uTLS/persona on; DoH on; cover targets only when `reality_cover_targets` is explicitly configured; HTTP/3 masquerading on; QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off; server push cover light (intensity 0.25, 60 s interval).
-- Anti-DPI: uTLS/persona on; DoH on; cover targets from the explicit list or the built-in CDN set; HTTP/3 masquerading on; QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; server push cover enabled (intensity 0.8, 15 s interval); WebTransport cover enabled as an H3 application-cover session; real-time choke off by default.
-- Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no cover targets); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; server-push burst interval is level-dependent (30 s at L0/L1, 15 s at L2); WebTransport cover is level-2 only.
+- Stealth: uTLS/persona on; DoH on; cover targets only when `reality_cover_targets` is explicitly configured; HTTP/3 masquerading on (outer hops only); QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off.
+- Anti-DPI: uTLS/persona on; DoH on; cover targets from the explicit list or the built-in CDN set; HTTP/3 masquerading on (outer hops only); QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; WebTransport cover enabled as a one-shot H3 application-cover session; real-time choke off by default.
+- Intelligent: starts like Performance at level 0 (no padding, no cover overhead, no cover targets); escalates dynamically to Stealth/Anti-DPI timing, padding, cover and FEC-hint behavior on probe signals or brain pressure; WebTransport cover is level-2 only.
 - Manual: all knobs as configured in TOML or env; no automatic escalation.
 
 #### Real-Time Rate Choke
@@ -826,7 +826,7 @@ Runtime wiring is cohesive rather than feature-isolated:
 - Padding shaping: BrowserMimic bias `1..4`, adaptive granularity (`32|64|128`), and dynamic padding strategy are now derived in `stealth/` and applied through the same Intelligent-mode runtime policy delta; other presets keep the configured StealthManager baseline. At Brain level 0 (clean path, no pressure) padding is disabled for near-zero Intelligent-mode overhead.
 - Jitter direction: under ECN congestion (CE > 5%) or high RTT spikes, jitter increases to 85% of budget (more randomization defeats timing fingerprints). Only on the external-pacing clean path is it reduced.
 - `jitter_max_us` default: 5000 us (raised from 1500; 1500 was too small to meaningfully randomize timing against a modern DPI system).
-- Level-hint passthrough: Brain computes an `effective_level` (0/1/2) via hysteresis and passes it as `level_hint` to `derive_intelligent_runtime_policy`, enabling level-dependent padding and server-push decisions.
+- Level-hint passthrough: Brain computes an `effective_level` (0/1/2) via hysteresis and passes it as `level_hint` to `derive_intelligent_runtime_policy`, enabling level-dependent padding and cover decisions.
 - Runtime overrides: `StealthManager` exposes `runtime_padding_rate`, `runtime_timing_rate`, and retained `runtime_rotation_rate` atomics. Padding and timing are set by `escalate_to_level(n)` (0=0%, 1=50% configurable padding and 0% timing, 2=100% padding and timing), then flow through `StealthRuntimePolicy` -> `StealthRuntimeDelta` -> connection config and are consumed by `compute_stealth_padding()` and `transport_stealth_jitter_delay()`. `runtime_rotation_rate` is intentionally kept at 0 for active sessions; fingerprint/persona rotation is next-session only.
 - Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0->1 requires >=3 probes in 60s; 1->2 requires >=8 probes in 120s. A single probe does NOT trigger escalation. The state stores timestamp buckets at millisecond resolution, aggregates probes sharing a millisecond, keeps at most 120,001 buckets for the 120-second window, and maintains independent 60-/120-second counters. De-escalation drops at most one level per configurable quiet period (default: 300s), measured from the latest probe or level change. Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (default 50).
 - Explicit transport overrides win over Brain steering. If an operator sets ACK, pacing, jitter, padding, granularity, or mimic-bias overrides, the corresponding Intelligent-mode Brain actuator is locked out for that connection instead of silently re-overriding the operator choice at runtime.
@@ -854,40 +854,27 @@ let cfg = StealthBrainConfig {
 let brain = StealthBrain::new(cfg);
 ```
 
-#### Server Push Cover Traffic (feature `orchestrator`)
-The StealthBrain module includes advanced Server Push Cover Traffic coordination for enhanced stealth:
+#### Orchestrator Runtime Signals (feature `orchestrator`)
+The `DeepIntegrationOrchestrator` ingests per-connection runtime signals for coordinator heuristics:
 
 ```rust
 use quicfuscate::brain::DeepIntegrationOrchestrator;
 
-// Enable Server Push Cover Traffic
 let orchestrator = DeepIntegrationOrchestrator::new(
     brain_config,
     pool_capacity,
     block_size
 );
 
-// Enable server push based on network conditions
-orchestrator.enable_server_push(true);
-
-// Brain automatically determines when to trigger push
-if orchestrator.should_trigger_server_push() {
-    let intensity = orchestrator.get_server_push_intensity();
-    // Intensity ranges from 0.0 to 1.0 based on:
-    // - Loss rate
-    // - Bandwidth availability
-    // - Current ACK policy
-    // - Jitter requirements
-}
+// Feed live signals from the connection runtime
+orchestrator.update_runtime_signals(
+    loss_rate_permille, // 0..1000 (0.1% units)
+    cpu_usage_percent,  // 0..100
+    memory_pressure,    // 0..100
+    bandwidth_bps,      // outbound delivery estimate
+    stealth_active,
+);
 ```
-
-**Server Push Heuristics:**
-- Triggers when ACK delay > 15ms (high latency detected)
-- Increases intensity with loss rate (0-5% loss -> 0.3 intensity, >10% -> 0.8)
-- Bandwidth-aware: scales with available bandwidth
-- Cooldown period prevents excessive pushing
-- Integrates with FEC hints for coordinated redundancy
-- Resource gating: avoids cover bursts when CPU/memory are under pressure
 
 #### Connection-local Runtime Hints
 The StealthBrain module keeps runtime hints scoped to the owning connection:
@@ -919,7 +906,7 @@ let combined_observer = CombinedObserver::new(observers);
 - On active probing, the stealth stack escalates to a hardened window (~20 minutes):
   - Adds extra pacing (1-3 ms per packet; 3-7 ms in Anti-DPI) in addition to existing timing gates.
   - Tightens cover-traffic cadence (default 5 s to 2.5 s; 2.0 s in Anti-DPI) with realistic GET/HEAD mix.
-  - Raises server-push cover intensity and keeps the HTTP/3 persona stable.
+  - Keeps the HTTP/3 persona stable for the escalation window.
   - Automatically clears after the escalation window (interval reset to 5 s).
 - The retired standalone MASQUE manager is not compiled or selectable; all active CONNECT-UDP behavior remains in the Core H3 transport path.
 
@@ -2042,7 +2029,7 @@ The canonical cross-layer runtime contracts are exposed through the Engine and o
 
 - `engine::EngineCommand` and `engine::EngineEvent` provide typed control-plane mutations and status/event delivery.
 - `engine::EngineState` and `engine::EngineStats` are the authoritative lifecycle and runtime metric surfaces for embedding integrations.
-- `brain::DeepIntegrationOrchestrator` coordinates server-push and adaptive control hints when orchestrator coupling is enabled.
+- `brain::DeepIntegrationOrchestrator` ingests connection runtime signals for adaptive control hints when orchestrator coupling is enabled.
 
 Representative API surface:
 
@@ -3952,66 +3939,30 @@ To force TLS Cover via the configuration file add:
 use_tls_cover = true
 ```
 
-### Server Push Cover Traffic (HTTP/3)
+### Outer-Hop HTTP/3 Masquerade (TODO-1055)
 
-QuicFuscate generates realistic HTTP/3 Server Push traffic to mask real flows. This feature is governed by `StealthConfig` and transport H3 internals.
+Browser-persona headers, the QPACK dynamic table, and persona user-agent strings apply
+**only** to outer-hop requests — real H3/MASQUE requests a passive observer can actually
+read. Inner `/tun` tunnel streams carry AEAD-protected traffic an observer cannot read
+anyway, so they never emit browser headers, QPACK persona behavior, or push traffic.
 
-Server Push cover is not a fixed repeating signature. Production-grade cover bursts use bounded
-variation in resource count, ordering, payload size, path names, and cache headers. Performance mode
-keeps Server Push cover off; Intelligent level 0 stays off or near-zero; Stealth and Anti-DPI use
-randomized bursts according to their cover budget.
-
-- Configuration (Stealth):
-  - `enable_server_push_cover`: enable/disable cover traffic.
-  - `server_push_intensity`: 0.0-1.0 scaling for burst size/frequency.
-  - `server_push_base_path`: base URI path for pushed resources (e.g., `/assets`).
-  - `server_push_burst_interval`: minimum seconds between bursts.
-- Generation (Transport):
-  - `generate_stealth_cover_burst()` schedules bounded push promises with realistic content types after the peer has advertised `MAX_PUSH_ID` and a client request stream exists.
-  - Payloads: generated CSS, JS and small image blobs with deterministic variability to evade static signatures.
-  - Wire state: the server allocates a monotonic HTTP/3 push ID independently from the server-initiated unidirectional QUIC stream ID. `PUSH_PROMISE` is emitted on the associated request stream; the push stream starts with stream type `0x01`, the push ID, and response `HEADERS` before cover `DATA`.
-  - Admission: the client advertises a bounded maximum push ID, incoming push-stream IDs must be unique and within that limit, and the server never schedules a burst beyond the peer's remaining push-ID capacity.
-  - Lifecycle: completed push streams are released by the H3 polling GC together with their stream state and cover payload; terminal stream IDs and MASQUE flow mappings are released at the same boundary.
-- Telemetry: MASQUE/cover traffic counters under `optimize::telemetry::*` record bytes and capsule usage (when applicable).
-
-Example (runtime behavior)
-```text
-Anti-DPI escalates -> enable_server_push_cover=true, intensity~0.8, burst_interval=15 s.
-Transport emits `PUSH_PROMISE` on request streams and `HEADERS` plus `DATA` on distinct push streams.
-```
-
-#### Cover Burst Ownership
-
-`generate_stealth_cover_burst()` is a crate-private transport operation invoked by the Core cover scheduler after runtime policy and peer admission checks. It is not part of the public application API. Generated resources use CSS, JavaScript, JPEG, and PNG content shapes; callers continue polling H3 events while the transport advances promised push streams.
-
-#### Handling Server Push Events
-
-```rust
-use quicfuscate::transport::h3::{Connection as H3, Event};
-
-fn poll_h3_events(h3: &mut H3, conn: &mut quicfuscate::transport::Connection) {
-    while let Ok(Some((stream_id, event))) = h3.poll(conn) {
-        match event {
-            Event::PushPromise { push_id, headers } => {
-                // Observe pushed resource headers for realism
-                for header in &headers {
-                    log::debug!(
-                        "stream {} push {}: {:?} -> {:?}",
-                        stream_id,
-                        push_id,
-                        header.name(),
-                        header.value()
-                    );
-                }
-            }
-            Event::Data => {
-                // Read DATA frames for active/pushed streams internally
-            }
-            _ => {}
-        }
-    }
-}
-```
+- Inner tunnel streams: pseudo headers plus functional `x-qf-*` headers only; no persona
+  list, no user-agent, no browser client hints.
+- Outer-hop requests (MASQUE CONNECT-IP/CONNECT-UDP, cover GETs, WebTransport session):
+  persona header list from the same browser fixture that drives the ClientHello and
+  transport parameters; the encoded header delta is debited from the shared wire budget
+  (`try_spend_wire_cover`) before the request is emitted.
+- QPACK: `use_qpack_headers` selects the persona dynamic-table capacity and index policy
+  at `init_http3`; disabled means headers are encoded statically.
+- Server Push: removed. This endpoint never advertises `MAX_PUSH_ID`; a peer push stream
+  (0x01) is rejected with `H3_STREAM_CREATION_ERROR`, `PUSH_PROMISE` without a grant is
+  `H3_ID_ERROR`, and received `CANCEL_PUSH`/`MAX_PUSH_ID` frames are parsed and dropped
+  (RFC 9114 §6.2.2, §7.2.5, §7.2.7). The former `enable_server_push_cover`,
+  `server_push_intensity`, `server_push_base_path`, and `server_push_burst_interval`
+  configuration keys remain parseable; setting `enable_server_push_cover = true` is a
+  configuration error.
+- WebTransport cover: a single one-shot session emit on the outer hop (Anti-DPI or
+  Intelligent level >= 2), claimed atomically per connection.
 
 ### MASQUE CONNECT-UDP
 
@@ -4187,7 +4138,7 @@ For the broader script inventory and repository-wide file index, use `docs/MAP.m
 - `test-optimization.sh` - Optimize suite (MemoryPool/NUMA/HugePages/SIMD/prefetch/zero-copy) + SIMD/accelerate fixtures (`--features rust-tests,simd-selfcheck`; override via `CARGO_FEATURES`). `--only batch,memory,simd,cpu,zero-copy,telemetry,integration,stress` runs selected contract groups, records every canonical scope before execution, and emits `SKIP` with `reason=not_selected_by_scope` or `fast_profile_omits_scope`. Unscoped full and `--fast` keep the previous command order; `--fast --only` honors the requested scopes instead of the reduced fast omission list. Optional library tests use target-scoped discovery and fail closed on discovery or zero-test execution. `scripts/tests/fast/test-optimization-scope-contract.sh` is the JSON-inspecting help/selection/skip/failure contract.
 - `test-security-fuzzing.sh` - Security & fuzzing (ASAN/MSAN/UBSAN, fuzz targets, concurrency, `rt-property-suite` via proptest). Dynamic library-test selection uses release/`--lib` discovery with explicit feature and prerequisite status.
 - `test-performance-regression.sh` - Performance regression with baseline comparison; optional library checks use the same release/`--lib` and feature scope for discovery and execution.
-- `test-e2e.sh` - End-to-end integration tests with real network scenarios; `--only h3-qpack,server-push,fec,migration,zero-rtt,stealth,integration-control,integration-fec,integration-stealth,integration-loss,integration-performance` runs only selected cases, while `--only integration` selects the five integration cases and the default remains complete
+- `test-e2e.sh` - End-to-end integration tests with real network scenarios; `--only h3-qpack,fec,migration,zero-rtt,stealth,integration-control,integration-fec,integration-stealth,integration-loss,integration-performance` runs only selected cases, while `--only integration` selects the five integration cases and the default remains complete
 - `tun-provisioning-negative-netns.sh` - Privileged Linux proof that combines an isolated network namespace with a private mount namespace and isolated `/run`; it covers fail-closed TUN creation, duplicate/conflicting resources, permission denial, routing failure/retry, missing-interface rollback, zero-residue teardown for ordinary and adversarial failures, and runtime-state containment between native jobs
 - `tun-e2e-netns.sh` - Process-real Linux TUN/MASQUE proof whose server startup recovers durable routing state before opening the TUN, publishes a new ownership record, kills and restarts the server to exercise stale recovery, verifies authenticated H3/MASQUE traffic and a hard 0%-loss ping assertion, then requires graceful shutdown to remove the record and directly asserts restored forwarding plus absent TUN and selected-firewall residue before namespace cleanup
 - `fingerprint-runtime-proof-netns.sh` - Privileged five-profile packet/capture/p0f proof with exact artifact hash, non-overwriting evidence directories, protected-process and namespace gates, and explicit active-nmap match status. Use `QF_FINGERPRINT_NMAP_GATE=record` for evidence collection; `match` is intentionally fail-closed when a profile has no exact active result.
@@ -6470,7 +6421,7 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Stealth Traffic-State Workspace Ownership
 
-- `crates/qf-stealth/src/traffic.rs` now owns the root-independent `RateChoker`, `ServerPushState`, and `ServerPushTriggerReason` contracts, including token-bucket pacing, saturating cover-byte accounting, bounded one-minute burst history, and their regressions. `src/stealth/mod.rs` preserves the historical root paths as compatibility re-exports. `StealthManager` does not call `RateChoker::shape` (TODO-1053). A manual bandwidth cap sets `transport::Config::max_pacing_rate`. Extra shaping delay is clamped to the current PTO divided by 4.
+- `crates/qf-stealth/src/traffic.rs` now owns the root-independent `RateChoker` contract, including token-bucket pacing and saturating cover-byte accounting. `src/stealth/mod.rs` preserves the historical root paths as compatibility re-exports. `StealthManager` does not call `RateChoker::shape` (TODO-1053). A manual bandwidth cap sets `transport::Config::max_pacing_rate`. Extra shaping delay is clamped to the current PTO divided by 4.
 - The child depends only on `qf-common::time_source::ProtocolClock` and the standard library. No transport, FEC, Reality, engine, implementation, frontend, or Tauri behavior crosses into the leaf.
 - qf-stealth all-target/all-feature tests pass `91/91` with strict all-target/all-feature Clippy. Root library `rust-tests` checking, the focused root Stealth filter (`190/190`), and strict root library Clippy pass. The complete workspace all-target `rust-tests` run exits `0` with `118` result blocks, `3,053` passed, `0` failed, and `6` ignored.
 - Fresh seam evidence is `scripts/out/audits/workspace-seams-20260810T-stealth-traffic-final/workspace-seams.json`: source revision `d69e10446c92be684346387d613c28340f18b25f`, `35` workspace packages, `312` Rust files, `205,631` source lines, `128` module edges, `94` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. Runtime guardrails are green with `Critical: 0` and `Warnings: 0` at `scripts/out/audits/runtime-guardrails-20260810T-stealth-traffic-final/audit-runtime-guardrails.log`. Warning-free release verification passes with `--help` exit `0`, a `9,973,504`-byte binary, SHA-256 `c0591efd975cd9d8f02a9fc32569e5acc133d927ddf2dc3d0fa3b9b175f13d1d`, and target usage `5,675,964 KiB` with `19,291,572 KiB` free, below the cleanup threshold. No frontend or Tauri path changed, and no frontend field/API projection is required.

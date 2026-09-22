@@ -154,6 +154,99 @@ fn masque_request_headers_bind_auth_and_connection_generation() {
 }
 
 #[test]
+fn inner_tunnel_request_headers_carry_no_persona() {
+    // TODO-1055: inner /tun streams never carry browser masquerade headers —
+    // only pseudo and functional x-qf-* headers.
+    let connection = test_connection_with(StealthConfig::stealth());
+    assert!(
+        connection.stealth_manager.get_http3_header_list("cdn.example.com", "/").is_some(),
+        "stealth persona must produce header lists for outer hops"
+    );
+
+    let headers = connection.build_http3_request_headers(b"POST", "/tun", None);
+
+    for header in &headers {
+        let name = header.name();
+        assert!(
+            name.starts_with(b":") || name.starts_with(b"x-qf-"),
+            "inner stream header must be pseudo or functional, got {:?}",
+            String::from_utf8_lossy(name)
+        );
+    }
+    assert!(headers.iter().all(|h| h.name() != b"user-agent"));
+    assert!(headers.iter().any(|h| h.name() == b":method" && h.value() == b"POST"));
+}
+
+#[test]
+fn outer_hop_request_headers_take_persona_and_rebuild_pseudo() {
+    let connection = test_connection_with(StealthConfig::stealth());
+    let persona = connection
+        .stealth_manager
+        .get_http3_header_list("cdn.example.com", "/assets")
+        .expect("stealth persona header list");
+    assert!(persona.iter().any(|h| h.name() == b"user-agent"));
+
+    let headers = connection.build_http3_request_headers(b"GET", "/assets", Some(persona));
+
+    // Persona regular headers ride the request...
+    assert!(headers.iter().any(|h| h.name() == b"user-agent"));
+    // ...but the request owns its pseudo headers (persona pseudo entries are stripped).
+    for pseudo in [b":method".as_slice(), b":scheme", b":authority", b":path"] {
+        assert_eq!(
+            headers.iter().filter(|h| h.name() == pseudo).count(),
+            1,
+            "pseudo header {:?} must appear exactly once",
+            String::from_utf8_lossy(pseudo)
+        );
+    }
+    assert!(headers.iter().any(|h| h.name() == b":method" && h.value() == b"GET"));
+    assert!(headers.iter().any(|h| h.name() == b":path" && h.value() == b"/assets"));
+}
+
+#[test]
+fn outer_hop_persona_header_delta_debits_wire_budget() {
+    let mut connection = test_connection_with(StealthConfig::stealth());
+    connection.conn.set_wire_ledger(
+        connection.stealth_manager.build_wire_ledger(crate::time_source::now_instant()),
+    );
+    let persona_len = {
+        let persona = connection
+            .stealth_manager
+            .get_http3_header_list("cdn.example.com", "/")
+            .expect("stealth persona header list");
+        QuicFuscateConnection::h3_header_list_bytes(&persona)
+    };
+    let now = crate::time_source::now_instant();
+    let before = connection
+        .conn
+        .wire_ledger_mut()
+        .map(|ledger| ledger.remaining(now))
+        .expect("wire ledger installed");
+
+    // simulate the outer-hop spend path from send_http3_request_headers
+    assert!(connection.conn.try_spend_wire_cover(persona_len));
+
+    let after = connection
+        .conn
+        .wire_ledger_mut()
+        .map(|ledger| ledger.remaining(now))
+        .expect("wire ledger installed");
+    assert_eq!(after, before - persona_len, "persona header bytes must debit the shared ledger");
+}
+
+#[test]
+fn webtransport_cover_plan_is_a_one_shot() {
+    let manager = StealthManager::new(
+        StealthConfig::stealth_max(),
+        Arc::new(OptimizationManager::new()),
+        Arc::new(CryptoManager::new()),
+    );
+
+    assert!(manager.webtransport_cover_plan().is_some(), "first WT cover plan must be offered");
+    assert!(manager.webtransport_cover_plan().is_none(), "WT cover session is a one-shot emit");
+}
+
+#[test]
 fn circuit_headers_roundtrip_a_bounded_identity_without_path_disclosure() {
     let mut connection = test_connection();
     let circuit_id = [0xab; 16];

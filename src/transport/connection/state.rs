@@ -220,11 +220,6 @@ pub(crate) struct AdmittedShortHeader {
 }
 
 impl Connection {
-    /// Returns the connection-owned protocol clock for child transport owners.
-    pub(crate) fn protocol_clock(&self) -> ProtocolClock {
-        self.clock.clone()
-    }
-
     /// Returns the next packet number only while it remains valid for QUIC's 62-bit
     /// packet-number field. The stateless AEAD primitives rely on this connection-owned
     /// guard to prevent counter reuse after overflow under one traffic-secret/IV epoch.

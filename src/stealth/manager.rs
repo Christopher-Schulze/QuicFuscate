@@ -26,16 +26,14 @@ pub struct StealthManager {
     flow_shaper: Option<FlowShaper>,
     /// Cover traffic scheduler
     cover_traffic: Option<CoverTrafficScheduler>,
+    /// Whether the one-shot WebTransport cover session plan was claimed.
+    webtransport_cover_claimed: AtomicBool,
     /// Escalation flag after probe detection
     escalated: AtomicBool,
     /// Escalation timeout
     escalated_until: Arc<Mutex<Option<std::time::Instant>>>,
     /// Prefer MASQUE path while escalated (when available)
     prefer_masque: AtomicBool,
-    /// **NEW**: Server Push Cover Traffic state
-    server_push_state: Arc<Mutex<ServerPushState>>,
-    /// **NEW**: Runtime toggle for Server Push cover (used by Intelligent mode)
-    server_push_runtime_enabled: std::sync::atomic::AtomicBool,
     /// Probe hits counter (Dynamic escalation heuristic)
     probe_hits: Arc<AtomicUsize>,
     /// Probe-count-based escalation state machine (TODO-416).
@@ -169,12 +167,6 @@ impl StealthManager {
             None
         };
 
-        // Initialize Server Push Cover Traffic state
-        let server_push_state = Arc::new(Mutex::new(ServerPushState::new_with_clock(
-            &clock,
-            config.server_push_intensity,
-        )));
-
         // REALITY PROXY INITIALIZATION (TODO-1048): the probe fallback relays
         // to cover targets whenever Dynamic mode or explicit cover targets are
         // configured. StealthMax presets populate the target list; other modes
@@ -234,11 +226,10 @@ impl StealthManager {
             probe_detector,
             flow_shaper,
             cover_traffic,
+            webtransport_cover_claimed: AtomicBool::new(false),
             escalated: AtomicBool::new(false),
             escalated_until: Arc::new(Mutex::new(None)),
             prefer_masque: AtomicBool::new(false),
-            server_push_state,
-            server_push_runtime_enabled: std::sync::atomic::AtomicBool::new(false),
             probe_hits: Arc::new(AtomicUsize::new(0)),
             escalation_state: Arc::new(EscalationState::new(
                 Arc::clone(&intelligent_level_hints),
@@ -841,19 +832,15 @@ impl StealthManager {
         }
     }
 
-    /// Generates HTTP/3 headers for masquerading a request.
-    /// Returns cover-traffic headers when a request is due (rate-limited), otherwise None.
-    pub(crate) fn cover_headers_due(&self) -> Option<Vec<qf_transport_types::h3::Header>> {
-        if self.server_push_cover_active() {
-            return None;
-        }
+    /// Returns the next outer-hop cover request `(authority, path)` once the
+    /// weighted scheduler interval elapsed, otherwise `None`. The caller
+    /// encodes the headers through [`Self::get_http3_header_list`] — one
+    /// persona code path — and debits the wire ledger (TODO-1055).
+    pub(crate) fn cover_request_due(&self) -> Option<(String, String)> {
         if !self.cover_header_emission_allowed() {
             return None;
         }
-        if let Some(ref sched) = self.cover_traffic {
-            return sched.get_next_request();
-        }
-        None
+        self.cover_traffic.as_ref().and_then(|sched| sched.next_cover_target())
     }
 
     fn cover_traffic_scheduler_allowed(config: &StealthConfig) -> bool {
@@ -954,42 +941,6 @@ impl StealthManager {
         !matches!(self.config.mode, StealthMode::Performance | StealthMode::Off)
     }
 
-    /// Enable/disable Server Push at runtime (Intelligent mode). Optionally adjust intensity.
-    fn enable_server_push_runtime(&self, enabled: bool, intensity: Option<f32>) {
-        self.server_push_runtime_enabled.store(enabled, Ordering::Relaxed);
-        if let Some(i) = intensity {
-            if let Ok(mut st) = self.server_push_state.lock() {
-                st.current_intensity = i;
-            }
-        }
-    }
-
-    /// Applies orchestrator-driven server-push cover parameters.
-    #[cfg(feature = "orchestrator")]
-    pub(crate) fn sync_orchestrator_server_push_controls(
-        &self,
-        should_trigger: bool,
-        intensity: f32,
-    ) {
-        if !should_trigger {
-            return;
-        }
-
-        let clamped_intensity = intensity.clamp(0.0, 1.0);
-        self.enable_server_push_runtime(
-            true,
-            Some(self.escalation_min_server_push_intensity(clamped_intensity)),
-        );
-    }
-
-    fn escalation_min_server_push_intensity(&self, base_intensity: f32) -> f32 {
-        if self.escalated.load(Ordering::Relaxed) {
-            base_intensity.max(0.8)
-        } else {
-            base_intensity
-        }
-    }
-
     /// Returns the brain-computed Intelligent stealth escalation level (0 = inactive).
     pub(crate) fn intelligent_runtime_level(&self) -> u32 {
         if self.is_intelligent_runtime() {
@@ -1041,24 +992,6 @@ impl StealthManager {
         }
     }
 
-    fn server_push_burst_interval_secs(&self) -> u64 {
-        if self.config.server_push_burst_interval == 0 {
-            if matches!(self.config.mode, StealthMode::Dynamic) {
-                // Level 2 (anti-dpi pressure): burst every 15s for stronger cover.
-                // Level 0/1: every 30s to keep overhead minimal.
-                if self.intelligent_runtime_level() >= 2 {
-                    15
-                } else {
-                    30
-                }
-            } else {
-                15
-            }
-        } else {
-            self.config.server_push_burst_interval
-        }
-    }
-
     fn desired_masque_preference_with_hint(&self, telemetry_hint: u64) -> bool {
         let hits = self.probe_hits.load(Ordering::Relaxed);
         let escalated = self.escalated.load(Ordering::Relaxed);
@@ -1072,40 +1005,17 @@ impl StealthManager {
         self.desired_masque_preference_with_hint(hint)
     }
 
-    fn server_push_cover_active(&self) -> bool {
-        let intelligent_level = self.intelligent_runtime_level();
-        let escalated = self.escalated.load(Ordering::Relaxed);
-        let runtime_enabled = self.server_push_runtime_enabled.load(Ordering::Relaxed) || escalated;
-        let enabled = self.config.enable_server_push_cover || runtime_enabled;
-        enabled && (!matches!(self.config.mode, StealthMode::Dynamic) || intelligent_level >= 1)
-    }
-
-    fn current_server_push_state(&self) -> Option<(std::time::Instant, f32)> {
-        if !self.server_push_cover_active() {
-            return None;
-        }
-
-        let state = self.server_push_state.lock().unwrap_or_else(|e| e.into_inner());
-        Some((state.last_burst, state.current_intensity))
-    }
-
-    /// Returns the current server-push cover plan only when the burst is due.
-    pub(crate) fn server_push_cover_plan(&self) -> Option<(String, f32)> {
-        let (last_burst, current_intensity) = self.current_server_push_state()?;
-        let interval = std::time::Duration::from_secs(self.server_push_burst_interval_secs());
-        if self.clock.elapsed_since(last_burst) < interval {
-            return None;
-        }
-        Some((self.config.server_push_base_path.clone(), current_intensity))
-    }
-
     /// Returns a bounded WebTransport-looking cover session plan.
     ///
     /// WebTransport cover is an H3 application-shape overlay only. It never
     /// replaces the production Core/H3/MASQUE VPN carrier and is kept out of
-    /// the clean Performance/Intelligent level-0 path.
+    /// the clean Performance/Intelligent level-0 path. The plan is claimed on
+    /// first read — at most one session is opened per connection.
     pub(crate) fn webtransport_cover_plan(&self) -> Option<(String, String)> {
         if !self.webtransport_cover_enabled() {
+            return None;
+        }
+        if self.webtransport_cover_claimed.swap(true, Ordering::Relaxed) {
             return None;
         }
 
@@ -1113,8 +1023,13 @@ impl StealthManager {
             .cover_targets
             .as_ref()
             .map_or_else(|| "cdn.cloudflare.com".to_string(), |ct| ct.next_cover_target());
-        let base = self.config.server_push_base_path.trim_end_matches('/');
-        Some((authority, format!("{base}/wt/session")))
+        Some((authority, "/wt/session".to_string()))
+    }
+
+    /// Returns whether HTTP/3 requests may use the persona QPACK dynamic
+    /// table and header-name index policy (outer-hop requests only).
+    pub(crate) fn use_qpack_headers(&self) -> bool {
+        self.config.use_qpack_headers
     }
 
     /// Returns whether this connection persona may negotiate WebTransport cover.
@@ -1122,103 +1037,6 @@ impl StealthManager {
         let active = matches!(self.config.mode, StealthMode::StealthMax)
             || (self.is_intelligent_runtime() && self.intelligent_runtime_level() >= 2);
         active && self.config.enable_http3_masquerading
-    }
-
-    /// Exposes server-push cover plan for test assertions.
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn server_push_cover_plan_for_test(&self) -> Option<(String, f32)> {
-        self.server_push_cover_plan()
-    }
-
-    fn server_push_trigger_reason(
-        &self,
-        loss_rate_permille: u32,
-        intelligent_level: u32,
-    ) -> ServerPushTriggerReason {
-        if loss_rate_permille >= 50 {
-            ServerPushTriggerReason::Loss
-        } else if intelligent_level >= 1 {
-            ServerPushTriggerReason::Gating
-        } else {
-            ServerPushTriggerReason::Time
-        }
-    }
-
-    fn estimate_server_push_cover_bytes(
-        &self,
-        base_path: &str,
-        promises_created: usize,
-        intensity: f32,
-    ) -> u64 {
-        if promises_created == 0 {
-            return 0;
-        }
-        let per_promise = 280u64
-            .saturating_add(base_path.len() as u64)
-            .saturating_add((intensity.clamp(0.0, 1.0) * 180.0) as u64);
-        per_promise.saturating_mul(promises_created as u64)
-    }
-
-    /// Records a server-push cover burst and updates telemetry/state accordingly.
-    pub(crate) fn observe_server_push_burst(
-        &self,
-        base_path: &str,
-        promises_created: usize,
-        intensity: f32,
-        loss_rate_permille: u32,
-        intelligent_level: u32,
-    ) {
-        let reason = self.server_push_trigger_reason(loss_rate_permille, intelligent_level);
-        let total_bytes =
-            self.estimate_server_push_cover_bytes(base_path, promises_created, intensity);
-        self.update_server_push_state(promises_created, total_bytes, reason);
-    }
-
-    fn update_server_push_state(
-        &self,
-        promises_created: usize,
-        total_bytes: u64,
-        reason: ServerPushTriggerReason,
-    ) {
-        if let Ok(mut state) = self.server_push_state.lock() {
-            state.record_burst(&self.clock, promises_created, total_bytes);
-
-            // Dynamic intensity adjustment based on escalation
-            if self.escalated.load(Ordering::Relaxed) {
-                state.current_intensity = (state.current_intensity * 1.2).min(1.0);
-            } else {
-                state.current_intensity =
-                    (state.current_intensity * 0.95).max(self.config.server_push_intensity);
-            }
-
-            debug!(
-                "Server Push state updated: {} promises, {} bytes, intensity {:.2}",
-                promises_created, total_bytes, state.current_intensity
-            );
-            crate::optimize::telemetry::SERVER_PUSH_BURSTS_TOTAL
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::optimize::telemetry::SERVER_PUSH_TOTAL_COVER_BYTES
-                .fetch_add(total_bytes, std::sync::atomic::Ordering::Relaxed);
-            crate::optimize::telemetry::SERVER_PUSH_BURSTS_LAST_MINUTE
-                .store(state.bursts_last_minute() as u64, std::sync::atomic::Ordering::Relaxed);
-            let intensity_ppm = state.intensity_ppm();
-            crate::optimize::telemetry::SERVER_PUSH_CURRENT_INTENSITY_PPM
-                .store(intensity_ppm, std::sync::atomic::Ordering::Relaxed);
-            match reason {
-                ServerPushTriggerReason::Time => {
-                    crate::optimize::telemetry::SERVER_PUSH_TRIGGER_TIME_TOTAL
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                ServerPushTriggerReason::Loss => {
-                    crate::optimize::telemetry::SERVER_PUSH_TRIGGER_LOSS_TOTAL
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                ServerPushTriggerReason::Gating => {
-                    crate::optimize::telemetry::SERVER_PUSH_TRIGGER_GATING_TOTAL
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
     }
 
     /// Escalate to a specific stealth level (0=performance, 1=stealth, 2=Stealth MAX).
@@ -1242,12 +1060,7 @@ impl StealthManager {
         self.runtime_rotation_rate.store(rotation_rate, Ordering::Relaxed);
 
         if level >= 2 {
-            // Level 2: full escalation with server push cover
-            if let Ok(mut st) = self.server_push_state.lock() {
-                if st.current_intensity < 0.8 {
-                    st.current_intensity = 0.8;
-                }
-            }
+            // Level 2: full escalation tightens the cover-request cadence.
             if let Some(ref sched) = self.cover_traffic {
                 sched.set_interval_ms(2500);
             }
@@ -1396,8 +1209,7 @@ impl StealthManager {
     }
 
     /// Keep Intelligent mode runtime controls in one place.
-    /// This includes preference updates for Core H3/MASQUE selection and the
-    /// base server-push runtime activation policy for that level.
+    /// This includes preference updates for Core H3/MASQUE selection.
     pub(crate) fn sync_intelligent_runtime_controls(&self, intelligent_level: u32) {
         if !self.is_intelligent_runtime() {
             return;
@@ -1407,19 +1219,6 @@ impl StealthManager {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         self.maybe_escalate_masque_intelligent();
-        if intelligent_level == 0 {
-            self.enable_server_push_runtime(false, None);
-            return;
-        }
-        let mut intensity = if intelligent_level >= 2 { 0.9 } else { 0.65 };
-        intensity = self.escalation_min_server_push_intensity(intensity);
-        self.enable_server_push_runtime(true, Some(intensity));
-    }
-
-    /// Toggles server-push cover traffic at runtime (test-only).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn enable_server_push_runtime_for_test(&self, enabled: bool, intensity: Option<f32>) {
-        self.enable_server_push_runtime(enabled, intensity);
     }
 
     /// Forwards an invalid/probe packet to the Reality Proxy.

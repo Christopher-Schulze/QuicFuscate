@@ -23,19 +23,6 @@ fn make_conn() -> super::super::super::Connection {
     crate::transport::packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
 }
 
-fn make_conn_with_limits(
-    initial_max_data: u64,
-    initial_max_stream_data_remote: u64,
-) -> super::super::super::Connection {
-    let mut cfg = crate::transport::Config::new_with_version(PROTOCOL_VERSION).unwrap();
-    cfg.set_initial_max_data(initial_max_data);
-    cfg.set_initial_max_stream_data_bidi_remote(initial_max_stream_data_remote);
-    let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
-    let scid = [1u8; 8];
-    crate::transport::packet::connect(None, &scid, local, peer, &mut cfg).unwrap()
-}
-
 fn make_conn_with_max_udp_payload_size(
     max_udp_payload_size: usize,
 ) -> super::super::super::Connection {
@@ -210,64 +197,8 @@ fn current_rss_bytes() -> Option<u64> {
 }
 
 #[test]
-fn scheduled_push_stays_pending_when_promise_send_fails() {
-    let mut conn = make_conn_with_limits(0, 0);
-    let mut cfg = super::Config::new().expect("cfg");
-    cfg.set_max_field_section_size(1024 * 1024);
-    let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
-    h3.is_server = true;
-    h3.next_uni_stream_id = 7;
-    h3.peer_request_stream_id = Some(0);
-    h3.peer_max_push_id = Some(MAX_STEALTH_PUSH_ID);
-
-    let push_id = h3.create_stealth_push_promise("/blocked.css", "text/css", 512).expect("push");
-    if let Some(promise) = h3.push_streams.get_mut(&push_id) {
-        promise.scheduled_at = std::time::Instant::now() - std::time::Duration::from_millis(1);
-    }
-
-    h3.process_scheduled_push_streams(&mut conn);
-
-    assert_eq!(h3.push_streams.get(&push_id).map(|p| p.state), Some(PushState::PendingPromise));
-    assert!(!h3.streams.contains_key(&push_id));
-    assert!(!h3.pending_events.iter().any(|(sid, _)| *sid == push_id));
-}
-
-#[test]
-fn push_data_progress_tracks_payload_bytes() {
-    const CHUNK: usize = 16 * 1024;
-    let mut conn = make_conn();
-    let mut cfg = super::Config::new().expect("cfg");
-    cfg.set_max_field_section_size(1024 * 1024);
-    let mut h3 = super::h3::Connection::with_transport(&mut conn, &cfg).expect("h3");
-    h3.is_server = true;
-    h3.next_uni_stream_id = 7;
-    h3.peer_request_stream_id = Some(0);
-    h3.peer_max_push_id = Some(MAX_STEALTH_PUSH_ID);
-
-    let push_id = h3
-        .create_stealth_push_promise("/big.js", "application/javascript", CHUNK + 10)
-        .expect("push");
-    if let Some(promise) = h3.push_streams.get_mut(&push_id) {
-        promise.scheduled_at = std::time::Instant::now() - std::time::Duration::from_millis(1);
-    }
-
-    h3.process_scheduled_push_streams(&mut conn);
-    h3.process_push_data(&mut conn);
-
-    let push_stream_id = h3
-        .push_streams
-        .get(&push_id)
-        .and_then(|promise| promise.push_stream_id)
-        .expect("push stream id");
-    let st = h3.streams.get(&push_stream_id).expect("push stream");
-    assert_eq!(st.sent_bytes, CHUNK);
-    assert!(!st.fin_sent);
-}
-
-#[test]
 fn poll_gc_prunes_auxiliary_state_under_stream_churn() {
     const ITERATIONS: u64 = 96;
-    const COVER_BYTES: usize = 320 * 1024;
 
     let mut conn = make_conn();
     let cfg = super::Config::new().expect("cfg");
@@ -296,52 +227,14 @@ fn poll_gc_prunes_auxiliary_state_under_stream_churn() {
         h3.finished_streams.insert(stream_id);
         h3.masque_flow.insert(stream_id, iteration);
 
-        let push_id = 1_000_000 + iteration * 4;
-        h3.push_streams.insert(
-            push_id,
-            PushPromise {
-                request_headers: Vec::new(),
-                response_headers: Vec::new(),
-                request_stream_id: 0,
-                push_stream_id: Some(push_id),
-                state: PushState::Complete,
-                cover_payload: vec![0u8; COVER_BYTES],
-                scheduled_at: std::time::Instant::now(),
-            },
-        );
-        h3.streams.insert(
-            push_id,
-            StreamState {
-                _headers: Vec::new(),
-                body_buffer: vec![0u8; COVER_BYTES],
-                frame_buffer: Vec::new(),
-                _received_bytes: 0,
-                _stream_type: StreamType::Push,
-                sent_bytes: COVER_BYTES,
-                fin_sent: true,
-                fin_received: false,
-                masque_established: false,
-                masque_capsule_buffer: Vec::new(),
-                settings_received: false,
-                receive_message_state: ReceiveMessageState::AwaitingHeaders,
-            },
-        );
-        h3.finished_streams.insert(push_id);
-        h3.masque_flow.insert(push_id, iteration);
-
         let _ = h3.poll(&mut conn);
         assert!(!h3.streams.contains_key(&stream_id));
-        assert!(!h3.streams.contains_key(&push_id));
         assert!(!h3.finished_streams.contains(&stream_id));
-        assert!(!h3.finished_streams.contains(&push_id));
         assert!(!h3.masque_flow.contains_key(&stream_id));
-        assert!(!h3.masque_flow.contains_key(&push_id));
-        assert!(!h3.push_streams.contains_key(&push_id));
     }
 
     assert!(h3.finished_streams.is_empty(), "finished stream IDs must not accumulate");
     assert!(h3.masque_flow.is_empty(), "MASQUE flow IDs must not accumulate");
-    assert!(h3.push_streams.is_empty(), "completed push promises must be released");
     assert!(
         h3.streams.keys().all(|id| Some(*id) == h3.control_stream_id),
         "only the client control stream may remain"
@@ -377,24 +270,6 @@ fn h3_receive_buffers_follow_transport_payload_limits() {
     assert_eq!(h3.masque_recv_capacity, MAX_PAYLOAD);
     assert!(h3.masque_recv_entry.is_none());
     assert_eq!(h3.stream_recv_buffer.len(), 64 * 1024);
-}
-
-#[test]
-fn stealth_cover_resource_plan_varies_by_seed_with_bounds() {
-    let a =
-        super::h3::Connection::build_stealth_cover_resource_plan("/assets", 0x1234_5678_9abc_def0);
-    let b =
-        super::h3::Connection::build_stealth_cover_resource_plan("/assets", 0x9876_5432_10fe_dcba);
-
-    assert_ne!(a, b, "cover resource plans should vary by seed");
-    for plan in [&a, &b] {
-        assert!((3..=7).contains(&plan.len()), "cover plan size out of bounds");
-        for (path, content_type, size) in plan {
-            assert!(path.starts_with("/assets/"));
-            assert!(!content_type.is_empty());
-            assert!((1024..=320_000).contains(size));
-        }
-    }
 }
 
 #[test]
@@ -783,31 +658,6 @@ fn varint_roundtrip_large_values() {
         let (decoded, _) = Connection::decode_varint(&buf).expect("decode");
         assert_eq!(decoded, val, "varint roundtrip failed for {}", val);
     }
-}
-
-// ---- Cover Traffic Generation ----------------------------------------
-
-#[test]
-fn fake_css_generates_correct_size() {
-    let css = generate_fake_css(1000);
-    assert_eq!(css.len(), 1000);
-    // Should contain CSS-like content
-    assert!(
-        css.windows(4).any(|w| w == b"body" || w == b".rul"),
-        "generated CSS must contain CSS-like text"
-    );
-}
-
-#[test]
-fn fake_js_generates_correct_size() {
-    let js = generate_fake_js(500);
-    assert_eq!(js.len(), 500);
-}
-
-#[test]
-fn fake_image_starts_with_jpeg_magic() {
-    let img = generate_fake_image_data(100);
-    assert_eq!(&img[..2], &[0xFF, 0xD8], "fake image must start with JPEG magic bytes");
 }
 
 // ---- Header from_parts -----------------------------------------------

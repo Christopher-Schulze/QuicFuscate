@@ -720,12 +720,6 @@ impl QuicFuscateConnection {
                 // Store globally for later use in HTTP/3 loop.
                 if ORCHESTRATOR.set(orchestrator).is_ok() {
                     info!("DeepIntegrationOrchestrator activated for advanced coordination");
-                    // Enable Server Push coordination in Intelligent mode (brain will throttle)
-                    if s.stealth_manager.is_intelligent_runtime() {
-                        if let Some(orch) = ORCHESTRATOR.get() {
-                            orch.enable_server_push(true);
-                        }
-                    }
                 } else {
                     debug!(
                         "DeepIntegrationOrchestrator already initialized, reusing existing instance"
@@ -796,7 +790,19 @@ impl QuicFuscateConnection {
             .masque_proxy()
             .unwrap_or_else(|| format!("{}:443", self.host_header));
 
-        let extra_headers = self.build_masque_request_headers();
+        let mut extra_headers = self.build_masque_request_headers();
+        // TODO-1055: the MASQUE CONNECT request is the outer hop — the only
+        // place a middlebox could attribute HTTP/3. Persona headers ride it
+        // when masquerade is enabled; their encoded delta is cover traffic
+        // paid from the shared wire budget. Inner tunnel streams stay bare.
+        if let Some(persona) =
+            self.stealth_manager.get_http3_header_list(&proxy, "/.well-known/masque/ip/")
+        {
+            let delta = Self::h3_header_list_bytes(&persona);
+            if self.conn.try_spend_wire_cover(delta) {
+                extra_headers.extend(persona.into_iter().filter(|h| !h.name().starts_with(b":")));
+            }
+        }
         let Some(ref mut h3) = self.h3_conn else {
             return Ok(None);
         };
@@ -862,16 +868,6 @@ impl QuicFuscateConnection {
                             stealth_active,
                         );
                     }
-                    if let Some(orchestrator) = ORCHESTRATOR.get() {
-                        if orchestrator.should_trigger_server_push() {
-                            let mut intensity = orchestrator.get_server_push_intensity();
-                            if intelligent_level >= 2 {
-                                intensity = intensity.max(0.9);
-                            }
-                            self.stealth_manager
-                                .sync_orchestrator_server_push_controls(true, intensity);
-                        }
-                    }
                 }
             }
         }
@@ -930,53 +926,9 @@ impl QuicFuscateConnection {
         self.accept_peer_masque_flow(stream_id)
     }
 
-    fn emit_server_push_cover_burst(
-        h3: &mut crate::transport::h3::Connection,
-        conn: &mut crate::transport::Connection,
-        stealth_manager: &crate::stealth::StealthManager,
-        intelligent_level: u32,
-    ) {
-        let Some((base_path, intensity)) = stealth_manager.server_push_cover_plan() else {
-            return;
-        };
-
-        // Stats are fetched only on the rare cover-burst path - cloning the
-        // ~200-byte struct every poll iteration was unconditional waste.
-        let (sent, lost) = {
-            let stats = conn.stats();
-            (stats.sent as u64, stats.lost as u64)
-        };
-        match h3.generate_stealth_cover_burst(&base_path) {
-            Ok(ids) => {
-                let loss_rate_permille =
-                    lost.saturating_mul(1000).checked_div(sent).unwrap_or(0).min(1000) as u32;
-                stealth_manager.observe_server_push_burst(
-                    &base_path,
-                    ids.len(),
-                    intensity,
-                    loss_rate_permille,
-                    intelligent_level,
-                );
-                if !conn.is_server() {
-                    if let Some((authority, path)) = stealth_manager.webtransport_cover_plan() {
-                        match h3.open_webtransport_cover_session(conn, &authority, &path) {
-                            Ok(sid) => {
-                                debug!("WebTransport cover session opened: sid={sid}");
-                            }
-                            Err(e) => warn!("WebTransport cover session failed: {:?}", e),
-                        }
-                    }
-                }
-                debug!("Server Push burst emitted: {} promises", ids.len());
-            }
-            Err(e) => warn!("Server Push burst generation failed: {:?}", e),
-        }
-    }
-
-    fn prepare_http3_poll_iteration(&self) -> u32 {
+    fn prepare_http3_poll_iteration(&self) {
         let intelligent_level = self.stealth_manager.intelligent_runtime_level();
         self.sync_poll_intelligent_runtime_controls(intelligent_level);
-        intelligent_level
     }
 
     /// Processes an incoming raw buffer, parsing it into an FEC packet and handling recovery.

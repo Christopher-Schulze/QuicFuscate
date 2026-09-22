@@ -541,41 +541,7 @@ pub fn export_telemetry_text() -> String {
         );
         let _ =
             writeln!(out, "quicfuscate_stealth_signal_other_total {}", get(&STEALTH_SIGNAL_OTHER));
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_bursts_total {}",
-            get(&SERVER_PUSH_BURSTS_TOTAL)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_total_cover_bytes {}",
-            get(&SERVER_PUSH_TOTAL_COVER_BYTES)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_bursts_last_minute {}",
-            get(&SERVER_PUSH_BURSTS_LAST_MINUTE)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_current_intensity_ppm {}",
-            get(&SERVER_PUSH_CURRENT_INTENSITY_PPM)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_trigger_loss_total {}",
-            get(&SERVER_PUSH_TRIGGER_LOSS_TOTAL)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_trigger_time_total {}",
-            get(&SERVER_PUSH_TRIGGER_TIME_TOTAL)
-        );
-        let _ = writeln!(
-            out,
-            "quicfuscate_server_push_trigger_gating_total {}",
-            get(&SERVER_PUSH_TRIGGER_GATING_TOTAL)
-        );
+
         let _ = writeln!(
             out,
             "quicfuscate_stealth_probe_detected_total {}",

@@ -380,11 +380,6 @@ pub enum Event {
         payload: Vec<u8>,
     },
     Finished,
-    /// Server Push Promise event for stealth cover traffic.
-    PushPromise {
-        push_id: u64,
-        headers: Vec<Header>,
-    },
     Reset(u64),
     PriorityUpdate,
     GoAway,

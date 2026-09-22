@@ -111,20 +111,6 @@ pub static STEALTH_SIGNAL_RST: AtomicU64 = AtomicU64::new(0);
 pub static STEALTH_SIGNAL_TOS_ANOM: AtomicU64 = AtomicU64::new(0);
 /// Other unclassified stealth escalation signals.
 pub static STEALTH_SIGNAL_OTHER: AtomicU64 = AtomicU64::new(0);
-/// Total server-push cover traffic bursts emitted.
-pub static SERVER_PUSH_BURSTS_TOTAL: AtomicU64 = AtomicU64::new(0);
-/// Total bytes of server-push cover traffic sent.
-pub static SERVER_PUSH_TOTAL_COVER_BYTES: AtomicU64 = AtomicU64::new(0);
-/// Server-push cover bursts emitted in the last minute.
-pub static SERVER_PUSH_BURSTS_LAST_MINUTE: AtomicU64 = AtomicU64::new(0);
-/// Current server-push intensity in parts-per-million.
-pub static SERVER_PUSH_CURRENT_INTENSITY_PPM: AtomicU64 = AtomicU64::new(0);
-/// Server-push bursts triggered by loss detection.
-pub static SERVER_PUSH_TRIGGER_LOSS_TOTAL: AtomicU64 = AtomicU64::new(0);
-/// Server-push bursts triggered by time-based schedule.
-pub static SERVER_PUSH_TRIGGER_TIME_TOTAL: AtomicU64 = AtomicU64::new(0);
-/// Server-push bursts triggered by gating logic.
-pub static SERVER_PUSH_TRIGGER_GATING_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 // Per-category telemetry export gates (controlled by [telemetry] config flags).
 // Default: all enabled. Set to false to suppress that category from /telemetry output.
@@ -812,10 +798,7 @@ pub static STEALTH_DOH: AtomicU64 = AtomicU64::new(0);
 pub static STEALTH_FRONTING: AtomicU64 = AtomicU64::new(0);
 /// Stealth padding operations via GFNI instructions.
 pub static STEALTH_PADDING_GFNI_OPS: Counter = Counter::new();
-/// HTTP/3 server push promises sent for cover traffic.
-pub static STEALTH_PUSH_PROMISES: Counter = Counter::new();
-/// Total bytes sent via HTTP/3 server push cover traffic.
-pub static STEALTH_PUSH_BYTES: AtomicU64 = AtomicU64::new(0);
+
 /// Congestion aggregation batches via VNNI.
 pub static CONGESTION_VNNI_BATCHES: Counter = Counter::new();
 /// Congestion aggregation batches via AVX2.

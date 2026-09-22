@@ -5,7 +5,6 @@ pub use qf_transport_types::h3::{
 };
 
 mod connection;
-mod cover_content;
 mod qpack;
 
 pub use connection::Connection;

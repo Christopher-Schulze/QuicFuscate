@@ -21,7 +21,9 @@ impl Connection {
                 self._peer_control_stream_id = Some(stream_id);
                 Ok(StreamType::Control)
             }
-            0x01 if !conn.is_server() => Ok(StreamType::Push),
+            // Push streams (0x01) are never permitted: this implementation
+            // never advertises MAX_PUSH_ID, so any push stream is a protocol
+            // violation (RFC 9114 §6.2.2).
             0x01 => Err(Error::StreamCreationError),
             0x02 => {
                 if self.peer_qpack_encoder_stream_id.is_some() {
@@ -165,18 +167,6 @@ impl Connection {
                     return Err(Error::FrameUnexpected);
                 }
                 if frame_type == 0x0d && !conn.is_server() {
-                    return Err(Error::FrameUnexpected);
-                }
-                Ok(())
-            }
-            StreamType::Push => {
-                if known_frame && !matches!(frame_type, 0x00 | 0x01) {
-                    return Err(Error::FrameUnexpected);
-                }
-                if (frame_type == 0x00 && receive_message_state != ReceiveMessageState::Body)
-                    || (frame_type == 0x01
-                        && receive_message_state == ReceiveMessageState::Trailers)
-                {
                     return Err(Error::FrameUnexpected);
                 }
                 Ok(())
@@ -442,26 +432,7 @@ impl Connection {
                 self.classify_peer_unidirectional_stream(conn, stream_id, stream_type)?;
             let mut prefix_len = type_len;
             let mut webtransport_session_id = None;
-            if stream_type == 0x01 {
-                let (push_id, push_id_len) = match Self::decode_varint(&buffered[type_len..]) {
-                    Ok(decoded) => decoded,
-                    Err(Error::BufferTooShort) => {
-                        let stream = self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
-                        stream.frame_buffer.extend_from_slice(&buffered);
-                        if fin {
-                            return Err(Error::FrameError);
-                        }
-                        return Ok(());
-                    }
-                    Err(error) => return Err(error),
-                };
-                if self.local_max_push_id.is_none_or(|maximum| push_id > maximum)
-                    || !self.received_push_ids.insert(push_id)
-                {
-                    return Err(Error::IdError);
-                }
-                prefix_len = prefix_len.checked_add(push_id_len).ok_or(Error::ExcessiveLoad)?;
-            } else if stream_type == WEBTRANSPORT_UNI_STREAM_TYPE {
+            if stream_type == WEBTRANSPORT_UNI_STREAM_TYPE {
                 let (session_id, session_id_len) = match Self::decode_varint(&buffered[type_len..])
                 {
                     Ok(decoded) => decoded,
@@ -666,10 +637,10 @@ impl Connection {
                     }
                 }
                 0x03 => {
-                    let push_id = Self::decode_single_varint_payload(frame_data)?;
-                    if self.peer_max_push_id.is_none_or(|maximum| push_id > maximum) {
-                        return Err(Error::IdError);
-                    }
+                    // CANCEL_PUSH: syntactically read and discard. This
+                    // implementation never generates push, so any promised
+                    // push ID is unknown here.
+                    let _ = Self::decode_single_varint_payload(frame_data)?;
                 }
                 0x04 => {
                     let settings = Self::parse_settings_payload(frame_data)?;
@@ -683,31 +654,9 @@ impl Connection {
                     }
                 }
                 0x05 => {
-                    let (push_id, push_id_len) =
-                        Self::decode_varint(frame_data).map_err(|error| {
-                            if error == Error::BufferTooShort {
-                                Error::FrameError
-                            } else {
-                                error
-                            }
-                        })?;
-                    if self.local_max_push_id.is_none_or(|maximum| push_id > maximum) {
-                        return Err(Error::IdError);
-                    }
-                    let headers =
-                        match self.decoder.decode(stream_id, &frame_data[push_id_len..])? {
-                            qpack::DecodeOutcome::Decoded(headers) => headers,
-                            qpack::DecodeOutcome::Blocked => {
-                                let stream =
-                                    self.streams.get_mut(&stream_id).ok_or(Error::IdError)?;
-                                stream.frame_buffer.extend_from_slice(&buffered[offset..]);
-                                self.pending_events.extend(pending_masque_events);
-                                return Ok(());
-                            }
-                        };
-                    self.flush_qpack_decoder_instructions(conn)?;
-                    self.pending_events
-                        .push_back((stream_id, Event::PushPromise { push_id, headers }));
+                    // PUSH_PROMISE without a negotiated MAX_PUSH_ID is a
+                    // protocol violation (RFC 9114 §7.2.5 → H3_ID_ERROR).
+                    return Err(Error::IdError);
                 }
                 0x07 => {
                     let identifier = Self::decode_single_varint_payload(frame_data)?;
@@ -722,11 +671,9 @@ impl Connection {
                     self.pending_events.push_back((stream_id, Event::GoAway));
                 }
                 0x0d => {
-                    let maximum = Self::decode_single_varint_payload(frame_data)?;
-                    if self.peer_max_push_id.is_some_and(|current| maximum <= current) {
-                        return Err(Error::IdError);
-                    }
-                    self.peer_max_push_id = Some(maximum);
+                    // MAX_PUSH_ID grants this endpoint permission to push;
+                    // since it never generates push, the grant is discarded.
+                    let _ = Self::decode_single_varint_payload(frame_data)?;
                 }
                 _ => {}
             }

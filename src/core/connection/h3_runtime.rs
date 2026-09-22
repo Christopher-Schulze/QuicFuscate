@@ -22,21 +22,20 @@ impl QuicFuscateConnection {
         Ok(())
     }
 
-    fn build_http3_request_headers(
+    /// Builds the H3 request header block. `persona_headers` carries the
+    /// optional outer-hop browser headers (TODO-1055): pseudo headers are
+    /// always rebuilt here so the persona list only contributes regular
+    /// header names; functional `x-qf-*` headers are injected afterwards.
+    pub(super) fn build_http3_request_headers(
         &self,
         method: &'static [u8],
         path: &str,
+        persona_headers: Option<Vec<crate::transport::h3::Header>>,
     ) -> Vec<crate::transport::h3::Header> {
         let host = self.host_header.as_str();
-        let mut headers =
-            self.stealth_manager.get_http3_header_list(host, path).unwrap_or_default();
+        let mut headers = persona_headers.unwrap_or_default();
 
-        headers.retain(|h| {
-            h.name() != b":method"
-                && h.name() != b":scheme"
-                && h.name() != b":authority"
-                && h.name() != b":path"
-        });
+        headers.retain(|h| !h.name().starts_with(b":"));
         headers.insert(0, crate::transport::h3::Header::new(b":path", path.as_bytes()));
         headers.insert(0, crate::transport::h3::Header::new(b":authority", host.as_bytes()));
         headers.insert(0, crate::transport::h3::Header::new(b":scheme", b"https"));
@@ -47,14 +46,33 @@ impl QuicFuscateConnection {
         headers
     }
 
+    /// Encoded byte estimate for a header list — the cover delta the wire
+    /// ledger is charged when persona headers ride an outer-hop request.
+    pub(super) fn h3_header_list_bytes(headers: &[crate::transport::h3::Header]) -> u64 {
+        headers.iter().map(|h| h.name().len() as u64 + h.value().len() as u64 + 8).sum()
+    }
+
     fn send_http3_request_headers(
         &mut self,
         method: &'static [u8],
         path: &str,
         fin: bool,
+        outer_hop: bool,
     ) -> Result<u64, crate::error::ConnectionError> {
         self.ensure_http3_initialized()?;
-        let headers = self.build_http3_request_headers(method, path);
+        // Outer-hop requests may carry persona headers; their encoded delta
+        // is cover traffic paid from the shared wire budget. Inner tunnel
+        // streams never carry browser headers (TODO-1055).
+        let persona = if outer_hop {
+            self.stealth_manager.get_http3_header_list(&self.host_header, path)
+        } else {
+            None
+        };
+        let persona = persona.filter(|list| {
+            let delta = Self::h3_header_list_bytes(list);
+            delta == 0 || self.conn.try_spend_wire_cover(delta)
+        });
+        let headers = self.build_http3_request_headers(method, path, persona);
         let h3 = self.h3_conn.as_mut().ok_or("h3 not initialized")?;
         h3.send_request(&mut self.conn, &headers, fin).map_err(Into::into)
     }
@@ -84,17 +102,12 @@ impl QuicFuscateConnection {
                 memory_pool: self.optimization_manager.memory_pool_ref(),
             };
             loop {
-                let intelligent_level = self.prepare_http3_poll_iteration();
+                self.prepare_http3_poll_iteration();
                 let Some(ref mut h3) = self.h3_conn else {
                     break;
                 };
                 Self::emit_due_cover_headers(h3, &mut self.conn, &self.stealth_manager);
-                Self::emit_server_push_cover_burst(
-                    h3,
-                    &mut self.conn,
-                    &self.stealth_manager,
-                    intelligent_level,
-                );
+                Self::emit_webtransport_cover_session(h3, &mut self.conn, &self.stealth_manager);
                 match h3.poll(&mut self.conn) {
                     Ok(Some((sid, crate::transport::h3::Event::Headers { list, .. }))) => {
                         let webtransport_ready = if h3.webtransport_session_pending(sid)
@@ -335,18 +348,6 @@ impl QuicFuscateConnection {
                             self.h3_peer_tunnel_stream_id = None;
                         }
                     }
-                    Ok(Some((
-                        _id,
-                        crate::transport::h3::Event::PushPromise { push_id, headers },
-                    ))) => {
-                        if verbose_events {
-                            info!(
-                                "Received stealth push promise {} with {} headers",
-                                push_id,
-                                headers.len()
-                            );
-                        }
-                    }
                     Ok(None) => break,
                     Err(crate::transport::h3::Error::Done) => break,
                     Err(e) => return Err(e.into()),
@@ -390,19 +391,59 @@ impl QuicFuscateConnection {
         Ok(())
     }
 
+    /// Emits the next outer-hop cover request once the weighted scheduler
+    /// says one is due. Headers come from the persona fixture via
+    /// `get_http3_header_list` (one code path) and the encoded delta is paid
+    /// from the shared wire budget — a denied slot is consumed, never
+    /// replayed (TODO-1055).
     fn emit_due_cover_headers(
         h3: &mut crate::transport::h3::Connection,
         conn: &mut crate::transport::Connection,
         stealth_manager: &StealthManager,
     ) {
-        if let Some(headers) = stealth_manager.cover_headers_due() {
-            if let Err(e) = h3.send_request(conn, &headers, true) {
-                crate::optimize::telemetry::STEALTH_SIGNAL_RST
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                warn!("Cover traffic send failed: {:?}", e);
-            } else {
-                debug!("Cover traffic request emitted");
+        let Some((authority, path)) = stealth_manager.cover_request_due() else {
+            return;
+        };
+        let Some(headers) = stealth_manager.get_http3_header_list(&authority, &path) else {
+            return;
+        };
+        let encoded_estimate: u64 =
+            headers.iter().map(|h| h.name().len() as u64 + h.value().len() as u64 + 8).sum();
+        if !conn.try_spend_wire_cover(encoded_estimate) {
+            return;
+        }
+        if let Err(e) = h3.send_request(conn, &headers, true) {
+            crate::optimize::telemetry::STEALTH_SIGNAL_RST
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            warn!("Cover traffic send failed: {:?}", e);
+        } else {
+            debug!("Cover traffic request emitted");
+        }
+    }
+
+    /// Opens the bounded WebTransport cover session once per connection on
+    /// personas that negotiate it (StealthMax / intelligent level >= 2). The
+    /// Extended CONNECT targets a cover authority — an outer-hop request —
+    /// so its header bytes are paid from the shared wire budget (TODO-1055).
+    fn emit_webtransport_cover_session(
+        h3: &mut crate::transport::h3::Connection,
+        conn: &mut crate::transport::Connection,
+        stealth_manager: &StealthManager,
+    ) {
+        if conn.is_server() {
+            return;
+        }
+        let Some((authority, path)) = stealth_manager.webtransport_cover_plan() else {
+            return;
+        };
+        if !conn.try_spend_wire_cover((authority.len() + path.len() + 64) as u64) {
+            return;
+        }
+        match h3.open_webtransport_cover_session(conn, &authority, &path) {
+            Ok(sid) => {
+                debug!("WebTransport cover session opened: sid={sid}");
             }
+            Err(e) => warn!("WebTransport cover session failed: {:?}", e),
         }
     }
 
@@ -734,20 +775,26 @@ impl QuicFuscateConnection {
 impl QuicFuscateConnection {
     pub fn init_http3(&mut self) -> Result<(), crate::transport::h3::Error> {
         if self.h3_conn.is_none() {
-            // Enable a modest QPACK dynamic table to improve compression.
             let mut h3_cfg = crate::transport::h3::Config::new()
                 .map_err(|_| crate::transport::h3::Error::InternalError)?;
-            // Select capacities based on the active persona.
+            // Persona QPACK dynamic table and index policy apply only when
+            // the outer-hop masquerade requests them (TODO-1055); otherwise
+            // the connection encodes headers statically.
             let (qpack_capacity, qpack_blocked_streams) =
-                self.stealth_manager.qpack_runtime_profile();
+                if self.stealth_manager.use_qpack_headers() {
+                    self.stealth_manager.qpack_runtime_profile()
+                } else {
+                    (0, 0)
+                };
             h3_cfg.set_qpack_max_table_capacity(qpack_capacity);
             h3_cfg.set_qpack_blocked_streams(qpack_blocked_streams);
             h3_cfg.set_webtransport_enabled(self.stealth_manager.webtransport_cover_enabled());
 
             let h3 = crate::transport::h3::Connection::with_transport(&mut self.conn, &h3_cfg)?;
             let mut h3 = h3;
-            // Set persona QPACK index policy
-            h3.set_qpack_index_policy(self.stealth_manager.qpack_index_policy());
+            if self.stealth_manager.use_qpack_headers() {
+                h3.set_qpack_index_policy(self.stealth_manager.qpack_index_policy());
+            }
             self.h3_conn = Some(h3);
             // Notify the compression layer about the persona (dictionary selection).
             let persona = self.stealth_manager.current_persona_name();
@@ -764,7 +811,7 @@ impl QuicFuscateConnection {
             warn!("MASQUE CONNECT-UDP open failed: {:?}", e);
         }
         let start = self.clock.now();
-        if let Err(e) = self.send_http3_request_headers(b"GET", path, true) {
+        if let Err(e) = self.send_http3_request_headers(b"GET", path, true, true) {
             crate::optimize::telemetry::STEALTH_SIGNAL_RST
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(e);
@@ -778,7 +825,7 @@ impl QuicFuscateConnection {
         &mut self,
         path: &str,
     ) -> Result<u64, crate::error::ConnectionError> {
-        let stream_id = self.send_http3_request_headers(b"POST", path, false)?;
+        let stream_id = self.send_http3_request_headers(b"POST", path, false, false)?;
         if path == "/tun" {
             self.h3_tunnel_rx.entry(stream_id).or_default();
         }

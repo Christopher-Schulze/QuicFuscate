@@ -66,10 +66,6 @@ run_verified_rust_target \
   test_tun_capabilities_report_matches_target \
   rust-tests
 run_verified_rust_target \
-  it-orchestrator-runtime-activation \
-  test_orchestrator_runtime_activation_and_signal_flow \
-  rust-tests,orchestrator
-run_verified_rust_target \
   it-qkey-auth-integration \
   qkey_http3_auth_accepts_valid_and_rejects_invalid_token \
   rust-tests

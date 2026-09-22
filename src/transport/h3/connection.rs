@@ -2,8 +2,6 @@ use super::*;
 use crate::optimize::PooledBlock;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::cover_content::{generate_fake_css, generate_fake_image_data, generate_fake_js};
-
 #[cfg(test)]
 use super as h3;
 
@@ -14,33 +12,6 @@ mod receive;
 #[cfg(test)]
 mod tests;
 
-/// HTTP/3 Server Push Promise for stealth cover traffic
-#[derive(Debug, Clone)]
-struct PushPromise {
-    /// Request headers carried by PUSH_PROMISE.
-    request_headers: Vec<Header>,
-    /// Response headers that start the corresponding push stream.
-    response_headers: Vec<Header>,
-    /// Client-initiated request stream that carries PUSH_PROMISE.
-    request_stream_id: u64,
-    /// Server-initiated unidirectional stream allocated after the promise is sent.
-    push_stream_id: Option<u64>,
-    /// Push stream state
-    state: PushState,
-    /// Cover traffic payload (fake resources)
-    cover_payload: Vec<u8>,
-    /// Timing for realistic delivery
-    scheduled_at: std::time::Instant,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PushState {
-    PendingPromise,
-    Promised,
-    DataSending,
-    Complete,
-}
-
 const STREAM_RECV_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_QUIC_DATAGRAM_SIZE: usize = 65_535;
 /// Spare writable bytes exposed past a received MASQUE payload so
@@ -50,7 +21,6 @@ pub(crate) const MASQUE_RECV_HEADROOM: usize = 40;
 const MAX_BUFFERED_H3_FRAME: usize = 1024 * 1024 + 16;
 const MAX_H3_SETTING_VALUE: u64 = 16 * 1024 * 1024;
 const MAX_LOCAL_QPACK_BLOCKED_STREAMS: u64 = 64;
-const MAX_STEALTH_PUSH_ID: u64 = 63;
 const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
 const SETTINGS_H3_DATAGRAM: u64 = 0x33;
 const SETTINGS_WT_ENABLED: u64 = 0x2c7c_f000;
@@ -67,8 +37,6 @@ const WEBTRANSPORT_INITIAL_MAX_DATA: u64 = 1024 * 1024;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
-    /// Monotonic clock shared with the underlying QUIC transport.
-    clock: crate::time_source::ProtocolClock,
     is_server: bool,
     config: Config,
     next_stream_id: u64,
@@ -85,9 +53,6 @@ pub struct Connection {
     peer_qpack_encoder_stream_id: Option<u64>,
     peer_qpack_decoder_stream_id: Option<u64>,
     peer_request_stream_id: Option<u64>,
-    peer_max_push_id: Option<u64>,
-    local_max_push_id: Option<u64>,
-    received_push_ids: HashSet<u64>,
     peer_settings: Option<PeerSettings>,
     webtransport_session_ids: HashMap<u64, u64>,
     webtransport_sessions: HashMap<u64, WebTransportSession>,
@@ -95,12 +60,8 @@ pub struct Connection {
     goaway_sent: bool,
     goaway_received: bool,
     peer_goaway_id: Option<u64>,
-    /// Server Push streams for stealth cover traffic
-    push_streams: HashMap<u64, PushPromise>,
     /// MASQUE Flow-ID mapping per CONNECT-UDP stream (when datagrams enabled)
     masque_flow: HashMap<u64, u64>,
-    /// Next HTTP/3 push ID, independent of the QUIC push-stream identifier.
-    next_push_id: u64,
     /// Reused caller-owned buffer for one transport STREAM receive operation.
     stream_recv_buffer: Vec<u8>,
     /// Owned datagram entry taken from the transport recv queue; its backing
@@ -153,7 +114,6 @@ enum StreamType {
     Request,
     Response,
     Control,
-    Push,
     Masque,
     WebTransportCover,
 }
@@ -194,49 +154,6 @@ struct WebTransportSession {
 }
 
 impl Connection {
-    fn build_stealth_cover_resource_plan(
-        base_path: &str,
-        seed: u64,
-    ) -> Vec<(String, &'static str, usize)> {
-        const RESOURCES: &[(&str, &str, usize)] = &[
-            ("/css/main.css", "text/css", 45_000),
-            ("/css/theme.css", "text/css", 18_000),
-            ("/css/fonts.css", "text/css", 8_000),
-            ("/js/app.js", "application/javascript", 120_000),
-            ("/js/runtime.js", "application/javascript", 22_000),
-            ("/js/vendor.js", "application/javascript", 280_000),
-            ("/js/analytics.js", "application/javascript", 25_000),
-            ("/images/hero.jpg", "image/jpeg", 85_000),
-            ("/images/card.jpg", "image/jpeg", 54_000),
-            ("/images/logo.png", "image/png", 12_000),
-            ("/images/icon.png", "image/png", 6_000),
-            ("/media/poster.jpg", "image/jpeg", 72_000),
-        ];
-
-        let base = base_path.trim_end_matches('/');
-        let count = 3 + ((seed >> 32) as usize % 5);
-        let start = (seed as usize) % RESOURCES.len();
-        let step = 5usize;
-        let mut plan = Vec::with_capacity(count);
-
-        for i in 0..count {
-            let (path, content_type, nominal_size) =
-                RESOURCES[(start + i * step) % RESOURCES.len()];
-            let jitter = ((seed.rotate_left((i as u32) & 31) >> 8) % 31) as i32 - 15;
-            let size =
-                ((nominal_size as i64) * (100 + jitter) as i64 / 100).clamp(1024, 320_000) as usize;
-            let version = seed.rotate_right((i as u32) & 31) & 0x0fff;
-            let full_path = if version.is_multiple_of(3) {
-                format!("{base}{path}?v={version:x}")
-            } else {
-                format!("{base}{path}")
-            };
-            plan.push((full_path, content_type, size));
-        }
-
-        plan
-    }
-
     fn prepare_headers_block(
         &self,
         stream_id: u64,
@@ -263,7 +180,6 @@ impl Connection {
         }
         let masque_buffer_len = conn.max_recv_udp_payload_size().clamp(1, MAX_QUIC_DATAGRAM_SIZE);
         let mut h3_conn = Self {
-            clock: conn.protocol_clock(),
             is_server: conn.is_server(),
             config: config.clone(),
             next_stream_id: if conn.is_server() { 1 } else { 0 },
@@ -283,9 +199,6 @@ impl Connection {
             peer_qpack_encoder_stream_id: None,
             peer_qpack_decoder_stream_id: None,
             peer_request_stream_id: None,
-            peer_max_push_id: None,
-            local_max_push_id: if conn.is_server() { None } else { Some(MAX_STEALTH_PUSH_ID) },
-            received_push_ids: HashSet::new(),
             peer_settings: None,
             webtransport_session_ids: HashMap::new(),
             webtransport_sessions: HashMap::new(),
@@ -293,11 +206,7 @@ impl Connection {
             goaway_sent: false,
             goaway_received: false,
             peer_goaway_id: None,
-            push_streams: HashMap::new(),
             masque_flow: HashMap::new(),
-            // Server push streams are locally-created unidirectional streams, so their
-            // transport IDs use the server-initiated class (3, 7, 11, ...).
-            next_push_id: 0,
             stream_recv_buffer: vec![0u8; STREAM_RECV_BUFFER_SIZE],
             masque_recv_entry: None,
             masque_recv_capacity: masque_buffer_len,
@@ -364,13 +273,6 @@ impl Connection {
         Self::encode_varint(0x04, &mut prologue); // SETTINGS frame type
         Self::encode_varint(settings_payload.len() as u64, &mut prologue);
         prologue.extend_from_slice(&settings_payload);
-        if let Some(max_push_id) = self.local_max_push_id {
-            let mut max_push_payload = Vec::with_capacity(8);
-            Self::encode_varint(max_push_id, &mut max_push_payload);
-            Self::encode_varint(0x0d, &mut prologue);
-            Self::encode_varint(max_push_payload.len() as u64, &mut prologue);
-            prologue.extend_from_slice(&max_push_payload);
-        }
 
         let sent = match conn.stream_send(stream_id, &prologue, false) {
             Ok(sent) if sent == prologue.len() => sent,
@@ -800,9 +702,6 @@ impl Connection {
         self.init_control_stream(conn)?;
         self.process_peer_stream_resets(conn)?;
         self.flush_qpack_decoder_instructions(conn)?;
-        // Process scheduled push streams and continue sending bodies
-        self.process_scheduled_push_streams(conn);
-        self.process_push_data(conn);
 
         // Process incoming readable streams (requests, responses, MASQUE, etc).
         // The transport marks streams readable when STREAM frames deliver data.
@@ -827,23 +726,16 @@ impl Connection {
         self.flush_qpack_decoder_instructions(conn)?;
         self.publish_ready_webtransport_streams();
 
-        // Lightweight GC using fin_received. Completed push streams are locally
-        // terminal after their FIN because peers do not send a reciprocal stream FIN.
+        // Lightweight GC using fin_received.
         let done: Vec<u64> = self
             .streams
             .iter()
             .filter_map(|(id, st)| {
-                let push_complete = st._stream_type == StreamType::Push
-                    && st.fin_sent
-                    && self.push_streams.values().any(|promise| {
-                        promise.push_stream_id == Some(*id) && promise.state == PushState::Complete
-                    });
                 let pending_event = self.pending_events.iter().any(|(event_id, _)| event_id == id);
-                if (st.fin_received
+                if st.fin_received
                     && st.body_buffer.is_empty()
                     && !pending_event
-                    && !self.pending_webtransport_streams.contains(id))
-                    || push_complete
+                    && !self.pending_webtransport_streams.contains(id)
                 {
                     Some(*id)
                 } else {
@@ -864,264 +756,7 @@ impl Connection {
             if self.peer_request_stream_id == Some(id) {
                 self.peer_request_stream_id = None;
             }
-            self.push_streams.retain(|_, promise| {
-                let abandoned_before_promise =
-                    promise.request_stream_id == id && promise.state == PushState::PendingPromise;
-                let completed_push_stream =
-                    promise.push_stream_id == Some(id) && promise.state == PushState::Complete;
-                !abandoned_before_promise && !completed_push_stream
-            });
         }
         self.pending_events.pop_front().map(Some).ok_or(Error::Done)
-    }
-
-    /// **STEALTH FEATURE**: Create server push promise for cover traffic
-    /// This generates realistic HTTP/3 server push traffic to mask real data flows
-    fn create_stealth_push_promise(
-        &mut self,
-        path: &str,
-        content_type: &str,
-        size_bytes: usize,
-    ) -> Result<u64, Error> {
-        if !self.is_server {
-            return Err(Error::StreamCreationError);
-        }
-        let request_stream_id = self.peer_request_stream_id.ok_or(Error::Done)?;
-        let peer_max_push_id = self.peer_max_push_id.ok_or(Error::Done)?;
-        let push_id = self.next_push_id;
-        if push_id > peer_max_push_id {
-            return Err(Error::IdError);
-        }
-        self.next_push_id = push_id.checked_add(1).ok_or(Error::IdError)?;
-
-        let request_headers = vec![
-            Header::new(b":method", b"GET"),
-            Header::new(b":path", path.as_bytes()),
-            Header::new(b":scheme", b"https"),
-            Header::new(b":authority", b"cdn.example.com"),
-            Header::new(b"accept", b"*/*"),
-        ];
-        let response_headers = vec![
-            Header::new(b":status", b"200"),
-            Header::new(b"content-type", content_type.as_bytes()),
-            Header::new(b"cache-control", b"public, max-age=31536000"),
-            Header::new(b"content-length", size_bytes.to_string().as_bytes()),
-            Header::new(b"x-cdn-cache", b"HIT"),
-        ];
-
-        // Generate realistic cover payload (fake CSS/JS/images)
-        let cover_payload = match content_type {
-            "text/css" => generate_fake_css(size_bytes),
-            "application/javascript" => generate_fake_js(size_bytes),
-            "image/jpeg" | "image/png" => generate_fake_image_data(size_bytes),
-            _ => vec![0x20; size_bytes], // Generic padding
-        };
-
-        let push_promise = PushPromise {
-            request_headers,
-            response_headers,
-            request_stream_id,
-            push_stream_id: None,
-            state: PushState::PendingPromise,
-            cover_payload,
-            scheduled_at: self.clock.now()
-                + std::time::Duration::from_millis(
-                    50 + (push_id % 200), // Realistic 50-250ms delay
-                ),
-        };
-
-        self.push_streams.insert(push_id, push_promise);
-        // Telemetry
-        crate::telemetry::STEALTH_PUSH_PROMISES.inc();
-        crate::telemetry::STEALTH_PUSH_BYTES
-            .fetch_add(size_bytes as u64, std::sync::atomic::Ordering::Relaxed);
-        Ok(push_id)
-    }
-
-    /// Process scheduled push streams (called from poll)
-    fn process_scheduled_push_streams(&mut self, conn: &mut super::super::Connection) {
-        if self.init_control_stream(conn).is_err() || self.control_stream_id.is_none() {
-            return;
-        }
-        let now = self.clock.now();
-        let mut ready_push_ids = Vec::new();
-
-        for (&push_id, promise) in &self.push_streams {
-            if promise.scheduled_at <= now
-                && matches!(promise.state, PushState::PendingPromise | PushState::Promised)
-            {
-                ready_push_ids.push(push_id);
-            }
-        }
-
-        for push_id in ready_push_ids {
-            let Some(snapshot) = self.push_streams.get(&push_id).cloned() else { continue };
-            if snapshot.state == PushState::PendingPromise {
-                let plan = match self
-                    .prepare_headers_block(snapshot.request_stream_id, &snapshot.request_headers)
-                {
-                    Ok(plan) => plan,
-                    Err(_) => continue,
-                };
-                let (encoded, owns_section, section_stream_id) =
-                    match self.commit_qpack_plan(conn, plan) {
-                        Ok(committed) => committed,
-                        Err(_) => continue,
-                    };
-                let mut payload = Vec::with_capacity(encoded.len().saturating_add(8));
-                Self::encode_varint(push_id, &mut payload);
-                payload.extend_from_slice(&encoded);
-                let mut frame = Vec::with_capacity(payload.len().saturating_add(9));
-                Self::encode_varint(0x05, &mut frame);
-                Self::encode_varint(payload.len() as u64, &mut frame);
-                frame.extend_from_slice(&payload);
-                if !matches!(
-                    conn.stream_send(snapshot.request_stream_id, &frame, false),
-                    Ok(sent) if sent == frame.len()
-                ) {
-                    if owns_section {
-                        self.encoder.rollback_latest_section(section_stream_id);
-                    }
-                    continue;
-                }
-                if let Some(promise) = self.push_streams.get_mut(&push_id) {
-                    promise.state = PushState::Promised;
-                }
-            }
-
-            let Some(snapshot) = self.push_streams.get(&push_id).cloned() else { continue };
-            if snapshot.state != PushState::Promised {
-                continue;
-            }
-            let stream_id = self.next_uni_stream_id;
-            let plan = match self.prepare_headers_block(stream_id, &snapshot.response_headers) {
-                Ok(plan) => plan,
-                Err(_) => continue,
-            };
-            let (encoded, owns_section, section_stream_id) =
-                match self.commit_qpack_plan(conn, plan) {
-                    Ok(committed) => committed,
-                    Err(_) => continue,
-                };
-            let mut prologue = Vec::with_capacity(encoded.len().saturating_add(18));
-            Self::encode_varint(0x01, &mut prologue);
-            Self::encode_varint(push_id, &mut prologue);
-            Self::encode_varint(0x01, &mut prologue);
-            Self::encode_varint(encoded.len() as u64, &mut prologue);
-            prologue.extend_from_slice(&encoded);
-            let Some(next_stream_id) = stream_id.checked_add(4) else {
-                continue;
-            };
-            if !matches!(
-                conn.stream_send(stream_id, &prologue, false),
-                Ok(sent) if sent == prologue.len()
-            ) {
-                if owns_section {
-                    self.encoder.rollback_latest_section(section_stream_id);
-                }
-                continue;
-            }
-            self.next_uni_stream_id = next_stream_id;
-
-            // Register stream with body and switch to DataSending
-            self.streams.insert(
-                stream_id,
-                StreamState {
-                    _headers: snapshot.response_headers,
-                    body_buffer: snapshot.cover_payload,
-                    frame_buffer: Vec::new(),
-                    _received_bytes: 0,
-                    _stream_type: StreamType::Push,
-                    sent_bytes: 0,
-                    fin_sent: false,
-                    fin_received: false,
-                    masque_established: false,
-                    masque_capsule_buffer: Vec::new(),
-                    settings_received: false,
-                    receive_message_state: ReceiveMessageState::AwaitingHeaders,
-                },
-            );
-            if let Some(promise) = self.push_streams.get_mut(&push_id) {
-                promise.push_stream_id = Some(stream_id);
-                promise.state = PushState::DataSending;
-            }
-            crate::optimize::telemetry::H3_FRAMES
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::optimize::telemetry::H3_HEADERS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    fn process_push_data(&mut self, conn: &mut super::super::Connection) {
-        const CHUNK: usize = 16 * 1024;
-        let mut completed = Vec::new();
-        for (stream_id, st) in self.streams.iter_mut() {
-            if st._stream_type != StreamType::Push || st.fin_sent {
-                continue;
-            }
-            let total = st.body_buffer.len();
-            if st.sent_bytes < total {
-                let remaining = total - st.sent_bytes;
-                let take = remaining.min(CHUNK);
-                let start = st.sent_bytes;
-                let end = start + take;
-                let mut frame = Vec::new();
-                frame.push(0x00); // DATA
-                Self::encode_varint(take as u64, &mut frame);
-                frame.extend_from_slice(&st.body_buffer[start..end]);
-                let fin = end == total;
-                if conn.stream_send(*stream_id, &frame, fin).is_ok() {
-                    st.sent_bytes += take;
-                    st.fin_sent = fin;
-                    crate::optimize::telemetry::H3_FRAMES
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    crate::optimize::telemetry::H3_DATA_BYTES
-                        .fetch_add(take as u64, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            if st.fin_sent {
-                completed.push(*stream_id);
-            }
-        }
-        for sid in completed {
-            self.finished_streams.insert(sid);
-            self.pending_events.push_back((sid, Event::Finished));
-            // Mark corresponding push promise as complete
-            if let Some(p) =
-                self.push_streams.values_mut().find(|promise| promise.push_stream_id == Some(sid))
-            {
-                p.state = PushState::Complete;
-            }
-        }
-    }
-
-    /// **STEALTH FEATURE**: Generate burst of cover traffic push promises
-    /// Simulates realistic web page loading with multiple resources
-    pub(crate) fn generate_stealth_cover_burst(
-        &mut self,
-        base_path: &str,
-    ) -> Result<Vec<u64>, Error> {
-        if !self.is_server
-            || self.peer_request_stream_id.is_none()
-            || self.peer_max_push_id.is_none()
-        {
-            return Ok(Vec::new());
-        }
-        let mut push_ids = Vec::new();
-        let plan =
-            Self::build_stealth_cover_resource_plan(base_path, crate::transport::rand::rand_u64());
-        let available = self
-            .peer_max_push_id
-            .and_then(|maximum| maximum.checked_sub(self.next_push_id))
-            .and_then(|remaining| remaining.checked_add(1))
-            .and_then(|remaining| usize::try_from(remaining).ok())
-            .unwrap_or(0);
-
-        for (path, content_type, size) in plan.into_iter().take(available) {
-            let push_id = self.create_stealth_push_promise(&path, content_type, size)?;
-            push_ids.push(push_id);
-        }
-
-        Ok(push_ids)
     }
 }
