@@ -41,6 +41,7 @@ fn main() {
         expect: HashMap::new(),
         client_scid_len: FALLBACK_CID_LEN,
         server_scid_len: FALLBACK_CID_LEN,
+        initial_dcid: None,
     };
     let mut report = Report { private_inconsistent: !private.consistent, ..Default::default() };
     for datagram in &pcap.datagrams {
@@ -379,6 +380,9 @@ struct State<'a> {
     expect: HashMap<(u8, bool), u64>,
     client_scid_len: usize,
     server_scid_len: usize,
+    // The original DCID from the client's first Initial — Initial secrets
+    // derive from this CID for BOTH directions, not from per-packet DCIDs.
+    initial_dcid: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -504,6 +508,9 @@ fn analyze_datagram(datagram: &Datagram, state: &mut State, report: &mut Report)
             } else {
                 state.server_scid_len = scid_len as usize;
             }
+            if is_initial && c2s && state.initial_dcid.is_none() {
+                state.initial_dcid = Some(dcid.to_vec());
+            }
             if is_initial {
                 let Some((tok_len, n)) = read_varint(&buf[pos..]) else { return };
                 pos += n + tok_len as usize;
@@ -603,9 +610,15 @@ fn analyze_long(
     state: &mut State,
     report: &mut Report,
 ) {
+    let _ = dcid;
     let label = if space == 0 { "initial" } else { "handshake" };
     let keys = if space == 0 {
-        let initial_secret = quic_kdf::derive_initial_secret(dcid, version);
+        let Some(initial_dcid) = &state.initial_dcid else {
+            report.long_failed += 1;
+            println!("  {label} dir={}: no original DCID learned yet", dir(c2s));
+            return;
+        };
+        let initial_secret = quic_kdf::derive_initial_secret(initial_dcid, version);
         let side = if c2s {
             quic_kdf::derive_client_initial_secret(&initial_secret)
         } else {
