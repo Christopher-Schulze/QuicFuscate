@@ -1828,3 +1828,225 @@ fn quic_repair_epoch_floor_advances_on_admission() {
     conn.absorb_quic_fec_datagrams();
     assert_eq!(conn.fec_epoch_rejects(), 1);
 }
+
+// ---- TODO-1061: Maybenot wire-defense adapter ----
+
+/// Serialized pad-on-send machine shared with the runtime tests.
+fn maybenot_pad_machine() -> String {
+    super::maybenot::tests::machine_on_normal_sent(super::maybenot::tests::pad_action(false, 0.0))
+}
+
+fn maybenot_block_machine(duration_us: f64) -> String {
+    super::maybenot::tests::machine_on_normal_sent(super::maybenot::tests::block_action(
+        false,
+        false,
+        0.0,
+        duration_us,
+    ))
+}
+
+#[test]
+fn maybenot_disabled_without_machine() {
+    // No preset ships a machine: stealth-mode connections carry no
+    // runtime unless the operator pins one.
+    assert!(test_connection_with(StealthConfig::stealth()).maybenot.is_none());
+    assert!(test_connection_with(StealthConfig::dynamic()).maybenot.is_none());
+}
+
+#[test]
+fn maybenot_invalid_machine_fails_closed() {
+    let mut cfg = StealthConfig::stealth();
+    cfg.maybenot_machine = Some("not a serialized machine".to_string());
+    let connection = test_connection_with(cfg);
+    assert!(connection.maybenot.is_none(), "invalid machine must disable, not crash");
+}
+
+#[test]
+fn maybenot_machine_ignored_outside_stealth_family() {
+    for mut cfg in [StealthConfig::off(), StealthConfig::performance()] {
+        cfg.maybenot_machine = Some(maybenot_pad_machine());
+        let mode = cfg.mode;
+        let connection = test_connection_with(cfg);
+        assert!(connection.maybenot.is_none(), "{mode:?} must ignore a pinned machine");
+    }
+}
+
+#[test]
+fn maybenot_padding_drops_when_wire_budget_exhausted() {
+    let mut cfg = StealthConfig::stealth();
+    cfg.maybenot_machine = Some(maybenot_pad_machine());
+    cfg.wire_cap_bytes_per_sec = 1;
+    cfg.wire_cap_bytes_per_burst = 1;
+    let mut connection = test_connection_with(cfg);
+    connection.conn.set_wire_ledger(
+        connection.stealth_manager.build_wire_ledger(crate::time_source::now_instant()),
+    );
+
+    let now = Instant::now();
+    connection.maybenot.as_mut().expect("runtime").note_wire_sent(now);
+    let before = crate::telemetry::MAYBENOT_PADDING_BUDGET_DROPPED.get();
+    connection.maybenot_tick(now);
+
+    assert_eq!(
+        crate::telemetry::MAYBENOT_PADDING_BUDGET_DROPPED.get(),
+        before + 1,
+        "a matured pad over the cap is dropped, never emitted"
+    );
+    assert!(connection.maybenot.as_mut().expect("runtime").next_pending_pad(now).is_none());
+}
+
+#[test]
+fn maybenot_block_clamps_to_pto_quarter() {
+    let mut cfg = StealthConfig::stealth();
+    cfg.maybenot_machine = Some(maybenot_block_machine(1_000_000.0));
+    let mut connection = test_connection_with(cfg);
+    let now = Instant::now();
+    connection.maybenot.as_mut().expect("runtime").note_wire_sent(now);
+    connection.maybenot_tick(now);
+
+    let pto = connection.conn.current_pto_delay();
+    let until =
+        connection.maybenot.as_ref().expect("runtime").next_deadline().expect("block window armed");
+    assert!(
+        until.duration_since(now) <= pto / 4 + Duration::from_millis(1),
+        "block window {:?} exceeds pto/4 ({pto:?})",
+        until.duration_since(now)
+    );
+}
+
+/// Paired fixture that keeps the server end so tests can make the client
+/// receive a real datagram (and thereby a pending ACK).
+fn test_connection_pair_with(
+    stealth: StealthConfig,
+) -> (QuicFuscateConnection, crate::transport::Connection) {
+    use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+    let BenchConnectionPair { client, server, .. } = bench_paired_1rtt_connections();
+    let optimization_manager = Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
+    let stealth_manager = Arc::new(StealthManager::new(
+        stealth,
+        Arc::clone(&optimization_manager),
+        Arc::new(CryptoManager::new()),
+    ));
+    let connection = QuicFuscateConnection::new(ConnectionParams {
+        clock: crate::time_source::ProtocolClock::default(),
+        conn: Box::new(client),
+        local_addr: "127.0.0.1:29101".parse().unwrap(),
+        peer_addr: "127.0.0.1:29102".parse().unwrap(),
+        host_header: String::new(),
+        sni_host: None,
+        qkey_auth_token_hex: None,
+        stealth_manager,
+        optimization_manager,
+        fec_config: FecConfig::default(),
+        tunnel_ingress_normalizer: PacketNormalizer::new(OsFingerprintProfile::Disabled),
+        private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
+        private_packet_protection_family: None,
+        private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
+    });
+    (connection, server)
+}
+
+#[test]
+fn maybenot_block_never_holds_pure_acks() {
+    let mut cfg = StealthConfig::stealth();
+    cfg.maybenot_machine = Some(maybenot_block_machine(1_000_000.0));
+    let (mut connection, mut server) = test_connection_pair_with(cfg);
+    let now = Instant::now();
+    connection.maybenot.as_mut().expect("runtime").note_wire_sent(now);
+    connection.maybenot_tick(now);
+    assert!(connection.maybenot_blocks_send(now), "live block must gate data production");
+
+    // A real received datagram leaves a pending ACK; pure-ACK output
+    // must keep flowing inside the blocking window.
+    server.stream_send(1, b"ack-me", true).expect("server stream data");
+    let mut packet = [0u8; 1600];
+    let (len, _) = server.send(&mut packet).expect("server datagram");
+    connection.recv(&packet[..len]).expect("accepted datagram");
+    assert!(
+        connection.conn.has_pending_application_ack(),
+        "accepted ack-eliciting datagram must leave a pending ACK"
+    );
+    assert!(!connection.maybenot_blocks_send(now), "pure-ACK output is never blocked");
+}
+
+#[test]
+fn maybenot_send_and_emit_events_reach_runtime() {
+    let mut cfg = StealthConfig::stealth();
+    cfg.maybenot_machine = Some(maybenot_pad_machine());
+    cfg.wire_cap_bytes_per_sec = 1_000_000;
+    cfg.wire_cap_bytes_per_burst = 1_000_000;
+    let mut connection = test_connection_with(cfg);
+    connection.conn.set_wire_ledger(
+        connection.stealth_manager.build_wire_ledger(crate::time_source::now_instant()),
+    );
+    let remaining = |connection: &mut QuicFuscateConnection| {
+        connection
+            .conn
+            .wire_ledger_mut()
+            .map(|ledger| ledger.remaining(crate::time_source::now_instant()))
+            .expect("ledger")
+    };
+    let before = remaining(&mut connection);
+
+    // Produce a real datagram through the sealed send path.
+    connection.conn.stream_send(0, b"wire-event-payload", false).expect("stream data");
+    let mut wire = vec![0u8; 1600];
+    let (written, _) = connection.send_with_info(&mut wire).expect("send poll");
+    assert!(written > 0, "stream data must produce a datagram");
+
+    // NormalSent reached the machine: the zero-timeout pad action is now
+    // armed — the runtime reports a deadline.
+    assert!(
+        connection.maybenot.as_ref().expect("runtime").next_deadline().is_some()
+            || connection
+                .maybenot
+                .as_mut()
+                .expect("runtime")
+                .next_pending_pad(Instant::now())
+                .is_some(),
+        "send-path wire events must arm the machine"
+    );
+
+    // Maturing the pad spends the shared ledger (TODO-1052 authority).
+    connection.maybenot_tick(Instant::now());
+    let after = remaining(&mut connection);
+    assert!(after < before, "maybenot pad must debit the shared ledger");
+}
+
+#[test]
+fn maybenot_recv_events_reach_runtime() {
+    use ::maybenot::action::Action;
+    use ::maybenot::event::Event;
+    use ::maybenot::state::{State, Trans};
+    use enum_map::enum_map;
+
+    // state0 --NormalRecv--> state1 (SendPadding): a received datagram
+    // arms the pad deadline.
+    let s0 = State::new(enum_map! {
+        Event::NormalRecv => vec![Trans(1, 1.0)],
+        _ => vec![],
+    });
+    let mut s1 = State::new(enum_map! { _ => vec![] });
+    s1.action = Some(Action::SendPadding {
+        bypass: false,
+        replace: false,
+        timeout: super::maybenot::tests::const_us(0.0),
+        limit: None,
+    });
+    let mut cfg = StealthConfig::stealth();
+    cfg.maybenot_machine = Some(super::maybenot::tests::generous_machine(vec![s0, s1]));
+    let (mut connection, mut server) = test_connection_pair_with(cfg);
+
+    // Peer emits real stream data; the client accepts the datagram.
+    server.stream_send(1, b"peer-bytes", true).expect("server stream data");
+    let mut packet = [0u8; 1600];
+    let (len, _) = server.send(&mut packet).expect("server datagram");
+    connection.recv(&packet[..len]).expect("accepted datagram");
+
+    // TunnelRecv+NormalRecv armed the machine: a pad deadline exists.
+    let rt = connection.maybenot.as_mut().expect("runtime");
+    assert!(
+        rt.next_deadline().is_some() || rt.next_pending_pad(Instant::now()).is_some(),
+        "accepted datagrams must feed the machine"
+    );
+}

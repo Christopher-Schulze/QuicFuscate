@@ -521,7 +521,7 @@
 - Detail: `docs/todo/todo-1060-brain-sensors-not-pattern.md`
 
 ### TODO-1061 - Maybenot as the measured wire defense
-- OPEN. Adapter only until a simulator number exists. Not the default. Cap and PTO clamp are mandatory. No bandit beside it.
+- DONE (adapter). `maybenot = "2.2.2"` pinned on the connection crate; `MaybenotRuntime` (one `Framework` per connection) reports `NormalSent`/`TunnelSent`/`TunnelRecv`/`NormalRecv`/`PaddingSent` — direction-only events, upstream carries no length field. `SendPadding` becomes a QUIC `PADDING` frame filled to `path_mtu - 48`, paid from `try_spend_wire_cover` (TODO-1052) or dropped with `MAYBENOT_PADDING_BUDGET_DROPPED`. `BlockOutgoing` opens a send block clamped to `pto/4` that never holds pure ACKs; held pads surface after `BlockingEnd`. Operator opt-in via `stealth.maybenot_machine`; `off`/`performance` ignore it, invalid strings fail closed, no preset ships one and `Stealth MAX` stays on the persona trace. Simulator harness `scripts/benchmarks/maybenot_sim.rs` ran a smoke trace (14.29% pad share); real WF overhead/accuracy run not performed — command recorded in the TODO file.
 - Detail: `docs/todo/todo-1061-maybenot-wire-defense.md`
 
 ### TODO-1062 - Stop emitting the synthetic ClientHello

@@ -852,6 +852,20 @@ impl StealthManager {
         self.config.mode
     }
 
+    /// Serialized `maybenot` machine for the wire-defense adapter
+    /// (TODO-1061), or `None`. The adapter only runs on stealth-family
+    /// modes; `off`/`performance` ignore a pinned machine, and no preset
+    /// ships one by default.
+    pub(crate) fn maybenot_machine(&self) -> Option<&str> {
+        let stealth_family =
+            !matches!(self.config.mode, StealthMode::Off | StealthMode::Performance);
+        if stealth_family {
+            self.config.maybenot_machine.as_deref()
+        } else {
+            None
+        }
+    }
+
     /// Returns true if the manager is running in Intelligent (adaptive) mode.
     pub(crate) fn is_intelligent_runtime(&self) -> bool {
         matches!(self.config.mode, StealthMode::Dynamic)

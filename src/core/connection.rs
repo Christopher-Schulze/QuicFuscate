@@ -9,6 +9,7 @@
 // stealth ownership for the canonical connection lifecycle used by this fork.
 
 mod h3_runtime;
+mod maybenot;
 mod private_packet_protection;
 mod request_headers;
 mod send;
@@ -127,6 +128,9 @@ pub struct QuicFuscateConnection {
     /// Settled disguise-migration outcome for the runtime loop (TODO-1056):
     /// `true` = validated, commit the new socket; `false` = failed, roll back.
     disguise_migration_outcome: Option<bool>,
+    /// TODO-1061: Maybenot wire-defense runtime. `None` unless the operator
+    /// pins a serialized machine on a stealth-family mode.
+    maybenot: Option<maybenot::MaybenotRuntime>,
     last_telemetry: std::time::Instant,
     // Observer for transport telemetry -> FEC/ACK policy coupling.
     transport_observer: Arc<FecTransportObserver>,
@@ -612,7 +616,7 @@ impl QuicFuscateConnection {
                 &environment,
                 crate::optimize::global_pool(),
             ),
-            stealth_manager: params.stealth_manager,
+            stealth_manager: params.stealth_manager.clone(),
             optimization_manager: params.optimization_manager,
             tunnel_ingress_normalizer: params.tunnel_ingress_normalizer,
             stats: ConnectionStats::default(),
@@ -641,6 +645,13 @@ impl QuicFuscateConnection {
             h3_tunnel_downlink_fallback_reported: false,
             pending_disguise_migration: None,
             disguise_migration_outcome: None,
+            maybenot: params.stealth_manager.maybenot_machine().and_then(|serialized| {
+                maybenot::MaybenotRuntime::new(serialized, clock.now())
+                    .map_err(|error| {
+                        log::warn!("maybenot adapter disabled: {error}");
+                    })
+                    .ok()
+            }),
             last_telemetry: clock.now(),
             transport_observer: obs.clone(),
             masque_cb: None,
@@ -1216,6 +1227,9 @@ impl QuicFuscateConnection {
         let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
         match self.conn.recv(data, &recv_info) {
             Ok(_) => {
+                if let Some(runtime) = self.maybenot.as_mut() {
+                    runtime.note_wire_recv(self.clock.now());
+                }
                 self.absorb_quic_fec_datagrams();
                 Ok(())
             }

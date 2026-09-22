@@ -1304,6 +1304,16 @@ impl Connection {
         }
     }
 
+    /// Queues a QUIC PADDING frame of `len` zero bytes into the next
+    /// outgoing 1-RTT packet (TODO-1061). PADDING is not ack-eliciting —
+    /// unlike a cover PING it adds wire bytes without soliciting an ACK,
+    /// which is what a Maybenot `SendPadding` action asks for.
+    pub(crate) fn queue_cover_padding(&mut self, len: usize) {
+        if self.is_established() && len > 0 {
+            Self::queue_control_frame(&mut self.pending_control, Frame::Padding { len });
+        }
+    }
+
     /// Pad a short header out to the header-protection sample and set the
     /// packet-number length bits that AEAD authenticates.
     #[inline(always)]

@@ -252,6 +252,17 @@ padding_strategy = "persona-trace"
 # wire_cap_bytes_per_burst = 16384
 max_padding_size = 256  # bytes (256 for auto, 2048 for max)
 
+# Maybenot wire defense (TODO-1061): an operator-pinned serialized
+# `maybenot` machine (base64 zlib string, e.g. produced by maybenot-gen).
+# One machine runs per connection on the send/recv event stream; its
+# SendPadding becomes QUIC PADDING charged to the shared wire budget above
+# and its BlockOutgoing becomes a send block clamped to pto/4 that never
+# holds pure ACK output. No machine loads by default, `off` and
+# `performance` ignore the key, and invalid strings disable the adapter
+# (fail closed, warning logged). `stealth` and `Stealth MAX` keep the
+# persona trace until a simulator run justifies a specific machine.
+# maybenot_machine = "02eNpjYEAHjOgCAAA0AAI="
+
 # Custom cover targets are configured via reality_cover_targets above.
 # (The deprecated fronting_domains alias is still accepted and maps onto it.)
 

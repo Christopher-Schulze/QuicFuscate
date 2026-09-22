@@ -4,7 +4,7 @@ title: Maybenot as the measured wire defense
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1052, TODO-1053, TODO-1060]
 ---
@@ -15,47 +15,74 @@ depends_on: [TODO-1052, TODO-1053, TODO-1060]
 
 Maybenot (WPES 2023, crate 2.2.2 as of 2025-09-12) is a Rust runtime for traffic-analysis defenses. Machines take wire events and emit `SendPadding` or `BlockOutgoing` with hard limits. Upstream ships machines for FRONT and RegulaTor, plus a simulator. That is the replacement for the bandit, not a fifth padding strategy. It is not a cipher.
 
-## Current code
+## Current code (post-change)
 
-- No `maybenot` dependency.
-- Padding and delay are the presets plus the brain. TODO-1060 removes the brain's shape outputs.
+- `maybenot = "2.2.2"` pinned on the crate that owns the connection send
+  loop (root `quicfuscate`, not `qf-crypto`). `maybenot-simulator = "2.2.1"`
+  rides the `benches` feature only.
+- `src/core/connection/maybenot.rs`: per-connection `MaybenotRuntime`
+  wrapping `maybenot::Framework<Vec<Machine>, SmallRng, Instant>` with the
+  integrator-owned state the upstream contract requires (action timers,
+  internal timers, blocking window, bypass tracking).
+- Config path: `stealth.maybenot_machine = "<serialized machine>"` (TOML
+  key in `qf-stealth` + `qf-engine-types`). `StealthManager::maybenot_machine()`
+  returns it only on stealth-family modes; `off`/`performance` ignore the
+  key. No preset ships one. An invalid string disables the adapter with a
+  warning (fail closed).
+- Send path: `NormalSent` after `conn.send` produced a datagram,
+  `TunnelSent` at the final emit point (`emit_queued_packet` and the raw
+  emit tail), `PaddingSent` when a machine pad is queued. FEC repairs and
+  repair-ACK reports that bypass `conn.send` report `NormalSent` when they
+  enter the wire queue.
+- Recv path: `TunnelRecv` + `NormalRecv` after `conn.recv` accepts a
+  datagram (`deliver_wire_payload`). Upstream `TriggerEvent` carries no
+  length field — direction-only per-datagram events are the honest
+  fulfillment of "lengths and direction only"; no payload, address or
+  timing metadata crosses the boundary.
+- `SendPadding` matures into a QUIC `PADDING` frame of
+  `effective_path_mtu - 48` queued before the next seal and charged to
+  `try_spend_wire_cover` (TODO-1052). A denied spend drops the action and
+  bumps `MAYBENOT_PADDING_BUDGET_DROPPED` — no private overhead channel.
+- `BlockOutgoing` opens a send block clamped to `pto / 4` (same bound as
+  TODO-1053); a zero/unknown PTO yields no block. `maybenot_blocks_send`
+  returns false when the only sendable is the ACK queue — pure ACKs flow.
+  Pads during a non-bypassable block are held (upstream "queue padding"),
+  bypass pads on bypassable blocks ride the next allowed packet.
+- `next_send_deadline()` folds in armed actions, internal timers and the
+  blocking-window end so the runtime wakes exactly when the machine needs
+  it.
 
-## Target
+## Simulator
 
-- After seal, report sent and received ciphertext lengths into one Maybenot instance on the connection.
-- `SendPadding` becomes QUIC PADDING before the next seal, charged to TODO-1052. If the cap is hit, drop the action.
-- `BlockOutgoing` becomes a send block clamped by TODO-1053 (`< pto/4`). Pure ACKs are not blocked.
-- Machine bytes are the TODO-1052 cap. No private overhead.
-- Do not ship a machine as the default until the simulator reports overhead and accuracy against at least one published classifier (DF or a documented successor). `Stealth MAX` may select that machine only after the number is written in this file.
-- Until then, `stealth` and `Stealth MAX` stay on the persona trace.
+- Harness: `scripts/benchmarks/maybenot_sim.rs` (`[[bench]] maybenot_sim`,
+  `benches` feature, `maybenot-simulator` 2.2.1). It parses an upstream
+  `nanos,{s,r}` trace, runs `sim()` with the operator's machine on the
+  client, prints padding share vs sent and vs input plus blocked time,
+  and can write the defended trace for an external classifier run.
+- Smoke run (proves the harness works end-to-end, NOT a WF evaluation):
+  upstream docs.rs example machine over the 10-packet example trace →
+  1 padding packet on 6 normal sends, padding share of sent 14.29%,
+  padding vs input 10.00%, blocked 0us.
+- Real WF evaluation: **not run**. There is no website-fingerprinting
+  trace and no published classifier (DF/deepcoffin) in this repo. The
+  command that runs the overhead half is:
 
-## Non-goals
+      cargo bench --bench maybenot_sim --features benches -- \
+          --machine <serialized-machine-file> \
+          --trace <input.trace> [--delay-ms 10] [--out defended.trace]
 
-- Do not run Maybenot beside the bandit.
-- Do not vendor a fork. Pin crates.io `maybenot`.
-- No frontend visual change.
-- No claim of beating a classifier before the simulator runs.
+  Accuracy then requires scoring `defended.trace` with a published WF
+  classifier — deliberately not claimed here.
 
-## Design
+## Sub-Tasks (final)
 
-1. Add the dependency on the crate that owns the connection send loop. Keep it out of `qf-crypto`.
-2. Integration point: `src/core/connection/send.rs` after a datagram is sealed and its wire length is known, and the receive path after a datagram is accepted. Events are lengths and direction only.
-3. Actions queue on the connection and are consumed by the existing padder and the clamped delay. One machine per connection.
-4. The simulator is a feature-gated example or a script under `scripts/benchmarks/`. It reads a trace and writes overhead and accuracy into this file. No network.
+Recorded above under Simulator — all boxes checked except the deferred
+WF evaluation, which stays open until a trace and classifier exist.
 
-## Sub-Tasks
+## Acceptance (final)
 
-- [ ] Pin `maybenot` and compile the adapter behind stealth modes.
-- [ ] Unit tests: padding dropped at the cap, block clamped at `pto/4`.
-- [ ] Simulator run for one upstream machine. Record overhead and accuracy here.
-- [ ] Do not flip `Stealth MAX` onto that machine in the same change as the adapter.
-
-## Acceptance
-
-- Adapter tests pass.
-- Default config does not load a Maybenot machine.
-- This file contains either simulator numbers or an explicit "not run" plus the command that will run them.
-- No bandit-chosen padding remains (TODO-1060).
+Recorded above — all adapter acceptance items verified; classifier
+accuracy explicitly not claimed.
 
 ## Risks
 

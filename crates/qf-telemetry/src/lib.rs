@@ -648,6 +648,10 @@ pub static COVER_PING_BUDGET_SKIPPED: Counter = Counter::new();
 /// Idle-timeout keepalive PINGs emitted past `max_idle_timeout/2` of
 /// silence (TODO-1054): counted as a keepalive, not as persona mimicry.
 pub static COVER_PING_IDLE_KEEPALIVE: Counter = Counter::new();
+/// Maybenot `SendPadding` actions dropped because the shared wire byte
+/// budget was exhausted at consume time (TODO-1061): the machine never
+/// spends bytes outside the TODO-1052 ledger.
+pub static MAYBENOT_PADDING_BUDGET_DROPPED: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

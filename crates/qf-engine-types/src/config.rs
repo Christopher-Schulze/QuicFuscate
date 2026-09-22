@@ -270,6 +270,12 @@ pub struct StealthSection {
     /// `mode = "dynamic"` — the image preset owns the whole wire shape.
     #[serde(default)]
     pub dynamic_wire_image: qf_stealth::DynamicWireImage,
+    /// Optional serialized `maybenot` machine for the wire-defense adapter
+    /// (TODO-1061). `None` by default — no machine loads unless an operator
+    /// pins one after simulator evidence. Not a shape key: stays effective
+    /// under `mode = "dynamic"`.
+    #[serde(default)]
+    pub maybenot_machine: Option<String>,
     /// Enable uTLS/ClientHello persona spoofing. Effective only when mode is not Off.
     pub use_utls: bool,
     /// Removed wire behavior (TODO-1048): an SNI that differs from the hop's
@@ -343,6 +349,7 @@ impl Default for StealthSection {
         Self {
             mode: StealthMode::Dynamic,
             dynamic_wire_image: qf_stealth::DynamicWireImage::Stealth,
+            maybenot_machine: None,
             use_utls: true,
             enable_domain_fronting: false,
             enable_http3_masquerading: true,
@@ -432,6 +439,7 @@ impl StealthSection {
         runtime.enable_network_fingerprint_normalization =
             self.enable_network_fingerprint_normalization;
         runtime.suppress_icmp_unreachable = self.suppress_icmp_unreachable;
+        runtime.maybenot_machine = self.maybenot_machine.clone();
         runtime.enable_doh = self.enable_doh;
         runtime.doh_provider = self.doh_provider.clone();
         if !dynamic {

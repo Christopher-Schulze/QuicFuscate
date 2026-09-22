@@ -30,18 +30,73 @@ impl QuicFuscateConnection {
     /// Earliest instant the caller should poll `send` again.
     ///
     /// This merges outer pacing, the stealth/reorder gather-window edges,
-    /// QUIC recovery, the TLS profile handshake-readiness deadline, and
-    /// the one transport-owned traffic-analysis deadline.
+    /// QUIC recovery, the TLS profile handshake-readiness deadline, the
+    /// one transport-owned traffic-analysis deadline, and any pending
+    /// Maybenot action/internal timer (TODO-1061).
     pub fn next_send_deadline(&self) -> Option<Instant> {
         [
             self.next_outbound_release_deadline(),
             self.conn.recovery_deadline(),
             self.conn.traffic_analysis_deadline(),
             self.conn.handshake_send_ready_at(),
+            self.maybenot.as_ref().and_then(|rt| rt.next_deadline()),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// Maybenot padding fills the next 1-RTT packet up to the confirmed
+    /// path MTU (TODO-1061): a matured `SendPadding` becomes a PADDING
+    /// frame of `effective_path_mtu - MAYBENOT_HDR_TAG_OVERHEAD`, so the
+    /// emitted datagram looks like ordinary bulk output instead of a
+    /// distinctively sized cell. The reserve covers a 1-RTT short header
+    /// with a maximum-length DCID (1 + 20 + 4) plus the AEAD tag (16)
+    /// plus slack.
+    pub(crate) const MAYBENOT_HDR_TAG_OVERHEAD: usize = 48;
+
+    /// Wire length of one matured `SendPadding` action: fill the path
+    /// datagram, clamped so a degenerate MTU never produces a zero pad.
+    fn maybenot_pad_len(&self) -> usize {
+        self.conn.effective_path_mtu().saturating_sub(Self::MAYBENOT_HDR_TAG_OVERHEAD).max(1)
+    }
+
+    /// Expires armed action timers, internal timers and the blocking
+    /// window, then turns matured `SendPadding` actions into queued QUIC
+    /// PADDING frames paid from the shared wire ledger (TODO-1052). A
+    /// ledger denial drops the action — no private byte channel exists.
+    pub(crate) fn maybenot_tick(&mut self, now: Instant) {
+        if self.maybenot.is_none() {
+            return;
+        }
+        let len = self.maybenot_pad_len();
+        let runtime = self.maybenot.as_mut().expect("checked above");
+        runtime.tick(now, self.conn.current_pto_delay());
+        while let Some(pad) = runtime.next_pending_pad(now) {
+            if self.conn.try_spend_wire_cover(len as u64) {
+                self.conn.queue_cover_padding(len);
+                runtime.note_padding_sent(pad.machine, now);
+            } else {
+                crate::telemetry::MAYBENOT_PADDING_BUDGET_DROPPED.inc();
+            }
+        }
+    }
+
+    /// Whether a matured `BlockOutgoing` window currently gates outgoing
+    /// traffic. Pure-ACK output is never blocked (TODO-1061): when the
+    /// only pending sendable is the ACK queue, the block yields false so
+    /// loss-recovery feedback keeps flowing.
+    pub(crate) fn maybenot_blocks_send(&mut self, now: Instant) -> bool {
+        let Some(runtime) = self.maybenot.as_ref() else {
+            return false;
+        };
+        if !runtime.blocking_active(now) {
+            return false;
+        }
+        let ack_only = self.conn.has_pending_application_ack()
+            && self.conn.dgram_send_queue_len() == 0
+            && !self.conn.has_sendable_path_control();
+        !ack_only
     }
 
     /// TODO-1015: maximum hold applied to a bulk reorder window. The draw
@@ -250,6 +305,11 @@ impl QuicFuscateConnection {
         )
         .map_err(crate::error::ConnectionError::Transport)?;
         self.packet_id_counter = self.packet_id_counter.wrapping_add(1);
+        // TODO-1061: this datagram bypasses `conn.send`, so the queued
+        // report is where the wire decides to send it (NormalSent).
+        if let Some(runtime) = self.maybenot.as_mut() {
+            runtime.note_wire_sent(self.clock.now());
+        }
         self.outgoing_fec_packets.push_front(OutgoingFecPacket {
             packet,
             wire_meta: None,
@@ -428,6 +488,14 @@ impl QuicFuscateConnection {
             .post_handshake_datagram_ready()
             .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
         let path_control_pending = self.conn.has_sendable_path_control();
+
+        // TODO-1061: expire Maybenot timers once per send poll and charge
+        // matured padding actions onto the ledger before production.
+        // Internal timers and block windows age regardless of pending
+        // path-control traffic.
+        if established {
+            self.maybenot_tick(now);
+        }
 
         // --- TODO-1006 REPAIR-ACK REPORT ---
         // The wire receiver logged decoder recoveries for the sender:
@@ -1174,6 +1242,11 @@ impl QuicFuscateConnection {
                         crate::telemetry::FEC_REPAIRS_BUDGET_DROPPED.inc();
                         continue;
                     }
+                    // TODO-1061: a freshly coded repair never passed
+                    // `conn.send`; queueing is its send decision.
+                    if let Some(runtime) = self.maybenot.as_mut() {
+                        runtime.note_wire_sent(now);
+                    }
                 }
                 self.outgoing_fec_packets.push_back(OutgoingFecPacket {
                     wire_meta,
@@ -1263,6 +1336,9 @@ impl QuicFuscateConnection {
             let (systematic, source_payload_bytes) = shape;
             self.fec.observe_wire_send(systematic, source_payload_bytes, len);
         }
+        if let Some(runtime) = self.maybenot.as_mut() {
+            runtime.note_wire_emit(now);
+        }
         self.record_paced_packet(now, len, congestion_controlled);
         Ok((len, send_info))
     }
@@ -1312,6 +1388,14 @@ impl QuicFuscateConnection {
             self.send_yield_counts[0].set(self.send_yield_counts[0].get() + 1);
             return Ok((0, zero_send_info(now)));
         }
+        // TODO-1061: a matured Maybenot block stalls production like the
+        // deferral window — nothing is produced, so the transport's own
+        // datagram queue holds the backlog as honest backpressure. Pure
+        // ACKs keep flowing.
+        if established && self.maybenot_blocks_send(now) {
+            self.send_yield_counts[5].set(self.send_yield_counts[5].get() + 1);
+            return Ok((0, zero_send_info(now)));
+        }
         let (write, mut send_info) = match self.conn.send(buf) {
             Ok(v) => v,
             Err(crate::error::ConnectionError::Done) => {
@@ -1335,6 +1419,10 @@ impl QuicFuscateConnection {
             }
             self.send_yield_counts[3].set(self.send_yield_counts[3].get() + 1);
             return Ok((0, zero_send_info(now)));
+        }
+
+        if let Some(runtime) = self.maybenot.as_mut() {
+            runtime.note_wire_sent(now);
         }
 
         let delay_opt = if send_info.path_control {
@@ -1406,6 +1494,9 @@ impl QuicFuscateConnection {
         );
         if self.fec.telemetry_enabled() {
             self.fec.observe_wire_send(true, write, write);
+        }
+        if let Some(runtime) = self.maybenot.as_mut() {
+            runtime.note_wire_emit(now);
         }
         self.record_paced_packet(now, write, send_info.congestion_controlled);
         Ok((write, send_info))

@@ -388,6 +388,11 @@ pub fn export_telemetry_text() -> String {
         );
         let _ = writeln!(
             out,
+            "quicfuscate_maybenot_padding_budget_dropped_total {}",
+            MAYBENOT_PADDING_BUDGET_DROPPED.get()
+        );
+        let _ = writeln!(
+            out,
             "quicfuscate_disguise_migration_failures_total {}",
             DISGUISE_MIGRATION_FAILURES.get()
         );

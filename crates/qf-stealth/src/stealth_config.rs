@@ -49,6 +49,12 @@ pub struct StealthConfig {
     /// The wire image frozen at connect when `mode` is `Dynamic`
     /// (TODO-1059). Inert in every other mode.
     pub dynamic_wire_image: DynamicWireImage,
+    /// Optional serialized `maybenot` machine for the wire-defense adapter
+    /// (TODO-1061). `None` by default: no preset ships a machine, and no
+    /// machine loads unless an operator pins one after simulator evidence.
+    /// The adapter only runs on stealth-family modes (`stealth`,
+    /// `Stealth MAX`, `dynamic`, `manual`); `off`/`performance` ignore it.
+    pub maybenot_machine: Option<String>,
     /// Cover-target hostnames for the Reality relay path (TODO-1048).
     ///
     /// Each entry is a `host` or `host:port` whose certificate the hop
@@ -291,6 +297,7 @@ impl StealthConfig {
             // Dynamic disabled
             dynamic_enabled: false,
             dynamic_wire_image: DynamicWireImage::Stealth,
+            maybenot_machine: None,
             enable_http3_masquerading: true,
             use_tls_cover: true,
             use_qpack_headers: true,
@@ -345,6 +352,7 @@ impl StealthConfig {
             choke_burst_ms: 0,
             dynamic_enabled: false,
             dynamic_wire_image: DynamicWireImage::Stealth,
+            maybenot_machine: None,
             // Aggressive compression defaults for Anti-DPI traffic (textual payloads)
             compress_enabled: true,
             compress_min_len: 128,
@@ -428,6 +436,7 @@ impl StealthConfig {
             choke_burst_ms: 0,
             dynamic_enabled: false,
             dynamic_wire_image: DynamicWireImage::Stealth,
+            maybenot_machine: None,
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
@@ -469,6 +478,7 @@ impl StealthConfig {
             choke_burst_ms: 0,
             dynamic_enabled: false,
             dynamic_wire_image: DynamicWireImage::Stealth,
+            maybenot_machine: None,
             enable_http3_masquerading: false,
             use_tls_cover: false,
             use_qpack_headers: false,
@@ -524,6 +534,7 @@ impl StealthConfig {
             choke_burst_ms: 0,
             dynamic_enabled: false,
             dynamic_wire_image: DynamicWireImage::Stealth,
+            maybenot_machine: None,
             compress_enabled: false,
             compress_min_len: 512,
             compress_level: 3,
@@ -633,6 +644,7 @@ impl StealthConfig {
             choke_burst_ms: Option<u32>,
             dynamic_enabled: Option<bool>,
             dynamic_wire_image: Option<DynamicWireImage>,
+            maybenot_machine: Option<String>,
             // Removed in TODO-1055 — keys stay parseable for config
             // compatibility; `enable_server_push_cover = true` is rejected.
             enable_server_push_cover: Option<bool>,
@@ -716,6 +728,9 @@ impl StealthConfig {
             }
             if let Some(v) = sec.reality_cover_targets {
                 cfg.reality_cover_targets = v;
+            }
+            if sec.maybenot_machine.is_some() {
+                cfg.maybenot_machine = sec.maybenot_machine;
             }
             // TODO-1059: under `dynamic` the image preset owns the whole wire
             // shape — the per-key shape overrides stay inert so `mode =
