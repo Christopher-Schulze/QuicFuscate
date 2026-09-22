@@ -122,11 +122,13 @@ fn read_pcap(path: &str) -> Result<Pcap, String> {
         return Err("file too short for pcap header".into());
     }
     let magic_bytes = [data[0], data[1], data[2], data[3]];
-    let swap = match magic_bytes {
-        [0xa1, 0xb2, 0xc3, 0xd4] => false,
-        [0xd4, 0xc3, 0xb2, 0xa1] => true,
-        [0xa1, 0xb2, 0x3c, 0x4d] => false,
-        [0x4d, 0x3c, 0xb2, 0xa1] => true,
+    // The on-disk byte order of the magic identifies the file's byte order:
+    // a1b2c3d4 stored as-is is a big-endian capture; d4c3b2a1 is little-endian.
+    let be_file = match magic_bytes {
+        [0xa1, 0xb2, 0xc3, 0xd4] => true,
+        [0xd4, 0xc3, 0xb2, 0xa1] => false,
+        [0xa1, 0xb2, 0x3c, 0x4d] => true,
+        [0x4d, 0x3c, 0xb2, 0xa1] => false,
         _ => {
             return Err(format!(
                 "unsupported pcap magic {:02x}{:02x}{:02x}{:02x}",
@@ -136,7 +138,7 @@ fn read_pcap(path: &str) -> Result<Pcap, String> {
     };
     let u32at = |o: usize| -> u32 {
         let b = [data[o], data[o + 1], data[o + 2], data[o + 3]];
-        if swap {
+        if be_file {
             u32::from_be_bytes(b)
         } else {
             u32::from_le_bytes(b)
@@ -227,6 +229,50 @@ fn parse_frame(linktype: u16, frame: &[u8]) -> Option<Datagram> {
     Some(Datagram { src_port, payload: payload.to_vec() })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ethernet_ipv4_udp_frame() {
+        let payload = vec![0u8; 32];
+        let udp_len = 8 + payload.len() as u16;
+        let mut frame = vec![0xaau8; 6];
+        frame.extend_from_slice(&[0xbb; 6]);
+        frame.extend_from_slice(&[0x08, 0x00]);
+        let ip_len = 20 + udp_len;
+        frame.extend_from_slice(&[
+            0x45,
+            0,
+            (ip_len >> 8) as u8,
+            ip_len as u8,
+            0,
+            1,
+            0,
+            0,
+            64,
+            17,
+            0,
+            0,
+            10,
+            10,
+            0,
+            2,
+            10,
+            10,
+            0,
+            1,
+        ]);
+        frame.extend_from_slice(&[0xd9, 0x03, 0x10, 0xe1]);
+        frame.extend_from_slice(&udp_len.to_be_bytes());
+        frame.extend_from_slice(&[0, 0]);
+        frame.extend_from_slice(&payload);
+        let dg = parse_frame(1, &frame).expect("frame parses");
+        assert_eq!(dg.src_port, 55555);
+        assert_eq!(dg.payload.len(), 32);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // keylog + private dump parsing
 // ---------------------------------------------------------------------------
@@ -276,7 +322,7 @@ struct PrivateInstall {
 }
 
 fn parse_private_dump(path: &str) -> PrivateInstall {
-    let mut inst = PrivateInstall::default();
+    let mut inst = PrivateInstall { consistent: true, ..Default::default() };
     if path.is_empty() {
         return inst;
     }
