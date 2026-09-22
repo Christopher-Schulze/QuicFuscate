@@ -1,0 +1,203 @@
+# QUIC transport-parameter fixtures, one per browser engine family (TODO-1047).
+#
+# A fixture is the ONLY source for the transport-parameter block emitted in
+# the Initial CRYPTO payload and for the internal flow-control values applied
+# to the runtime transport config. Two tables must never disagree: the same
+# parsed values drive both paths.
+#
+# `sends` lists the transport parameters the engine advertises, in canonical
+# order. `initial_source_connection_id` and `version_information` are
+# placeholders in that list; the runtime encoder fills them with the real
+# per-connection values. `absent` lists parameters the engine does not send.
+#
+# provenance levels:
+#   wire-capture      - decoded from a real browser Initial on this machine
+#   source-constants  - taken from the documented browser source files in
+#                       `source`; not yet wire-verified
+#   unverified-catalog- QuicFuscate catalog values pending a real capture;
+#                       freshness gate reports these as pending verification
+
+snapshot = "2026-09"
+
+[chrome]
+provenance = "wire-capture"
+captured_at = "2026-09-22"
+browser_version = "Google Chrome 154.0.8037.44"
+source = "lo0 capture via scripts/capture/quic_initial_listener.py, decoded with tshark 4.6.8"
+# Chrome permutes the transport-parameter order per connection and inserts
+# one GREASE transport parameter at a random position.
+randomize_order = true
+grease_tp = true
+grease_value_len = 12
+version_information = true
+# The captured Chrome Initial carried initial_source_connection_id with
+# length 0 (Chrome uses zero-length SCIDs). The runtime emits the real
+# per-connection SCID instead because the transport CID machinery requires
+# it; the parameter itself stays present like the capture.
+initial_source_connection_id_len = 0
+max_idle_timeout = 30000
+initial_max_data = 15728640
+initial_max_stream_data_bidi_local = 6291456
+initial_max_stream_data_bidi_remote = 6291456
+initial_max_stream_data_uni = 6291456
+initial_max_streams_bidi = 100
+initial_max_streams_uni = 103
+max_udp_payload_size = 1472
+max_datagram_frame_size = 65536
+google_connection_options = "ORIG"
+sends = [
+  "initial_max_streams_bidi",
+  "google_connection_options",
+  "initial_max_stream_data_uni",
+  "initial_max_data",
+  "max_datagram_frame_size",
+  "max_idle_timeout",
+  "initial_max_stream_data_bidi_remote",
+  "max_udp_payload_size",
+  "initial_max_streams_uni",
+  "initial_source_connection_id",
+  "version_information",
+  "initial_max_stream_data_bidi_local",
+]
+absent = [
+  "ack_delay_exponent",
+  "max_ack_delay",
+  "active_connection_id_limit",
+  "disable_active_migration",
+  "min_ack_delay",
+  "grease_quic_bit",
+  "reset_stream_at",
+  "preferred_address",
+]
+notes = "Chrome also sends ECH, ALPS and GREASE TLS extensions; rustls cannot emit those. supported_groups advertises X25519MLKEM768 which rustls cannot mint - mintable subset is applied at the provider."
+
+# ClientHello side of the same capture (extension ids in wire order,
+# GREASE positions kept for documentation).
+cipher_suites = ["0x1301", "0x1302", "0x1303"]
+supported_groups = ["0x11ec", "0x001d", "0x0017", "0x0018"]
+key_share_groups = ["0x11ec", "0x001d"]
+alpn = ["h3"]
+signature_algorithms = [
+  "0x0403", "0x0804", "0x0401", "0x0503", "0x0805",
+  "0x0501", "0x0806", "0x0601", "0x0201",
+]
+extension_order = [
+  "0xca34", "0x0039", "0x002d", "0x44cd", "0x12e0", "0x000a",
+  "0x0010", "0x0033", "0x001b", "0x002b", "0x000d", "0xfe0d",
+]
+
+[firefox]
+provenance = "source-constants"
+captured_at = "2026-09-22"
+browser_version = "Mozilla Firefox 147.0.4 (neqo main)"
+source = "github.com/mozilla/neqo: neqo-transport/src/connection/params.rs, tparams.rs, cid.rs, rtt.rs, tracking.rs"
+# neqo encodes parameters in its internal enum order; the list below follows
+# TransportParameters creation order (defaults first, then configurable).
+randomize_order = false
+grease_tp = false
+version_information = true
+active_connection_id_limit = 8
+max_ack_delay = 20
+min_ack_delay = 1000
+initial_max_data = 2097152
+initial_max_stream_data_bidi_local = 1048576
+initial_max_stream_data_bidi_remote = 1048576
+initial_max_stream_data_uni = 1048576
+initial_max_streams_bidi = 100
+initial_max_streams_uni = 100
+max_idle_timeout = 30000
+max_datagram_frame_size = 65535
+grease_quic_bit = true
+reset_stream_at = true
+sends = [
+  "active_connection_id_limit",
+  "max_ack_delay",
+  "min_ack_delay",
+  "initial_max_data",
+  "initial_max_stream_data_bidi_local",
+  "initial_max_stream_data_bidi_remote",
+  "initial_max_stream_data_uni",
+  "initial_max_streams_bidi",
+  "initial_max_streams_uni",
+  "max_idle_timeout",
+  "max_datagram_frame_size",
+  "grease_quic_bit",
+  "reset_stream_at",
+  "initial_source_connection_id",
+  "version_information",
+]
+absent = [
+  "max_udp_payload_size",
+  "ack_delay_exponent",
+  "disable_active_migration",
+  "preferred_address",
+  "scone",
+  "google_connection_options",
+]
+notes = "Values are neqo defaults; Firefox does not override the flow-control defaults via prefs (all.js). min_ack_delay is GRANULARITY (1 ms) encoded in microseconds. grease_quic_bit and reset_stream_at are empty parameters neqo enables by default."
+
+# NSS-documented ClientHello values (source: NSS TLS 1.3 defaults);
+# extension order is not listed because NSS emits a different, not fully
+# documented set on h3.
+cipher_suites = ["0x1301", "0x1303", "0x1302"]
+supported_groups = ["0x001d", "0x0017", "0x0018", "0x0019", "0x0100", "0x0101"]
+key_share_groups = ["0x001d", "0x0017"]
+alpn = ["h3"]
+signature_algorithms = [
+  "0x0403", "0x0503", "0x0603", "0x0804", "0x0805",
+  "0x0806", "0x0401", "0x0501", "0x0601", "0x0203", "0x0201",
+]
+
+[safari]
+provenance = "unverified-catalog"
+captured_at = "2026-09-22"
+browser_version = "Safari (WebKit QUIC stack, no public source constants)"
+source = "QuicFuscate persona catalog; pending a real wire capture"
+# Safari's transport parameters are not publicly documented. These are the
+# project catalog values and MUST be treated as unverified until a capture
+# or a documented WebKit source file replaces them.
+randomize_order = false
+grease_tp = false
+version_information = true
+initial_max_data = 5000000
+initial_max_stream_data_bidi_local = 500000
+initial_max_stream_data_bidi_remote = 500000
+initial_max_stream_data_uni = 500000
+initial_max_streams_bidi = 100
+initial_max_streams_uni = 100
+max_idle_timeout = 30000
+max_udp_payload_size = 1452
+max_datagram_frame_size = 65535
+sends = [
+  "max_idle_timeout",
+  "max_udp_payload_size",
+  "initial_max_data",
+  "initial_max_stream_data_bidi_local",
+  "initial_max_stream_data_bidi_remote",
+  "initial_max_stream_data_uni",
+  "initial_max_streams_bidi",
+  "initial_max_streams_uni",
+  "initial_source_connection_id",
+  "version_information",
+]
+absent = [
+  "ack_delay_exponent",
+  "max_ack_delay",
+  "active_connection_id_limit",
+  "disable_active_migration",
+  "min_ack_delay",
+  "grease_quic_bit",
+  "reset_stream_at",
+  "google_connection_options",
+]
+notes = "Unverified: every value here is a catalog estimate, not a browser measurement. The freshness gate reports this fixture as pending verification."
+
+# Catalog values; not wire-verified.
+cipher_suites = ["0x1301", "0x1302", "0x1303"]
+supported_groups = ["0x001d", "0x0017", "0x0018", "0x0019"]
+key_share_groups = ["0x001d"]
+alpn = ["h3"]
+signature_algorithms = [
+  "0x0403", "0x0503", "0x0603", "0x0804", "0x0805",
+  "0x0806", "0x0401", "0x0501", "0x0601",
+]

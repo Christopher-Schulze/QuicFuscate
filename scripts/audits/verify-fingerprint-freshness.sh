@@ -86,10 +86,61 @@ if "rand::rng()" not in cover_src:
 if "key_share_ext" in cover_src or "generate_client_hello" in cover_src or "xorshift" in cover_src:
     failures.append("synthetic ClientHello builder is still present in tls_cover.rs")
 
+# 5. Transport-parameter fixtures (TODO-1047): every engine fixture must be
+#    present, carry provenance, and stay within MAX_AGE of the catalog
+#    snapshot. `unverified-catalog` fixtures are reported as pending
+#    verification rather than failing the gate - they exist precisely so a
+#    missing real capture cannot be mistaken for verified data.
+fixture_path = root / "crates/qf-stealth/fixtures/transport_params.toml"
+warnings: list[str] = []
+if not fixture_path.exists():
+    failures.append("crates/qf-stealth/fixtures/transport_params.toml missing")
+else:
+    fixture_src = fixture_path.read_text()
+    fixture_snapshot = re.search(r'^snapshot\s*=\s*"(\d{4})-(\d{2})"', fixture_src, re.M)
+    if fixture_snapshot is None:
+        failures.append("transport_params.toml is missing the top-level `snapshot` marker")
+    for engine in ("chrome", "firefox", "safari"):
+        section = re.search(
+            rf"^\[{engine}\](.*?)(?=^\[|\Z)", fixture_src, re.M | re.S
+        )
+        if section is None:
+            failures.append(f"transport_params.toml missing [{engine}] fixture")
+            continue
+        body = section.group(1)
+        provenance = re.search(r'^provenance\s*=\s*"([^"]+)"', body, re.M)
+        captured_at = re.search(r'^captured_at\s*=\s*"(\d{4})-(\d{2})-(\d{2})"', body, re.M)
+        if provenance is None:
+            failures.append(f"[{engine}] fixture missing provenance")
+            continue
+        if captured_at is None:
+            failures.append(f"[{engine}] fixture missing captured_at date")
+            continue
+        prov = provenance.group(1)
+        if prov not in ("wire-capture", "source-constants", "unverified-catalog"):
+            failures.append(f"[{engine}] fixture has unknown provenance '{prov}'")
+        cyear, cmonth = int(captured_at.group(1)), int(captured_at.group(2))
+        fixture_age = (date.today().year - cyear) * 12 + (date.today().month - cmonth)
+        if prov == "unverified-catalog":
+            warnings.append(
+                f"[{engine}] fixture is unverified-catalog ({captured_at.group(0)}); "
+                "pending a real wire capture or documented WebKit source"
+            )
+        elif fixture_age > MAX_AGE_MONTHS:
+            failures.append(
+                f"[{engine}] fixture {prov} is {fixture_age} months old "
+                f"(limit {MAX_AGE_MONTHS}); recapture against a current browser build"
+            )
+        if "sends" not in body or "initial_max_data" not in body:
+            failures.append(f"[{engine}] fixture missing sends list or flow-control values")
+
 if failures:
     for failure in failures:
         print(f"error: {failure}", file=sys.stderr)
     raise SystemExit(1)
+
+for warning in warnings:
+    print(f"warning: {warning}", file=sys.stderr)
 
 age_note = f", snapshot age {snapshot_age} months" if snapshot_age is not None else ""
 print(f"fingerprint freshness contract passed{age_note}")

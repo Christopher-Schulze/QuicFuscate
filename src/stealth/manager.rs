@@ -182,16 +182,15 @@ impl StealthManager {
         // configured. StealthMax presets populate the target list; other modes
         // opt in by setting stealth.reality_cover_targets.
         let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let reality_proxy =
-            if config.dynamic_enabled || !config.reality_cover_targets.is_empty() {
-                Some(Arc::new(crate::reality::RealityProxy::new_with_targets(
-                    tx,
-                    &env_snapshot,
-                    &config.reality_cover_targets,
-                )))
-            } else {
-                None
-            };
+        let reality_proxy = if config.dynamic_enabled || !config.reality_cover_targets.is_empty() {
+            Some(Arc::new(crate::reality::RealityProxy::new_with_targets(
+                tx,
+                &env_snapshot,
+                &config.reality_cover_targets,
+            )))
+        } else {
+            None
+        };
 
         if let (Some(owner), Some(proxy)) = (runtime_owner.as_ref(), reality_proxy.as_ref()) {
             owner.register_reality_proxy(proxy);
@@ -472,14 +471,20 @@ impl StealthManager {
             warn!("Failed to set HTTP/3 application protos: {}", e);
         }
 
-        // Apply the detailed QUIC transport parameters from the harmonized profile.
+        // Apply the QUIC transport parameters from the persona's capture
+        // fixture. FingerprintProfile::new_with_snapshot populates every
+        // field below from the same fixture table that drives the Initial
+        // transport-parameter block, so internal config and advertised
+        // parameters cannot drift (TODO-1047).
         config.set_initial_max_data(fingerprint.initial_max_data);
         config
             .set_initial_max_stream_data_bidi_local(fingerprint.initial_max_stream_data_bidi_local);
         config.set_initial_max_stream_data_bidi_remote(
             fingerprint.initial_max_stream_data_bidi_remote,
         );
+        config.set_initial_max_stream_data_uni(fingerprint.initial_max_stream_data_uni);
         config.set_initial_max_streams_bidi(fingerprint.initial_max_streams_bidi);
+        config.set_initial_max_streams_uni(fingerprint.initial_max_streams_uni);
         config.set_max_idle_timeout(fingerprint.max_idle_timeout);
 
         if self.config.enable_realtime_choke && self.config.choke_target_mbps > 0 {
@@ -653,11 +658,7 @@ impl StealthManager {
         // they just are not delay targets.
         if anti_mode {
             if let Some(shaper) = &self.flow_shaper {
-                let ty = if ack_only {
-                    StealthPacketClass::Ack
-                } else {
-                    StealthPacketClass::Data
-                };
+                let ty = if ack_only { StealthPacketClass::Ack } else { StealthPacketClass::Data };
                 shaper.record_and_prune(_payload.len(), ty);
             }
         }

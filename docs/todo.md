@@ -465,7 +465,7 @@
 - Detail: `docs/todo/todo-1046-in-quic-fec-framing.md`
 
 ### TODO-1047 - Real ClientHello and transport parameters from one browser capture
-- OPEN. Initial transport parameters are one hardcoded blob. The persona catalog does not reach that blob. One capture per persona becomes the only source.
+- DONE. `crates/qf-stealth/fixtures/transport_params.toml` is the single versioned persona source: ClientHello cipher order, extension order, groups, key shares, ALPN, and the full transport-parameter block per engine. Chromium is a real Chrome-154 wire capture (`scripts/capture/quic_initial_listener.py` + tshark), Firefox is documented neqo source constants, Safari is honestly marked `unverified-catalog`. The same fixture feeds the rustls Initial TP block (`fixture_transport_params`, real local SCID threaded through the provider chain) and the internal flow-control config — no independent tables remain. rustls emits only mintable key shares (persona groups ∩ ring groups; ML-KEM narrows offers, never faked). Freshness gate `verify-fingerprint-freshness.sh` fails stale verified fixtures and warns on unverified ones.
 - Detail: `docs/todo/todo-1047-browser-capture-clienthello.md`
 
 ### TODO-1048 - Replace domain fronting with a real Reality fallback

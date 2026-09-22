@@ -2,10 +2,14 @@
 
 use crate::fingerprint_profile::FingerprintProfile;
 use crate::profiles::BrowserProfile;
+use crate::transport_params::{transport_param_fixture, EngineFamily};
 
 /// TLS profile for browser-shaped handshake configuration.
 #[derive(Debug, Clone)]
 pub struct TlsProfile {
+    /// Browser persona this profile emulates; selects the engine fixture for
+    /// transport-parameter emission.
+    pub browser: BrowserProfile,
     /// Human-readable browser user-agent string (for example, `Chrome/136.0.0.0`).
     pub name: String,
     /// TLS cipher suite IDs in preference order.
@@ -14,7 +18,7 @@ pub struct TlsProfile {
     pub groups: Vec<u16>,
     /// Supported signature algorithms in preference order.
     pub signature_algorithms: Vec<u16>,
-    /// ALPN protocol identifiers (for example, `h3`, `h2`, and `http/1.1`).
+    /// ALPN protocol identifiers (QUIC personas advertise `h3` only).
     pub alpn_protocols: Vec<String>,
     /// SNI hostname override. `None` uses the connection default.
     pub sni: Option<String>,
@@ -33,66 +37,65 @@ pub struct TlsProfile {
 }
 
 impl TlsProfile {
-    /// Chrome 153 profile, the most common browser persona.
-    /// (Function names keep their historical suffixes; the `name` label and
-    /// field values track PROFILE_CATALOG_SNAPSHOT, see TODO-1009.)
+    /// Chrome 154 profile, the most common browser persona.
+    /// ClientHello fields come from the checked-in Chromium capture fixture
+    /// (TODO-1047); fields rustls cannot emit (GREASE positions, ALPS, ECH,
+    /// ML-KEM key shares) are documented in the fixture and filtered at the
+    /// provider.
     pub fn chrome_130() -> Self {
+        let fixture = transport_param_fixture(EngineFamily::Chromium);
         Self {
-            name: "Chrome/153.0.0.0".into(),
-            cipher_suites: vec![0x1301, 0x1302, 0xc02b, 0xc02f, 0xc02c, 0xc030],
-            groups: vec![0x001d, 0x0017, 0x0018, 0x001e],
-            signature_algorithms: vec![
-                0x0403, 0x0503, 0x0603, 0x0807, 0x0808, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501,
-            ],
-            alpn_protocols: vec!["h3".into(), "h2".into(), "http/1.1".into()],
+            browser: BrowserProfile::Chrome,
+            name: "Chrome/154.0.0.0".into(),
+            cipher_suites: fixture.cipher_suites().to_vec(),
+            groups: fixture.supported_groups().to_vec(),
+            signature_algorithms: fixture.signature_algorithms().to_vec(),
+            alpn_protocols: fixture.alpn().to_vec(),
             sni: None,
             enable_0rtt: false,
             enable_ech: true,
             grease_values: vec![0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a],
-            extension_order: vec![
-                0x0000, 0x0017, 0xff01, 0x000d, 0xfe0d, 0x0023, 0x0010, 0x002d, 0x0033, 0x002b,
-                0x001b, 0x0039, 0x0a0a, 0x0029,
-            ],
+            extension_order: fixture.extension_order().unwrap_or_default().to_vec(),
             timing_jitter: Some(std::time::Duration::from_millis(rand::random::<u64>() % 50)),
             cover_performance_mode: false,
         }
     }
 
-    /// Firefox 156 profile.
+    /// Firefox 147 profile (neqo source constants).
     pub fn firefox_133() -> Self {
+        let fixture = transport_param_fixture(EngineFamily::Firefox);
         Self {
-            name: "Firefox/156.0".into(),
-            cipher_suites: vec![0x1301, 0x1302, 0xc02b, 0xc02f],
-            groups: vec![0x001d, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101],
-            signature_algorithms: vec![
-                0x0403, 0x0503, 0x0603, 0x0807, 0x0808, 0x0804, 0x0805, 0x0806, 0x0401,
-            ],
-            alpn_protocols: vec!["h3".into(), "h2".into(), "http/1.1".into()],
+            browser: BrowserProfile::Firefox,
+            name: "Firefox/147.0".into(),
+            cipher_suites: fixture.cipher_suites().to_vec(),
+            groups: fixture.supported_groups().to_vec(),
+            signature_algorithms: fixture.signature_algorithms().to_vec(),
+            alpn_protocols: fixture.alpn().to_vec(),
             sni: None,
             enable_0rtt: false,
             enable_ech: false,
             grease_values: vec![],
-            extension_order: vec![
-                0x0000, 0x0023, 0x000d, 0x000a, 0x0010, 0x002d, 0x0033, 0x002b, 0x001c, 0x0039,
-            ],
+            extension_order: fixture.extension_order().unwrap_or_default().to_vec(),
             timing_jitter: Some(std::time::Duration::from_millis(rand::random::<u64>() % 30)),
             cover_performance_mode: false,
         }
     }
 
-    /// Safari 26.0 profile.
+    /// Safari 26.0 profile (catalog values pending a real capture).
     pub fn safari_18() -> Self {
+        let fixture = transport_param_fixture(EngineFamily::WebKit);
         Self {
+            browser: BrowserProfile::Safari,
             name: "Safari/26.0".into(),
-            cipher_suites: vec![0x1301, 0x1302, 0xc02c, 0xc030],
-            groups: vec![0x001d, 0x0017, 0x0018],
-            signature_algorithms: vec![0x0403, 0x0503, 0x0807, 0x0804, 0x0805, 0x0401],
-            alpn_protocols: vec!["h3".into(), "h2".into()],
+            cipher_suites: fixture.cipher_suites().to_vec(),
+            groups: fixture.supported_groups().to_vec(),
+            signature_algorithms: fixture.signature_algorithms().to_vec(),
+            alpn_protocols: fixture.alpn().to_vec(),
             sni: None,
             enable_0rtt: false,
             enable_ech: false,
             grease_values: vec![],
-            extension_order: vec![0x0000, 0x000d, 0x0010, 0x0033, 0x002b, 0x0023, 0x002d, 0x0039],
+            extension_order: fixture.extension_order().unwrap_or_default().to_vec(),
             timing_jitter: Some(std::time::Duration::from_millis(rand::random::<u64>() % 20)),
             cover_performance_mode: false,
         }
@@ -138,25 +141,20 @@ impl TlsProfile {
 }
 
 /// Build the browser-shaped TLS runtime profile for one fingerprint persona.
+///
+/// ClientHello fields (cipher order, groups, signature algorithms, ALPN,
+/// extension order) come from the checked-in capture fixture for the
+/// persona's engine family; the provider intersects them with what rustls
+/// can actually emit. `FingerprintProfile::tls_cipher_suites` stays as the
+/// documentation-level list but no longer overrides the fixture.
 #[doc(hidden)]
 pub fn profile_from_fingerprint(fingerprint: &FingerprintProfile) -> TlsProfile {
-    let mut profile = match fingerprint.browser {
+    match fingerprint.browser {
         BrowserProfile::Chrome => TlsProfile::chrome_130(),
         BrowserProfile::Firefox => TlsProfile::firefox_133(),
         BrowserProfile::Safari => TlsProfile::safari_18(),
         BrowserProfile::Edge => TlsProfile::edge_130(),
-    };
-    if !fingerprint.tls_cipher_suites.is_empty() {
-        profile.cipher_suites = fingerprint.tls_cipher_suites.clone();
     }
-    profile.alpn_protocols = vec!["h3".into(), "h2".into(), "http/1.1".into()];
-    profile.cipher_suites.retain(|suite| !matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9));
-    profile.cipher_suites.sort_by_key(|suite| match *suite {
-        0x1301 | 0x1302 => 0,
-        0xC02B | 0xC02F | 0xC02C | 0xC030 => 1,
-        _ => 2,
-    });
-    profile
 }
 
 #[cfg(test)]
@@ -183,13 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn chrome_client_hello_order_is_unique_and_psk_last() {
+    fn chrome_client_hello_order_matches_capture() {
         let profile = TlsProfile::chrome_130();
         let mut unique = profile.extension_order.clone();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), profile.extension_order.len());
-        assert_eq!(profile.extension_order.last(), Some(&0x0029));
+        // Wire-captured Chrome 154 ends the extension block with ECH.
+        assert_eq!(profile.extension_order.last(), Some(&0xfe0d));
     }
 
     #[test]
@@ -210,8 +209,8 @@ mod tests {
             let profile = TlsProfile::random();
             assert!(matches!(
                 profile.name.as_str(),
-                "Chrome/153.0.0.0"
-                    | "Firefox/156.0"
+                "Chrome/154.0.0.0"
+                    | "Firefox/147.0"
                     | "Safari/26.0"
                     | "Edge/153.0.0.0"
                     | "Opera/136.0.0.0"
@@ -230,7 +229,7 @@ mod tests {
         assert_eq!(first.groups, second.groups);
         assert_eq!(first.extension_order, second.extension_order);
         assert_eq!(first.alpn_protocols, second.alpn_protocols);
-        assert_eq!(first.alpn_protocols.first().map(String::as_str), Some("h3"));
+        assert_eq!(first.alpn_protocols, vec!["h3".to_string()]);
     }
 
     #[test]
@@ -248,7 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_conversion_enforces_cipher_policy() {
+    fn fingerprint_conversion_uses_fixture_cipher_truth() {
+        // The profile carries the captured cipher list verbatim (including
+        // CHACHA20 for engines that offer it); the AES-GCM-only wire policy
+        // is enforced by the rustls provider projection, not by editing the
+        // persona data.
         for (browser, os) in [
             (BrowserProfile::Chrome, OsProfile::Windows),
             (BrowserProfile::Firefox, OsProfile::Linux),
@@ -256,11 +259,11 @@ mod tests {
             (BrowserProfile::Edge, OsProfile::Windows),
         ] {
             let profile = profile_from_fingerprint(&FingerprintProfile::new(browser, os));
-            assert!(!profile.cipher_suites.is_empty());
-            assert!(!profile
-                .cipher_suites
-                .iter()
-                .any(|suite| matches!(*suite, 0x1303 | 0xCCA8 | 0xCCA9)));
+            let fixture = crate::transport_params::transport_param_fixture(
+                crate::transport_params::EngineFamily::from_browser(profile.browser),
+            );
+            assert_eq!(profile.cipher_suites, fixture.cipher_suites());
+            assert!(profile.cipher_suites.iter().any(|s| matches!(*s, 0x1301 | 0x1302)));
         }
     }
 }

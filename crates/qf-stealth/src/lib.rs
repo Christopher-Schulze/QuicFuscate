@@ -6,9 +6,9 @@
 #[doc(hidden)]
 pub use config::{PaddingStrategy, RotationMode, StealthMode};
 #[doc(hidden)]
-pub use cover_traffic::CoverTrafficScheduler;
-#[doc(hidden)]
 pub use cover_targets::{CdnProvider, CoverTargetRotator};
+#[doc(hidden)]
+pub use cover_traffic::CoverTrafficScheduler;
 #[doc(hidden)]
 pub use escalation::EscalationState;
 #[doc(hidden)]
@@ -83,6 +83,8 @@ pub mod tls_cover;
 pub mod tls_profile;
 #[doc(hidden)]
 pub mod traffic;
+
+pub mod transport_params;
 
 mod cover_targets {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -425,10 +427,7 @@ mod tests {
         assert_eq!(rotator.next_cover_target(), "a.example");
         assert_eq!(rotator.next_cover_target(), "b.example");
         assert_eq!(rotator.next_cover_target(), "a.example");
-        assert_eq!(
-            CoverTargetRotator::new(Vec::new()).next_cover_target(),
-            "cdn.cloudflare.com"
-        );
+        assert_eq!(CoverTargetRotator::new(Vec::new()).next_cover_target(), "cdn.cloudflare.com");
     }
 
     #[test]

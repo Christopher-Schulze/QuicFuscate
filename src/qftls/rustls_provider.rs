@@ -135,6 +135,25 @@ fn crypto_provider_for_profile(
         )));
     }
     provider.cipher_suites = projected;
+
+    // supported_groups/key shares: advertise only groups rustls can mint
+    // real key shares for, in captured persona order (TODO-1047). Groups the
+    // engine offers but ring cannot mint (for example X25519MLKEM768 or
+    // FFDHE) are dropped here, never faked.
+    let mintable = provider.kx_groups.clone();
+    let projected_groups: Vec<_> = profile
+        .groups
+        .iter()
+        .filter_map(|requested| {
+            mintable
+                .iter()
+                .copied()
+                .find(|group| u16::from(rustls::NamedGroup::from(group.name())) == *requested)
+        })
+        .collect();
+    if !projected_groups.is_empty() {
+        provider.kx_groups = projected_groups;
+    }
     Ok(provider)
 }
 
@@ -247,6 +266,12 @@ pub struct RustlsProviderImpl {
     pub zero_rtt_enabled: bool,
     /// QUIC transport parameters to send to the peer.
     pub transport_params: Vec<u8>,
+    /// Real local source connection ID copied into initial_source_connection_id.
+    pub local_scid: Vec<u8>,
+    /// Fully encoded version_information parameter appended to the fixture block.
+    pub version_information: Vec<u8>,
+    /// Path MTU/UDP-payload budget cap for max_udp_payload_size.
+    pub max_udp_payload_size: usize,
     /// QUIC wire version used by rustls for TLS-derived packet protection.
     pub quic_version: rustls::quic::Version,
     /// Peer's QUIC transport parameters (received during handshake).
@@ -395,6 +420,7 @@ impl RustlsProviderImpl {
             environment,
             clock,
             DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+            &[],
         )
     }
 
@@ -408,10 +434,18 @@ impl RustlsProviderImpl {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
+        local_scid: &[u8],
     ) -> Result<Self, ConnectionError> {
         let quic_version = Self::map_quic_version(version)?;
-        let mut transport_params = Self::default_transport_params(max_udp_payload_size)?;
-        transport_params.extend_from_slice(version_information_parameter);
+        // The fixture block is built for the baseline (Chromium) engine at
+        // construction; a persona-aware rebuild happens in
+        // apply_profile_to_config once the negotiated TlsProfile is known.
+        let transport_params = Self::fixture_transport_params(
+            qf_stealth::transport_params::EngineFamily::Chromium,
+            max_udp_payload_size,
+            local_scid,
+            version_information_parameter,
+        )?;
         let client_ca_path = client_ca_path.map(str::to_owned);
         let connection = if is_server {
             Self::create_server_connection(quic_version, transport_params.clone())?
@@ -444,6 +478,9 @@ impl RustlsProviderImpl {
             peer_cert: None,
             zero_rtt_enabled: false,
             transport_params,
+            local_scid: local_scid.to_vec(),
+            version_information: version_information_parameter.to_vec(),
+            max_udp_payload_size,
             quic_version,
             peer_transport_params: None,
             profile: None,
@@ -861,41 +898,41 @@ impl RustlsProviderImpl {
         Err(ConnectionError::TlsError("No valid private key found".into()))
     }
 
-    fn default_transport_params(max_udp_payload_size: usize) -> Result<Vec<u8>, ConnectionError> {
+    /// Builds the persona fixture transport-parameter block for this hop.
+    /// One builder feeds both the wire (via rustls Initial CRYPTO) and the
+    /// internal transport configuration so the two cannot drift (TODO-1047).
+    fn fixture_transport_params(
+        family: qf_stealth::transport_params::EngineFamily,
+        max_udp_payload_size: usize,
+        local_scid: &[u8],
+        version_information_parameter: &[u8],
+    ) -> Result<Vec<u8>, ConnectionError> {
         if !(1200..=65_527).contains(&max_udp_payload_size) {
             return Err(ConnectionError::InvalidState);
         }
-        // QUIC transport parameters in wire format
-        let mut params = Vec::new();
-        // max_idle_timeout (0x01) = 30000ms
-        params.extend_from_slice(&[0x01, 0x02, 0x75, 0x30]);
-        // max_udp_payload_size (0x03) follows the concrete transport budget of this hop.
-        let mut parameter_id = [0u8; 8];
-        let parameter_id_len = qf_transport_pn::varint::write_varint(0x03, &mut parameter_id)?;
-        let mut parameter_value = [0u8; 8];
-        let parameter_value_len = qf_transport_pn::varint::write_varint(
+        Ok(qf_stealth::transport_params::encode_transport_params(
+            family,
             max_udp_payload_size as u64,
-            &mut parameter_value,
+            local_scid,
+            version_information_parameter,
+            &mut rand::rng(),
+        ))
+    }
+
+    /// Rebuilds the transport-parameter block from the negotiated persona's
+    /// engine fixture. Called before the rustls client connection is rebuilt
+    /// so the Initial CRYPTO payload advertises the persona values.
+    fn refresh_transport_params_for_profile(
+        &mut self,
+        profile: &TlsProfile,
+    ) -> Result<(), ConnectionError> {
+        self.transport_params = Self::fixture_transport_params(
+            qf_stealth::transport_params::EngineFamily::from_browser(profile.browser),
+            self.max_udp_payload_size,
+            &self.local_scid,
+            &self.version_information,
         )?;
-        let mut parameter_length = [0u8; 8];
-        let parameter_length_len = qf_transport_pn::varint::write_varint(
-            parameter_value_len as u64,
-            &mut parameter_length,
-        )?;
-        params.extend_from_slice(&parameter_id[..parameter_id_len]);
-        params.extend_from_slice(&parameter_length[..parameter_length_len]);
-        params.extend_from_slice(&parameter_value[..parameter_value_len]);
-        // initial_max_data (0x04) = 10MB
-        params.extend_from_slice(&[0x04, 0x03, 0x98, 0x96, 0x80]);
-        // initial_max_stream_data_bidi_local (0x05) = 1MB
-        params.extend_from_slice(&[0x05, 0x03, 0x0f, 0x42, 0x40]);
-        // initial_max_stream_data_bidi_remote (0x06) = 1MB
-        params.extend_from_slice(&[0x06, 0x03, 0x0f, 0x42, 0x40]);
-        // initial_max_streams_bidi (0x08) = 100
-        params.extend_from_slice(&[0x08, 0x01, 0x64]);
-        // initial_max_streams_uni (0x09) = 100
-        params.extend_from_slice(&[0x09, 0x01, 0x64]);
-        Ok(params)
+        Ok(())
     }
 
     fn apply_profile_to_config(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError> {
@@ -920,6 +957,7 @@ impl RustlsProviderImpl {
         };
         // Best-effort reconfigure only for client side before handshake
         if let rustls::quic::Connection::Client(_) = &self.connection {
+            self.refresh_transport_params_for_profile(profile)?;
             self.rebuild_client_connection(profile)?;
         }
         self.profile_ready_at = profile_ready_at;
@@ -1368,6 +1406,7 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
     max_udp_payload_size: usize,
+    local_scid: &[u8],
 ) -> Result<RustlsProviderImpl, ConnectionError> {
     RustlsProviderImpl::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
@@ -1378,5 +1417,6 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         environment,
         clock,
         max_udp_payload_size,
+        local_scid,
     )
 }

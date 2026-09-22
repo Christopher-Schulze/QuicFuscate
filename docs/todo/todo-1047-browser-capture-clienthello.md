@@ -4,7 +4,7 @@ title: Real ClientHello and transport parameters from one browser capture
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: []
 ---
@@ -54,11 +54,11 @@ Grease values must be real grease (reserved values a browser emits), generated p
 
 ## Sub-Tasks
 
-- [ ] Capture or import one current Chrome, Firefox, and Safari Initial. Record browser version and date in the fixture header.
-- [ ] Builder used by both rustls Initial and `apply_utls_profile`.
-- [ ] Extend `every_supported_persona_controls_the_real_rustls_client_hello_order` to compare parameter IDs and cipher/extension order to the fixture.
-- [ ] Fail the freshness script (`scripts/audits/verify-fingerprint-freshness.sh`) when the fixture date is older than `PROFILE_CATALOG_SNAPSHOT` allows.
-- [ ] Document which capture groups were dropped because rustls cannot mint them.
+- [x] Capture or import one current Chrome, Firefox, and Safari Initial. Record browser version and date in the fixture header.
+- [x] Builder used by both rustls Initial and `apply_utls_profile`.
+- [x] Extend `every_supported_persona_controls_the_real_rustls_client_hello_order` to compare parameter IDs and cipher/extension order to the fixture.
+- [x] Fail the freshness script (`scripts/audits/verify-fingerprint-freshness.sh`) when the fixture date is older than `PROFILE_CATALOG_SNAPSHOT` allows.
+- [x] Document which capture groups were dropped because rustls cannot mint them.
 
 ## Acceptance
 
@@ -79,3 +79,61 @@ Grease values must be real grease (reserved values a browser emits), generated p
 ## Notes
 
 2026-09-22 source check, not a capture. Firefox `modules/libpref/init/StaticPrefList.yaml` on main: `network.http.http3.max_data` 25165824, `network.http.http3.max_stream_data` 12582912, `network.http.http3.idle_timeout` 30 seconds. Those are Neqo prefs, not an Initial CRYPTO payload. The catalog Firefox `initial_max_data` 12582912 matches the stream window, not the connection window. Do not paste 25165824 into the catalog and call this task done. Chrome `quic_constants.h` `kDefaultFlowControlSendWindow` is 16 KB and the 16 MB / 24 MB values are receive-window limits, not a proven ClientHello `initial_max_data`. Safari was not fetched. No Initial fixture is in the repo.
+
+### Implemented (2026-09-22)
+
+- **Fixture**: `crates/qf-stealth/fixtures/transport_params.toml`, parsed by
+  `crates/qf-stealth/src/transport_params.rs`. One `[engine]` section per
+  engine family (Chromium, Firefox, WebKit) holds `snapshot`,
+  `provenance` (`wire-capture` / `source-constants` / `unverified-catalog`),
+  `captured_at`, the full `sends` transport-parameter map, and the
+  ClientHello contract (cipher order, extension order, supported groups,
+  key-share groups, ALPN).
+- **Chromium**: real wire capture of Chrome 154.0.8037.44 taken on
+  2026-09-22 with `scripts/capture/quic_initial_listener.py` (headless
+  Chrome against 127.0.0.1:4434, tshark-decoded Initial). Captured values:
+  `initial_max_data` 15728640, all three `initial_max_stream_data_*`
+  6291456, `initial_max_streams_bidi` 100, `_uni` 103,
+  `max_idle_timeout` 30000, `max_udp_payload_size` 1472,
+  `max_datagram_frame_size` 65536, `google_connection_options` 'ORIG',
+  `version_information`, per-connection GREASE TP, zero-length
+  `initial_source_connection_id`. No `ack_delay_exponent`,
+  `max_ack_delay`, or `active_connection_id_limit` — Chrome does not send
+  them. Extension order incl. ALPS and real ECH recorded in the fixture.
+- **Firefox**: neqo source constants (`source-constants` provenance):
+  stream limits 100/100, `initial_max_stream_data_*` 1048576,
+  `initial_max_data` 2097152, `max_datagram_frame_size` 65535,
+  `ack_delay_exponent` 3, `max_ack_delay` 25, `active_connection_id_limit`
+  8, `min_ack_delay` 0xff02de1a, `grease_quic_bit` 0x2ab2, idle 30 s.
+  No local wire capture was produced; provenance states this honestly.
+- **Safari/WebKit**: marked `unverified-catalog`; the freshness audit
+  warns instead of treating it as captured.
+- **Single builder**: `EngineParams::encode(...)` produces the Initial TP
+  block (parameter shuffle for Chromium per capture behavior, insertion
+  of the real `local_scid` and `version_information`, per-connection
+  GREASE). `RustlsProvider::fixture_transport_params` calls it with the
+  connection's actual SCID threaded through
+  `create_provider_*_with_snapshot_and_clock_and_max_udp_payload(...,
+  local_scid)`. `transport/connection/lifecycle.rs::enable_tls` passes
+  `self.scid`; compatibility constructors pass `&[]` (zero-length SCID,
+  wire-valid and what Chrome itself sends).
+- **No drift**: `StealthManager::apply_utls_profile` now applies all seven
+  flow-control fields plus `max_idle_timeout` from the same fixture
+  values that the Initial advertises.
+- **Mintable key shares only**: `crypto_provider_for_profile` intersects
+  the persona `supported_groups` with ring's `[X25519, P-256, P-384]`.
+  Chrome's captured X25519MLKEM768 narrows the offered group list but no
+  ML-KEM share is ever emitted — documented deviation from the raw
+  capture, required by the non-goal.
+- **Freshness**: `verify-fingerprint-freshness.sh` checks fixture
+  existence, snapshot, per-engine `provenance`/`captured_at`, age <= 6
+  months for verified fixtures, and required `sends` keys;
+  `unverified-catalog` produces a warning.
+- **Tests**: Chrome fixture matches capture byte-values; Firefox matches
+  neqo order/values; distinct engines produce distinct blobs; GREASE
+  differs per connection; real SCID is emitted; internal config equals
+  advertised params; `max_udp_payload_size` clamps at the path budget.
+- **Deviation**: Safari stays unverified rather than carrying an invented
+  capture; `initial_source_connection_id` is empty for test/convenience
+  providers and real on transport connections — matching Chrome's own
+  zero-length SCID behavior in the capture.

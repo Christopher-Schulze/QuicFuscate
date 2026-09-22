@@ -1,32 +1,228 @@
 use super::*;
 
-#[test]
-fn default_transport_params_encode_requested_udp_payload_size() {
-    let params = RustlsProviderImpl::default_transport_params(1413)
-        .expect("custom UDP payload size must produce valid transport parameters");
-    let mut offset = 0;
-    let mut max_udp_payload_size = None;
-    while offset < params.len() {
-        let (parameter_id, parameter_id_len) =
-            qf_transport_pn::varint::read_varint(&params[offset..]).expect("parameter id");
-        offset += parameter_id_len;
-        let (parameter_length, parameter_length_len) =
-            qf_transport_pn::varint::read_varint(&params[offset..]).expect("parameter length");
-        offset += parameter_length_len;
-        let parameter_length = usize::try_from(parameter_length).expect("parameter length usize");
-        let end = offset.checked_add(parameter_length).expect("parameter end");
-        assert!(end <= params.len(), "parameter must stay within the encoded buffer");
-        if parameter_id == 0x03 {
-            let (value, value_len) =
-                qf_transport_pn::varint::read_varint(&params[offset..end]).expect("payload value");
-            assert_eq!(value_len, parameter_length);
-            max_udp_payload_size = Some(value);
-        }
-        offset = end;
-    }
+use qf_stealth::transport_params::{
+    decode_transport_params, transport_param_fixture, EngineFamily,
+};
 
-    assert_eq!(max_udp_payload_size, Some(1413));
-    assert!(RustlsProviderImpl::default_transport_params(1199).is_err());
+fn decode_varint_value(bytes: &[u8]) -> u64 {
+    let (value, len) =
+        qf_stealth::transport_params::read_varint(bytes).expect("varint value must decode");
+    assert_eq!(len, bytes.len());
+    value
+}
+
+/// framed version_information used across the fixture tests:
+/// id=0x11, len=8, chosen=1, available=[1].
+const TEST_VERSION_INFORMATION: &[u8] =
+    &[0x11, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01];
+
+fn name_to_id(name: &str) -> Option<u64> {
+    Some(match name {
+        "max_idle_timeout" => 0x01,
+        "max_udp_payload_size" => 0x03,
+        "initial_max_data" => 0x04,
+        "initial_max_stream_data_bidi_local" => 0x05,
+        "initial_max_stream_data_bidi_remote" => 0x06,
+        "initial_max_stream_data_uni" => 0x07,
+        "initial_max_streams_bidi" => 0x08,
+        "initial_max_streams_uni" => 0x09,
+        "active_connection_id_limit" => 0x0e,
+        "initial_source_connection_id" => 0x0f,
+        "version_information" => 0x11,
+        "reset_stream_at" => 0x1d,
+        "max_datagram_frame_size" => 0x20,
+        "grease_quic_bit" => 0x2ab2,
+        "google_connection_options" => 0x3128,
+        "max_ack_delay" => 0x0b,
+        "min_ack_delay" => 0xff02_de1a,
+        _ => return None,
+    })
+}
+
+#[test]
+fn fixture_transport_params_cap_udp_payload_at_path_budget() {
+    let scid = [0xabu8; 8];
+    let params = RustlsProviderImpl::fixture_transport_params(
+        EngineFamily::Chromium,
+        1413,
+        &scid,
+        TEST_VERSION_INFORMATION,
+    )
+    .expect("custom UDP payload size must produce valid transport parameters");
+    let decoded = decode_transport_params(&params);
+    let udp =
+        decoded.iter().find(|(id, _)| *id == 0x03).map(|(_, value)| decode_varint_value(value));
+    // min(fixture cap 1472, path budget 1413)
+    assert_eq!(udp, Some(1413));
+
+    assert!(
+        RustlsProviderImpl::fixture_transport_params(EngineFamily::Chromium, 1199, &scid, &[],)
+            .is_err()
+    );
+}
+
+#[test]
+fn chromium_transport_params_match_capture_fixture() {
+    let fixture = transport_param_fixture(EngineFamily::Chromium);
+    let scid = [0xabu8; 8];
+    let params = RustlsProviderImpl::fixture_transport_params(
+        EngineFamily::Chromium,
+        1350,
+        &scid,
+        TEST_VERSION_INFORMATION,
+    )
+    .expect("chromium fixture params");
+    let decoded = decode_transport_params(&params);
+    let ids: Vec<u64> = decoded.iter().map(|(id, _)| *id).collect();
+
+    // Every numeric fixture parameter in `sends` is present with the
+    // captured value, except the per-connection fields handled below.
+    let decoded_map: std::collections::BTreeMap<u64, Vec<u8>> = decoded.iter().cloned().collect();
+    for name in fixture.sends() {
+        let Some(id) = name_to_id(name) else { continue };
+        assert!(decoded_map.contains_key(&id), "fixture parameter '{name}' missing");
+        if let Some(expected) = fixture.values().get(name.as_str()) {
+            let actual = decode_varint_value(&decoded_map[&id]);
+            let expected =
+                if name == "max_udp_payload_size" { (*expected).min(1350) } else { *expected };
+            assert_eq!(actual, expected, "fixture parameter '{name}' value drifted");
+        }
+    }
+    // Real local SCID, never a constant.
+    assert_eq!(decoded_map[&0x0f], scid.to_vec());
+    // Chrome inserts exactly one GREASE transport parameter (31N+27 space;
+    // 0x2ab2/0xff02de1a are reserved ids living in that space by design).
+    let grease_ids: Vec<u64> = ids
+        .iter()
+        .copied()
+        .filter(|id| id % 31 == 27 && !matches!(*id, 0x2ab2 | 0xff02_de1a))
+        .collect();
+    assert_eq!(grease_ids.len(), 1, "chromium must emit exactly one GREASE TP");
+    // 'ORIG' google_connection_options is present.
+    assert_eq!(decoded_map[&0x3128], b"ORIG".to_vec());
+}
+
+#[test]
+fn firefox_transport_params_match_neqo_fixture_order_and_values() {
+    let fixture = transport_param_fixture(EngineFamily::Firefox);
+    let scid = [0xcdu8; 16];
+    let params = RustlsProviderImpl::fixture_transport_params(
+        EngineFamily::Firefox,
+        1350,
+        &scid,
+        TEST_VERSION_INFORMATION,
+    )
+    .expect("firefox fixture params");
+    let decoded = decode_transport_params(&params);
+    // neqo order is fixed: ids must appear exactly in fixture `sends` order.
+    let expected_ids: Vec<u64> =
+        fixture.sends().iter().filter_map(|name| name_to_id(name)).collect();
+    let actual_ids: Vec<u64> = decoded.iter().map(|(id, _)| *id).collect();
+    assert_eq!(actual_ids, expected_ids, "firefox TP order must match fixture");
+
+    let decoded_map: std::collections::BTreeMap<u64, Vec<u8>> = decoded.iter().cloned().collect();
+    for name in fixture.sends() {
+        if let Some(expected) = fixture.values().get(name.as_str()) {
+            let id = name_to_id(name).expect("mapped name");
+            assert_eq!(
+                decode_varint_value(&decoded_map[&id]),
+                *expected,
+                "firefox fixture parameter '{name}' value drifted"
+            );
+        }
+    }
+    assert_eq!(decoded_map[&0x0f], scid.to_vec());
+    // neqo emits empty grease_quic_bit and reset_stream_at parameters.
+    assert_eq!(decoded_map[&0x2ab2], Vec::<u8>::new());
+    assert_eq!(decoded_map[&0x1d], Vec::<u8>::new());
+}
+
+#[test]
+fn personas_do_not_share_parameter_structure() {
+    let scid = [0xabu8; 8];
+    let chrome_ids: std::collections::BTreeSet<u64> = decode_transport_params(
+        &RustlsProviderImpl::fixture_transport_params(
+            EngineFamily::Chromium,
+            1350,
+            &scid,
+            TEST_VERSION_INFORMATION,
+        )
+        .expect("chromium"),
+    )
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect();
+    let firefox_ids: std::collections::BTreeSet<u64> = decode_transport_params(
+        &RustlsProviderImpl::fixture_transport_params(
+            EngineFamily::Firefox,
+            1350,
+            &scid,
+            TEST_VERSION_INFORMATION,
+        )
+        .expect("firefox"),
+    )
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect();
+    assert_ne!(chrome_ids, firefox_ids, "distinct engines must emit distinct TP sets");
+}
+
+#[test]
+fn grease_values_differ_per_connection() {
+    let scid = [0xabu8; 8];
+    let first =
+        RustlsProviderImpl::fixture_transport_params(EngineFamily::Chromium, 1350, &scid, &[])
+            .expect("first");
+    let second =
+        RustlsProviderImpl::fixture_transport_params(EngineFamily::Chromium, 1350, &scid, &[])
+            .expect("second");
+    let grease = |encoded: &[u8]| -> Vec<(u64, Vec<u8>)> {
+        decode_transport_params(encoded)
+            .into_iter()
+            .filter(|(id, _)| id % 31 == 27 && !matches!(*id, 0x2ab2 | 0xff02_de1a))
+            .collect()
+    };
+    let (g1, g2) = (grease(&first), grease(&second));
+    assert_eq!(g1.len(), 1);
+    assert_eq!(g2.len(), 1);
+    // Real GREASE: id or value must differ across connections.
+    assert!(g1[0].0 != g2[0].0 || g1[0].1 != g2[0].1, "GREASE must be per-connection");
+}
+
+#[test]
+fn apply_profile_rebuilds_transport_params_from_persona_fixture() {
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    let clock = crate::time_source::ProtocolClock::default();
+    let scid = [0x42u8; 16];
+    let mut provider = RustlsProviderImpl::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        false,
+        false,
+        PROTOCOL_VERSION,
+        &[],
+        None,
+        &environment,
+        &clock,
+        1350,
+        &scid,
+    )
+    .expect("client provider");
+
+    let profile = TlsProfile::firefox_133();
+    provider.apply_profile_to_config(&profile).expect("apply persona");
+
+    let decoded: std::collections::BTreeMap<u64, Vec<u8>> =
+        decode_transport_params(&provider.transport_params).into_iter().collect();
+    let fixture = transport_param_fixture(EngineFamily::Firefox);
+    let initial_max_data = decode_varint_value(&decoded[&0x04]);
+    assert_eq!(initial_max_data, fixture.values()["initial_max_data"]);
+    assert_eq!(decoded[&0x0f], scid.to_vec());
+    // The fingerprint applied to the internal transport config reads from
+    // the same fixture: advertised and internal values cannot drift.
+    let fingerprint = qf_stealth::FingerprintProfile::new(
+        qf_stealth::BrowserProfile::Firefox,
+        qf_stealth::OsProfile::Linux,
+    );
+    assert_eq!(initial_max_data, fingerprint.initial_max_data);
 }
 
 mod profile_delay_tests {

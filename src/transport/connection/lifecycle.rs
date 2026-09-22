@@ -1160,6 +1160,7 @@ impl Connection {
             &self.environment,
             &self.clock,
             self.config.max_udp_payload_size as usize,
+            self.scid.as_ref(),
         )?;
 
         // Store provider

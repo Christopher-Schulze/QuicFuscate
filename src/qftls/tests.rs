@@ -362,7 +362,13 @@ fn v2_provider_carries_version_information_transport_parameter() {
     .unwrap();
     let provider = create_provider_for_version(false, false, PROTOCOL_VERSION_V2, &information)
         .expect("create v2 provider");
-    assert!(provider.get_quic_transport_params().ends_with(&information));
+    // version_information sits inside the persona fixture block (position
+    // follows the engine's captured order), no longer appended at the end.
+    let params = provider.get_quic_transport_params();
+    assert!(
+        params.windows(information.len()).any(|window| window == information.as_slice()),
+        "encoded version_information parameter must appear in the TP block"
+    );
 }
 
 #[test]
@@ -737,30 +743,21 @@ fn profile_chlo_extension_order_keeps_psk_last_when_present() {
 }
 
 #[test]
-fn chrome_extension_order_uses_unique_registered_extension_types() {
+fn chrome_extension_order_matches_wire_capture() {
     let profile = TlsProfile::chrome_130();
-    let known_chrome_extensions = [
-        0x0000, 0x000d, 0x0010, 0x0017, 0x001b, 0x0023, 0x0029, 0x002b, 0x002d, 0x0033, 0x0039,
-        0x0a0a, 0xfe0d, 0xff01,
+    // Captured Chrome 154 QUIC ClientHello extension order (TODO-1047):
+    // GREASE(0xca34), QTP(0x0039), psk_modes(0x002d), ALPS(0x44cd),
+    // GREASE(0x12e0), groups(0x000a), ALPN(0x0010), key_share(0x0033),
+    // compress_cert(0x001b), versions(0x002b), sig_algs(0x000d), ECH(0xfe0d).
+    let captured = [
+        0xca34u16, 0x0039, 0x002d, 0x44cd, 0x12e0, 0x000a, 0x0010, 0x0033, 0x001b, 0x002b, 0x000d,
+        0xfe0d,
     ];
-
-    let mut unique_extensions = profile.extension_order.clone();
-    unique_extensions.sort_unstable();
-    unique_extensions.dedup();
-    assert_eq!(
-        unique_extensions.len(),
-        profile.extension_order.len(),
-        "Chrome extension order must not contain duplicate IDs"
-    );
-    assert!(
-        profile.extension_order.iter().all(|extension| known_chrome_extensions.contains(extension)),
-        "Chrome extension order contains an unknown extension type: {:?}",
-        profile.extension_order
-    );
-    assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0x0000).count(), 1);
-    assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0xff01).count(), 1);
-    assert_eq!(profile.extension_order.iter().filter(|&&id| id == 0x001b).count(), 1);
-    assert!(!profile.extension_order.contains(&0x0019));
+    assert_eq!(profile.extension_order, captured);
+    let mut unique = profile.extension_order.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), profile.extension_order.len());
 }
 
 #[test]
@@ -838,9 +835,16 @@ fn test_profile_random_produces_valid_profile() {
     for _ in 0..20 {
         let p = TlsProfile::random();
         assert!(!p.name.is_empty(), "random profile must have a name");
-        assert!(
+        // Extension order is populated only where the fixture holds a
+        // verified capture (Chromium today); Firefox/Safari stay empty until
+        // their sources are verified rather than carrying invented orders.
+        assert_eq!(
             !p.extension_order.is_empty(),
-            "random profile must have non-empty extensions for {}",
+            matches!(
+                p.browser,
+                qf_stealth::BrowserProfile::Chrome | qf_stealth::BrowserProfile::Edge
+            ),
+            "extension order presence must follow the fixture for {}",
             p.name
         );
         assert!(

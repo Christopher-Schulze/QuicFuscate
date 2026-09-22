@@ -653,6 +653,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
         environment,
         clock,
         rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+        &[],
     )
 }
 
@@ -666,6 +667,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
     max_udp_payload_size: usize,
+    local_scid: &[u8],
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
     Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
@@ -676,6 +678,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
         environment,
         clock,
         max_udp_payload_size,
+        local_scid,
     )?))
 }
 
@@ -765,6 +768,7 @@ impl CombinedProvider {
             environment,
             clock,
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+            &[],
         )
     }
 
@@ -778,6 +782,7 @@ impl CombinedProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
+        local_scid: &[u8],
     ) -> Result<Self, ConnectionError> {
         let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
@@ -788,6 +793,7 @@ impl CombinedProvider {
             environment,
             clock,
             max_udp_payload_size,
+            local_scid,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
@@ -1070,6 +1076,7 @@ impl RustlsProvider {
             environment,
             clock,
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+            &[],
         )
     }
 
@@ -1083,6 +1090,7 @@ impl RustlsProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
+        local_scid: &[u8],
     ) -> Result<Self, ConnectionError> {
         Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
@@ -1093,6 +1101,7 @@ impl RustlsProvider {
             environment,
             clock,
             max_udp_payload_size,
+            local_scid,
         )?))
     }
 }
@@ -1106,12 +1115,11 @@ impl RustlsProvider {
         profile.timing_jitter = None;
         let mut provider = Self::new(false, false, PROTOCOL_VERSION, &[])?;
         QuicTlsProvider::configure(&mut provider, &profile)?;
-        let (_offset, frame) = QuicTlsProvider::next_crypto_frame(
-            &mut provider,
-            Level::Initial,
-            usize::MAX,
-        )?
-        .ok_or_else(|| ConnectionError::CryptoError("rustls produced no ClientHello".into()))?;
+        let (_offset, frame) =
+            QuicTlsProvider::next_crypto_frame(&mut provider, Level::Initial, usize::MAX)?
+                .ok_or_else(|| {
+                    ConnectionError::CryptoError("rustls produced no ClientHello".into())
+                })?;
         Ok(frame.len())
     }
 }
