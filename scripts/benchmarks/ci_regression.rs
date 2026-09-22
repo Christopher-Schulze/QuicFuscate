@@ -805,7 +805,6 @@ fn bench_brain_apply_policy(c: &mut Criterion) {
     #[derive(Clone, Copy)]
     struct BrainCase {
         name: &'static str,
-        intelligent_runtime: bool,
         policy_cooldown_ms: u64,
         ack_delay: u64,
         ect0: u64,
@@ -818,7 +817,6 @@ fn bench_brain_apply_policy(c: &mut Criterion) {
     for case in [
         BrainCase {
             name: "clean_observer",
-            intelligent_runtime: false,
             policy_cooldown_ms: 300,
             ack_delay: 900,
             ect0: 10_000,
@@ -826,7 +824,6 @@ fn bench_brain_apply_policy(c: &mut Criterion) {
         },
         BrainCase {
             name: "intelligent_clean",
-            intelligent_runtime: true,
             policy_cooldown_ms: 300,
             ack_delay: 900,
             ect0: 10_000,
@@ -834,7 +831,6 @@ fn bench_brain_apply_policy(c: &mut Criterion) {
         },
         BrainCase {
             name: "intelligent_pressure_actuating",
-            intelligent_runtime: true,
             policy_cooldown_ms: 0,
             ack_delay: 18_000,
             ect0: 9_400,
@@ -843,14 +839,10 @@ fn bench_brain_apply_policy(c: &mut Criterion) {
     ] {
         group.bench_function(case.name, |bench| {
             let mut pair = bench_paired_1rtt_connections();
-            pair.client.bench_set_brain_runtime(
-                case.intelligent_runtime,
-                BrainRuntimePermissions::default(),
-            );
+            pair.client.bench_set_brain_runtime(BrainRuntimePermissions::default());
 
             let brain = StealthBrain::new(StealthBrainConfig {
                 policy_cooldown_ms: case.policy_cooldown_ms,
-                explore_prob: 0.0,
                 ..Default::default()
             });
             for pn in 0..256u64 {

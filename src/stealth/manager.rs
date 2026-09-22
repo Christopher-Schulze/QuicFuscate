@@ -772,7 +772,7 @@ impl StealthManager {
             self.escalate_to_level(level);
 
             // Inject pressure into the Brain's signal_other bucket so the next
-            // derive_intelligent_runtime_policy call aligns with the escalation.
+            // actuator derivation sees the escalation alongside probe_level.
             crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.fetch_add(10, Ordering::Relaxed);
 
             // Arm the Reality/MASQUE relay window (Level 2 only). The armed
@@ -862,53 +862,16 @@ impl StealthManager {
     }
 
     /// Computes which transport knobs the brain is allowed to adjust at runtime.
+    ///
+    /// TODO-1060 narrowed the Brain to the repair-ratio hint, the
+    /// Reality/MASQUE armed bit and the congestion-driven ACK threshold.
+    /// The first two travel through `IntelligentLevelHints`/FEC hints — the
+    /// only knob this permission still gates is the ACK threshold, locked
+    /// when the operator claimed it explicitly.
     pub(crate) fn brain_runtime_permissions(&self) -> crate::transport::BrainRuntimePermissions {
-        // TODO-1059: `dynamic` froze its wire image at connect. The Brain may
-        // still steer the repair-ratio hint (probe level → fec_hint_ppm) and
-        // the Reality/MASQUE armed bit, but no packet-shape actuator.
-        if self.is_intelligent_runtime() {
-            return crate::transport::BrainRuntimePermissions::deny_all();
-        }
         let ack_locked = self.config.transport_ack_threshold_override(&self.env_snapshot).is_some()
             || self.config.transport_ack_max_delay_override(&self.env_snapshot).is_some();
-        let timing_locked =
-            self.config.transport_external_pacing_override(&self.env_snapshot).is_some()
-                || self.config.transport_jitter_override_us(&self.env_snapshot).is_some();
-        let padding_locked = self
-            .config
-            .transport_padding_max_override(&self.env_snapshot)
-            .is_some()
-            || self.config.transport_wire_shape_override(&self.env_snapshot).is_some()
-            || self.config.transport_adaptive_granularity_override(&self.env_snapshot).is_some()
-            || self.config.transport_mimic_bias_override(&self.env_snapshot).is_some();
-        let manual_transport_locked = ack_locked || timing_locked || padding_locked;
-
-        crate::transport::BrainRuntimePermissions {
-            ack_threshold: !ack_locked,
-            external_pacing: !timing_locked,
-            timing: !timing_locked,
-            padding: !padding_locked,
-            mimic_bias: !padding_locked,
-            granularity: !padding_locked,
-            cc_profile: !manual_transport_locked,
-        }
-    }
-
-    /// Derives a concrete runtime stealth policy from brain-supplied signal inputs.
-    #[cfg(test)]
-    pub(crate) fn derive_intelligent_runtime_policy(
-        inputs: IntelligentStealthInputs,
-    ) -> crate::transport::StealthRuntimePolicy {
-        let environment = crate::env_utils::EnvSnapshot::capture();
-        Self::derive_intelligent_runtime_policy_with_snapshot(inputs, &environment)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn derive_intelligent_runtime_policy_with_snapshot(
-        inputs: IntelligentStealthInputs,
-        environment: &crate::env_utils::EnvSnapshot,
-    ) -> crate::transport::StealthRuntimePolicy {
-        qf_stealth::derive_intelligent_runtime_policy(inputs, environment)
+        crate::transport::BrainRuntimePermissions { ack_threshold: !ack_locked }
     }
 
     /// Returns true if active stealth features (beyond Performance/Off) are engaged.

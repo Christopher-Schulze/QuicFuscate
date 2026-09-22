@@ -517,7 +517,7 @@
 - Detail: `docs/todo/todo-1059-dynamic-holds-one-wire-image.md`
 
 ### TODO-1060 - Brain sensors may switch repairs and Reality, not the packet shape
-- OPEN. Keep loss/RTT/probe sensors. Delete bandit-chosen padding and jitter. Shape comes from the frozen image or later from Maybenot.
+- DONE. The epsilon-greedy bandit, Tamaraw table, `StealthRuntimePolicy`/`StealthRuntimeDelta` and every padding/jitter/bias/granularity/CC writer are gone. The Brain keeps sensors (Kalman CE, JS divergence, reorder, RTT, probe bit) and emits exactly three actuators: the EMA-bounded repair-ratio hint (inside the TODO-1052 cap), the Reality/MASQUE armed bit, and the congestion-driven ACK threshold — which stays because it only moves *when* ACKs emit, never the length set, and is operator-lockable via `BrainRuntimePermissions`. `apply_policy` performs zero environment reads. Acceptance: 1000 brain ticks under shifting loss never touch `PaddingStrategy`, timing, or framing.
 - Detail: `docs/todo/todo-1060-brain-sensors-not-pattern.md`
 
 ### TODO-1061 - Maybenot as the measured wire defense

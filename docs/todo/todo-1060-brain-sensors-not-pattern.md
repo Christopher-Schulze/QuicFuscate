@@ -4,8 +4,9 @@ title: Brain sensors may switch repairs and Reality, not the packet shape
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
+completed: 2026-09-21
 depends_on: [TODO-1059]
 ---
 
@@ -53,10 +54,10 @@ The packet shape comes from the frozen image (TODO-1059) or, later, from a Maybe
 
 ## Sub-Tasks
 
-- [ ] Output inventory in Notes.
-- [ ] Narrow the policy struct.
-- [ ] Disconnect padding and jitter writers.
-- [ ] Test: 1000 brain ticks under shifting loss do not change `PaddingStrategy` or framing.
+- [x] Output inventory in Notes.
+- [x] Narrow the policy struct.
+- [x] Disconnect padding and jitter writers.
+- [x] Test: 1000 brain ticks under shifting loss do not change `PaddingStrategy` or framing.
 
 ## Acceptance
 
@@ -67,3 +68,33 @@ The packet shape comes from the frozen image (TODO-1059) or, later, from a Maybe
 ## Risks
 
 - ACK-threshold control might be a congestion feature, not a stealth feature. If it only affects when ACKs are sent, keep it under the PTO clamp from TODO-1053. Do not let it add a second spacing pattern. Note the decision in this file if ACK threshold stays.
+
+## Notes
+
+### Output inventory (what `StealthBrain` used to write)
+
+| Old output | Verdict |
+| --- | --- |
+| ACK-eliciting threshold (bandit arms {2,3,4,8}) | KEEP as pure congestion feature — no bandit, CE/ACK-cadence driven, step-limited, operator-lockable |
+| `StealthRuntimeDelta` { timing, padding, bias, granularity, cc_profile, external_pacing } | DROP — all shape fields |
+| `StealthRuntimePolicy` via `derive_intelligent_runtime_policy` | DROP — replaced by `derive_intelligent_actuators` |
+| Tamaraw direction table + `tamaraw_runtime_snapshot` stats | DROP |
+| epsilon-greedy explore roll (`explore_prob`, `pad_max_*`, `jitter_dither_pct`, `PADDING_RATE_LEVEL1` env) | DROP |
+| `BrainFecHints` repair-ratio + interval | KEEP — inside the TODO-1052 shared byte cap |
+| `IntelligentLevelHints` -> Reality/MASQUE armed bit | KEEP — probe escalation may still arm |
+| `intelligent_stealth_runtime` config gate + `apply_brain_stealth_runtime_delta` | DROP — no runtime delta path remains |
+| `TransportPolicyError`, `delivery_rate`/`pacing_rate_bps`/`intelligent_stealth_runtime_enabled` trait methods | DROP — `TransportPolicyTarget` exposes only `brain_runtime_permissions()` + `set_ack_eliciting_threshold()` |
+
+### Decisions
+
+- **ACK threshold stays.** It changes *when* ACKs are emitted, never the packet length set or framing — a congestion function, not a shape actuator. The bandit arms are gone; the threshold is now derived from CE pressure and ACK cadence, step-limited by one per policy tick, clamped to `[ack_min, ack_max]`, and locked out when the operator sets `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` (`BrainRuntimePermissions { ack_threshold }`).
+- **`BrainRuntimePermissions` is reduced to `deny_all()`/`ack_threshold`** — `dynamic` (TODO-1059) installs `deny_all()`, so the Brain cannot reach even the threshold there.
+- **`StealthBrainConfig` keeps only sensor/cooldown knobs**: ACK bounds, histogram bins, probe budget, `hist_decay`, `jitter_max_us` (feeds jitter-pressure sensing only — it is never emitted as timing).
+- **`environment` field deleted** (supersedes TODO-894): the actuator derivation takes no `EnvSnapshot`; `apply_policy` performs zero environment reads.
+- Connect-time `config.set_stealth_*` stays — it defines the frozen image, not a runtime mutation surface.
+
+### Acceptance evidence
+
+- `thousand_ticks_under_shifting_loss_never_change_shape` (`src/brain.rs`): 1000 `apply_policy` ticks under varying packet sizes, reordering, ACK delays and ECN — timing config, padding enable, `PaddingStrategy` and the (absent) stealth-CC wrapper are byte-identical afterwards.
+- `brain_never_touches_the_frozen_wire_shape`, `brain_writes_repair_hints_and_ack_threshold_only`, `brain_respects_ack_threshold_lock` cover the narrowed surface.
+- qf-stealth `143/143`, qf-transport-types `41/41`, root lib `1775/1775`; workspace `--all-targets` clean.

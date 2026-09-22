@@ -1,9 +1,8 @@
 pub use qf_transport_types::{
     BrainRuntimePermissions, BrowserProfile, CongestionControlAlgorithm, ConnectionId,
     DatagramClass, EcnCounts, EcnMark, Epoch, FecControlDelta, Frame, Header, PacketType,
-    PathStats, RecvInfo, SendInfo, Stats, StealthRuntimeDelta, StealthRuntimePolicy,
-    TransportError as Error, TransportObserver, TransportPolicyError, TransportPolicyTarget,
-    MAX_CONN_ID_LEN,
+    PathStats, RecvInfo, SendInfo, Stats, TransportError as Error, TransportObserver,
+    TransportPolicyTarget, MAX_CONN_ID_LEN,
 };
 pub use qf_transport_version::{is_supported_version, PROTOCOL_VERSION, PROTOCOL_VERSION_V2};
 use std::collections::BTreeMap;
@@ -400,7 +399,7 @@ mod core_extra_tests {
         let scid = ConnectionId::from_ref(&[3; MAX_CONN_ID_LEN]);
         let mut conn =
             packet::connect(None, scid.as_ref(), local, peer, &mut cfg).expect("connect");
-        conn.set_external_pacing(true);
+        conn.set_external_pacing_for_test(true);
         assert!(conn.external_pacing_enabled());
     }
 

@@ -14,54 +14,23 @@ pub struct FecControlDelta {
     pub force_streaming: bool,
 }
 
-/// Per-connection permission flags controlling Brain stealth actuators.
+/// Per-connection permission flag for the remaining Brain actuator.
+///
+/// TODO-1060 removed every packet-shape actuator from the Brain: pacing,
+/// timing, padding, mimic bias, granularity and the CC profile are frozen
+/// with the wire image (TODO-1059). The only transport knob left is the
+/// ACK-eliciting threshold, a congestion feature — it decides *when* ACKs
+/// are emitted under CE pressure, never the packet length set or framing.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct BrainRuntimePermissions {
     /// Allow Brain to adjust the ACK-eliciting threshold.
     pub ack_threshold: bool,
-    /// Allow Brain to toggle external pacing control.
-    pub external_pacing: bool,
-    /// Allow Brain to adjust stealth timing jitter.
-    pub timing: bool,
-    /// Allow Brain to adjust stealth padding parameters.
-    pub padding: bool,
-    /// Allow Brain to change the browser mimic bias code.
-    pub mimic_bias: bool,
-    /// Allow Brain to adjust adaptive padding granularity.
-    pub granularity: bool,
-    /// Allow Brain to switch the congestion control browser profile.
-    pub cc_profile: bool,
-}
-
-impl BrainRuntimePermissions {
-    /// No packet-shape actuator at all (TODO-1059): the connection's wire
-    /// image was frozen at connect, so the Brain may only steer the separate
-    /// repair-ratio and Reality/MASQUE-armed hints, never this table.
-    pub const fn deny_all() -> Self {
-        Self {
-            ack_threshold: false,
-            external_pacing: false,
-            timing: false,
-            padding: false,
-            mimic_bias: false,
-            granularity: false,
-            cc_profile: false,
-        }
-    }
 }
 
 impl Default for BrainRuntimePermissions {
     fn default() -> Self {
-        Self {
-            ack_threshold: true,
-            external_pacing: true,
-            timing: true,
-            padding: true,
-            mimic_bias: true,
-            granularity: true,
-            cc_profile: true,
-        }
+        Self { ack_threshold: true }
     }
 }
 
@@ -72,14 +41,6 @@ pub struct IntelligentLevelHints {
     brain_level: AtomicU32,
     probe_level: AtomicU32,
     prefer_masque: AtomicU32,
-    /// Last downstream density (`ack_us`) published by the Brain, microseconds.
-    last_ack_us: AtomicU32,
-    /// Last upstream density (`up_us`) published by the Brain, microseconds.
-    last_up_us: AtomicU32,
-    /// Last derived padding rate (0-100) after the direction-aware table.
-    last_padding_rate: AtomicU32,
-    /// Last derived outbound jitter ceiling, microseconds.
-    last_jitter_us: AtomicU32,
 }
 
 impl IntelligentLevelHints {
@@ -90,10 +51,6 @@ impl IntelligentLevelHints {
             brain_level: AtomicU32::new(0),
             probe_level: AtomicU32::new(0),
             prefer_masque: AtomicU32::new(0),
-            last_ack_us: AtomicU32::new(0),
-            last_up_us: AtomicU32::new(0),
-            last_padding_rate: AtomicU32::new(0),
-            last_jitter_us: AtomicU32::new(0),
         }
     }
 
@@ -111,7 +68,8 @@ impl IntelligentLevelHints {
         self.set_brain_level(level);
     }
 
-    /// Records this connection's MASQUE preference.
+    /// Records this connection's MASQUE preference (the Reality/MASQUE armed
+    /// bit — the only armed actuator the Brain may still move, TODO-1060).
     #[inline(always)]
     #[doc(hidden)]
     pub fn set_prefer_masque(&self, prefer: bool) {
@@ -148,44 +106,6 @@ impl IntelligentLevelHints {
             .max(self.probe_level.load(Ordering::Relaxed))
             .min(2)
     }
-
-    /// Publishes the last Tamaraw direction-table inputs and derived knobs.
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn set_tamaraw_snapshot(&self, ack_us: u32, up_us: u32, padding_rate: u8, jitter_us: u32) {
-        self.last_ack_us.store(ack_us, Ordering::Relaxed);
-        self.last_up_us.store(up_us, Ordering::Relaxed);
-        self.last_padding_rate.store(u32::from(padding_rate), Ordering::Relaxed);
-        self.last_jitter_us.store(jitter_us, Ordering::Relaxed);
-    }
-
-    /// Downstream ACK-cadence density in microseconds.
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn last_ack_us(&self) -> u32 {
-        self.last_ack_us.load(Ordering::Relaxed)
-    }
-
-    /// Upstream delivery-rate density in microseconds.
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn last_up_us(&self) -> u32 {
-        self.last_up_us.load(Ordering::Relaxed)
-    }
-
-    /// Last derived padding rate after the downstream phase row.
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn last_padding_rate(&self) -> u8 {
-        self.last_padding_rate.load(Ordering::Relaxed).min(100) as u8
-    }
-
-    /// Last derived outbound jitter ceiling after the upstream phase row.
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn last_jitter_us(&self) -> u32 {
-        self.last_jitter_us.load(Ordering::Relaxed)
-    }
 }
 
 #[cfg(test)]
@@ -201,15 +121,11 @@ mod tests {
     }
 
     #[test]
-    fn default_brain_permissions_allow_all_actuators() {
+    fn default_brain_permissions_allow_the_congestion_actuator() {
+        // The ACK threshold is a congestion feature: enabled by default and
+        // locked only when an operator override claims the knob.
         let permissions = BrainRuntimePermissions::default();
         assert!(permissions.ack_threshold);
-        assert!(permissions.external_pacing);
-        assert!(permissions.timing);
-        assert!(permissions.padding);
-        assert!(permissions.mimic_bias);
-        assert!(permissions.granularity);
-        assert!(permissions.cc_profile);
     }
 
     #[test]
@@ -225,12 +141,5 @@ mod tests {
         let second = IntelligentLevelHints::new();
         assert_eq!(second.effective_level(), 0);
         assert!(!second.prefer_masque());
-        first.set_tamaraw_snapshot(1_000, 12_000, 20, 850);
-        assert_eq!(first.last_ack_us(), 1_000);
-        assert_eq!(first.last_up_us(), 12_000);
-        assert_eq!(first.last_padding_rate(), 20);
-        assert_eq!(first.last_jitter_us(), 850);
-        assert_eq!(second.last_ack_us(), 0);
-        assert_eq!(second.last_up_us(), 0);
     }
 }

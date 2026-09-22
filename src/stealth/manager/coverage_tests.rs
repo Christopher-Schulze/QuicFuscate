@@ -630,112 +630,89 @@ mod stealth_coverage_tests {
     }
 
     // =========================================================================
-    // 9. Intelligent mode policy derivation
+    // 9. Intelligent mode actuator derivation (TODO-1060)
     // =========================================================================
 
-    #[test]
-    fn intelligent_policy_level0_clean_disables_padding() {
-        let policy = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-            level_hint: 0,
+    fn clean_inputs() -> qf_stealth::IntelligentStealthInputs {
+        qf_stealth::IntelligentStealthInputs {
+            ce_effective: 0.0,
             ce_ratio_recent: 0.0,
             ack_us: 1000.0,
-            up_us: 0.0,
+            jitter_ratio: 0.0,
+            reorder_ratio: 0.0,
+            rtt_spike_weight: 0.0,
             size_div: 0.1,
             iat_div: 0.1,
-            reorder_ratio: 0.0,
-            rtt_spike_weight: 0.0,
+            signal_rst: 0,
             signal_tos: 0,
             signal_other: 0,
-            jitter_max_us: 1000,
-            pad_max_low: 128,
-            pad_max_high: 640,
-        });
-        assert!(policy.external_pacing);
-        assert!(!policy.padding_enabled);
-        assert_eq!(policy.padding_max, 0);
+            probe_level: 0,
+        }
     }
 
     #[test]
-    fn intelligent_policy_high_ce_ratio_activates_padding() {
-        let policy = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-            level_hint: 1,
-            ce_ratio_recent: 0.15,
-            ack_us: 10000.0,
-            up_us: 0.0,
-            size_div: 0.5,
-            iat_div: 0.5,
-            reorder_ratio: 0.05,
-            rtt_spike_weight: 3.0,
-            signal_tos: 0,
-            signal_other: 1,
-            jitter_max_us: 2000,
-            pad_max_low: 128,
-            pad_max_high: 640,
-        });
-        assert!(policy.padding_enabled);
-        assert!(policy.timing_enabled);
-        assert!(!policy.external_pacing);
+    fn intelligent_actuators_clean_path_stays_at_baseline() {
+        let mut state = qf_stealth::IntelligentRepairState::default();
+        let hints = qf_stealth::derive_intelligent_actuators(clean_inputs(), &mut state);
+        assert!(!hints.reality_armed);
+        assert!((80_000..=320_000).contains(&hints.repair_ratio_ppm));
+        assert!((2..=20).contains(&hints.repair_interval_pkts));
     }
 
     #[test]
-    fn intelligent_policy_tos_anomaly_triggers_adaptive_padding() {
-        let policy = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-            level_hint: 1,
-            ce_ratio_recent: 0.005,
-            ack_us: 5000.0,
-            up_us: 0.0,
-            size_div: 0.8,
-            iat_div: 0.7,
-            reorder_ratio: 0.0,
-            rtt_spike_weight: 0.0,
-            signal_tos: 1,
-            signal_other: 0,
-            jitter_max_us: 1500,
-            pad_max_low: 100,
-            pad_max_high: 500,
-        });
-        assert!(policy.padding_enabled);
-        // ToS anomaly -> adaptive strategy (3)
-        assert_eq!(policy.padding_strategy, 3);
+    fn intelligent_actuators_raise_repair_ratio_under_ce() {
+        let mut state = qf_stealth::IntelligentRepairState::default();
+        let clean = qf_stealth::derive_intelligent_actuators(clean_inputs(), &mut state);
+        let pressured = qf_stealth::derive_intelligent_actuators(
+            qf_stealth::IntelligentStealthInputs {
+                ce_effective: 0.15,
+                ce_ratio_recent: 0.15,
+                ack_us: 10_000.0,
+                jitter_ratio: 0.3,
+                reorder_ratio: 0.05,
+                rtt_spike_weight: 3.0,
+                size_div: 0.5,
+                iat_div: 0.5,
+                signal_rst: 0,
+                signal_tos: 0,
+                signal_other: 1,
+                probe_level: 0,
+            },
+            &mut state,
+        );
+        assert!(pressured.reality_armed);
+        assert!(pressured.repair_ratio_ppm > clean.repair_ratio_ppm);
+        assert!((80_000..=320_000).contains(&pressured.repair_ratio_ppm));
     }
 
     #[test]
-    fn intelligent_policy_mimic_bias_varies_with_inputs() {
-        // High CE ratio -> bias=1 (Safari-like small packets)
-        let p1 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-            level_hint: 2,
-            ce_ratio_recent: 0.10,
-            ack_us: 12000.0,
-            up_us: 0.0,
-            size_div: 1.5,
-            iat_div: 1.0,
-            reorder_ratio: 0.0,
-            rtt_spike_weight: 0.0,
-            signal_tos: 0,
-            signal_other: 0,
-            jitter_max_us: 1000,
-            pad_max_low: 128,
-            pad_max_high: 640,
-        });
-        assert_eq!(p1.mimic_bias, 1);
+    fn intelligent_actuators_arm_reality_on_tos_anomaly() {
+        let mut state = qf_stealth::IntelligentRepairState::default();
+        let hints = qf_stealth::derive_intelligent_actuators(
+            qf_stealth::IntelligentStealthInputs { signal_tos: 1, ..clean_inputs() },
+            &mut state,
+        );
+        assert!(hints.reality_armed, "ToS anomaly must arm the Reality hint");
+    }
 
-        // Fast ACK, low divergence -> bias=4 (mobile)
-        let p2 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-            level_hint: 0,
-            ce_ratio_recent: 0.0,
-            ack_us: 1000.0,
-            up_us: 0.0,
-            size_div: 0.1,
-            iat_div: 0.1,
-            reorder_ratio: 0.0,
-            rtt_spike_weight: 0.0,
-            signal_tos: 0,
-            signal_other: 0,
-            jitter_max_us: 1000,
-            pad_max_low: 128,
-            pad_max_high: 640,
-        });
-        assert_eq!(p2.mimic_bias, 4);
+    #[test]
+    fn intelligent_actuators_smooth_repair_ratio() {
+        // EMA momentum prevents one-tick jumps: repeated clean ticks after a
+        // pressured tick relax the ratio gradually instead of snapping back.
+        let mut state = qf_stealth::IntelligentRepairState::default();
+        let _ = qf_stealth::derive_intelligent_actuators(
+            qf_stealth::IntelligentStealthInputs {
+                ce_effective: 0.20,
+                ce_ratio_recent: 0.20,
+                ..clean_inputs()
+            },
+            &mut state,
+        );
+        let relaxing = qf_stealth::derive_intelligent_actuators(clean_inputs(), &mut state);
+        assert!(
+            relaxing.repair_ratio_ppm >= 80_000,
+            "ratio must stay inside the byte cap bounds while relaxing"
+        );
     }
 
     // =========================================================================
@@ -791,53 +768,24 @@ mod stealth_coverage_tests {
     #[test]
     fn brain_permissions_all_unlocked_by_default() {
         let _lock = acquire_env_lock();
-        // Clear all relevant env vars
+        // TODO-1060: the permission table only gates the congestion-driven
+        // ACK threshold — unlocked unless an operator override claims it.
         let _a = EnvGuard::set("QUICFUSCATE_ACK_THRESHOLD", "");
-        let _b = EnvGuard::set("QUICFUSCATE_STEALTH_JITTER_US", "");
-        let _c = EnvGuard::set("QUICFUSCATE_STEALTH_PADDING_STRATEGY", "");
-        let _d = EnvGuard::set("QUICFUSCATE_STEALTH_MIMIC_BIAS", "");
-        let _e = EnvGuard::set("QUICFUSCATE_EXTERNAL_PACING", "");
-        let _f = EnvGuard::set("QUICFUSCATE_STEALTH_PADDING_MAX", "");
-        let _g = EnvGuard::set("QUICFUSCATE_STEALTH_MAX_PADDING", "");
-        let _h = EnvGuard::set("QUICFUSCATE_ACK_MAX_DELAY_MS", "");
-        let _i = EnvGuard::set("QUICFUSCATE_STEALTH_ADAPTIVE_GRAN", "");
+        let _b = EnvGuard::set("QUICFUSCATE_ACK_MAX_DELAY_MS", "");
 
         // Remove empty vars so env_first returns None
         unsafe {
             std::env::remove_var("QUICFUSCATE_ACK_THRESHOLD");
-            std::env::remove_var("QUICFUSCATE_STEALTH_JITTER_US");
-            std::env::remove_var("QUICFUSCATE_STEALTH_PADDING_STRATEGY");
-            std::env::remove_var("QUICFUSCATE_STEALTH_MIMIC_BIAS");
-            std::env::remove_var("QUICFUSCATE_EXTERNAL_PACING");
-            std::env::remove_var("QUICFUSCATE_STEALTH_PADDING_MAX");
-            std::env::remove_var("QUICFUSCATE_STEALTH_MAX_PADDING");
             std::env::remove_var("QUICFUSCATE_ACK_MAX_DELAY_MS");
-            std::env::remove_var("QUICFUSCATE_STEALTH_ADAPTIVE_GRAN");
-            std::env::remove_var("QUICFUSCATE_PADDING_STRATEGY");
         }
 
-        // `dynamic` denies every packet-shape actuator — the frozen image
-        // owns the wire (TODO-1059); only repair/reality hints may move.
-        let dynamic = make_manager(StealthConfig::dynamic());
-        let perms = dynamic.brain_runtime_permissions();
-        assert!(!perms.ack_threshold);
-        assert!(!perms.external_pacing);
-        assert!(!perms.timing);
-        assert!(!perms.padding);
-        assert!(!perms.mimic_bias);
-        assert!(!perms.granularity);
-        assert!(!perms.cc_profile);
-
-        // Explicit stealth keeps the Brain's shape actuators unlocked.
-        let stealth = make_manager(StealthConfig::stealth());
-        let perms = stealth.brain_runtime_permissions();
-        assert!(perms.ack_threshold);
-        assert!(perms.external_pacing);
-        assert!(perms.timing);
-        assert!(perms.padding);
-        assert!(perms.mimic_bias);
-        assert!(perms.granularity);
-        assert!(perms.cc_profile);
+        for cfg in [StealthConfig::dynamic(), StealthConfig::stealth()] {
+            let manager = make_manager(cfg);
+            assert!(
+                manager.brain_runtime_permissions().ack_threshold,
+                "no operator override → ACK threshold unlocked"
+            );
+        }
     }
 
     // =========================================================================

@@ -25,7 +25,10 @@ pub use flow_shaping::{FlowShaper, StealthPacketClass};
 #[doc(hidden)]
 pub use http3_masquerade::Http3Masquerade;
 #[doc(hidden)]
-pub use intelligent_policy::{derive_intelligent_runtime_policy, IntelligentStealthInputs};
+pub use intelligent_policy::{
+    derive_intelligent_actuators, IntelligentActuatorHints, IntelligentRepairState,
+    IntelligentStealthInputs,
+};
 #[doc(hidden)]
 pub use profiles::{parse_profile_slot, BrowserProfile, OsProfile};
 #[doc(hidden)]

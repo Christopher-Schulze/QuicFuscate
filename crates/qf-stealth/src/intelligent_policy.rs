@@ -1,396 +1,267 @@
-use qf_common::env_utils::EnvSnapshot;
-use qf_transport_types::{BrowserProfile, StealthRuntimePolicy};
+//! Intelligent-mode actuator derivation (TODO-1060).
+//!
+//! The Brain's sensors still feed two — and only two — actuators:
+//!
+//! - a repair-ratio hint (`repair_ratio_ppm` + `repair_interval_pkts`) that
+//!   stays inside the shared wire byte cap from TODO-1052, and
+//! - a Reality/MASQUE armed bit (`reality_armed`).
+//!
+//! No packet shape is derived here. The epsilon-greedy padding strategy,
+//! the bandit-chosen jitter amplitude, the Tamaraw phase table, the mimic
+//! bias, the granularity and the CC-profile selector were removed: a
+//! converging bandit is a stable pattern, and a stable pattern is a
+//! fingerprint. The wire image is frozen at connect (TODO-1059); anything
+//! beyond these hints belongs to the Maybenot machine (TODO-1061).
 
-/// Snapshot of brain-derived signals consumed by the Intelligent-mode policy derivation.
+/// Snapshot of brain-derived signals consumed by the actuator derivation.
+///
+/// Every field is a *sensor*: loss, CE, RTT/jitter, reordering, divergence
+/// and probe/anomaly counters. None of them describes a packet shape.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct IntelligentStealthInputs {
-    /// Brain-derived escalation level hint: 0=clean-path, 1=stealth, 2=anti-dpi pressure.
-    pub level_hint: u8,
-    /// Recent ECN-CE ratio (0.0-1.0) indicating congestion.
+    /// Kalman-filtered ECN-CE ratio blended with the raw recent ratio
+    /// (`ce_effective` in the Brain, clamped to 0.5).
+    pub ce_effective: f64,
+    /// Recent ECN-CE ratio (0.0-1.0).
     pub ce_ratio_recent: f64,
-    /// Smoothed ACK inter-arrival time in microseconds. The ACK delay we
-    /// emit tracks inbound packet cadence, so this is the *downstream*
-    /// density signal of the direction-aware phase table.
+    /// Smoothed ACK inter-arrival time in microseconds — the downstream
+    /// density signal of the connection.
     pub ack_us: f64,
-    /// Outbound packet inter-arrival estimate in microseconds, derived by
-    /// the brain from the congestion controller's delivery rate
-    /// (TODO-1019 direction split: the *upstream* density signal). A
-    /// value <= 0 means no upload estimate exists yet (cold start /
-    /// handshake) and the table falls back to the symmetric row.
-    pub up_us: f64,
-    /// Jensen-Shannon divergence of packet-size histogram vs baseline.
-    pub size_div: f64,
-    /// Jensen-Shannon divergence of inter-arrival-time histogram vs baseline.
-    pub iat_div: f64,
+    /// RTT jitter relative to the long ACK cadence (0.0-0.5).
+    pub jitter_ratio: f64,
     /// Fraction of out-of-order packets (0.0-1.0).
     pub reorder_ratio: f64,
     /// Accumulated RTT spike weight from Kalman filter outliers.
     pub rtt_spike_weight: f64,
+    /// Jensen-Shannon divergence of packet-size histogram vs baseline.
+    pub size_div: f64,
+    /// Jensen-Shannon divergence of inter-arrival-time histogram vs baseline.
+    pub iat_div: f64,
+    /// Count of RST anomaly signals in the current window.
+    pub signal_rst: u64,
     /// Count of ToS/DSCP anomaly signals in the current window.
     pub signal_tos: u64,
     /// Count of unclassified anomaly signals in the current window.
     pub signal_other: u64,
-    /// Maximum jitter budget in microseconds for timing obfuscation.
-    pub jitter_max_us: u32,
-    /// Low-mode padding ceiling in bytes.
-    pub pad_max_low: usize,
-    /// High-mode padding ceiling in bytes.
-    pub pad_max_high: usize,
+    /// Probe-escalation level published by the manager (0-2). This is the
+    /// channel through which confirmed DPI probes may raise the repair
+    /// hint — it never reaches a packet-shape actuator.
+    pub probe_level: u8,
 }
 
-/// Traffic-phase classification for the adaptive-Tamaraw policy table
-/// (TODO-1010): one coherent (padding, jitter) parameter pair per phase
-/// instead of independent thresholds. ACK-clocked density is the
-/// discriminator - the brain already EMA-smooths `ack_us`, which provides
-/// the hysteresis Tamaraw needs without extra state here.
+/// Stateful smoother for the repair-ratio hint.
 ///
-/// TODO-1019 direction axis: the table is evaluated once per direction.
-/// `ack_us` is the downstream density (our emitted ACK delay follows the
-/// inbound packet cadence); `up_us` is the upstream density (delivery
-/// rate folded to an inter-arrival). Upstream rows steer outbound
-/// jitter/pacing - the only timing we control - while downstream rows
-/// steer padding/chaff, since we cannot delay inbound packets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrafficPhase {
-    /// Dense ACK-clocked flow (ack_us < 3ms): real traffic already carries
-    /// the cover structure - buy minimal chaff, keep timing tight.
-    Dense,
-    /// Moderate activity: baseline defense parameters.
-    Sparse,
-    /// Idle/bursty phase (ack_us > 8ms): burst edges are the fingerprint -
-    /// maximal jitter variance and full padding are what mask them.
-    BurstEdge,
-}
-
-fn classify_density(density_us: f64) -> TrafficPhase {
-    if density_us < 3_000.0 {
-        TrafficPhase::Dense
-    } else if density_us <= 8_000.0 {
-        TrafficPhase::Sparse
-    } else {
-        TrafficPhase::BurstEdge
-    }
-}
-
-fn classify_phase(inputs: &IntelligentStealthInputs) -> TrafficPhase {
-    classify_density(inputs.ack_us)
-}
-
-/// Derive the concrete transport policy for one Intelligent-mode signal snapshot.
+/// Repair ratio must not jump per tick — a jumping redundancy is itself a
+/// signal. Momentum blends 30% of the desired value per tick, and the
+/// repair interval walks one packet at a time toward its target.
+#[derive(Debug, Clone)]
 #[doc(hidden)]
-pub fn derive_intelligent_runtime_policy(
-    inputs: IntelligentStealthInputs,
-    environment: &EnvSnapshot,
-) -> StealthRuntimePolicy {
-    let external_pacing =
-        inputs.ce_ratio_recent < 0.01 && inputs.ack_us < 8_000.0 && inputs.rtt_spike_weight == 0.0;
-    // Direction-aware rows (TODO-1019): the downstream phase comes from
-    // the ACK-cadence signal as before; the upstream phase comes from the
-    // delivery-rate estimate. Without an upstream estimate (up_us <= 0,
-    // cold start / handshake) the table keeps the symmetric row.
-    let down_phase = classify_phase(&inputs);
-    let up_phase = if inputs.up_us > 0.0 { classify_density(inputs.up_us) } else { down_phase };
+pub struct IntelligentRepairState {
+    /// EMA of the desired redundancy in parts-per-million.
+    pub red_ppm_momentum: f32,
+    /// Last emitted repair ratio, parts-per-million.
+    pub last_red_ppm: u64,
+    /// Last emitted repair interval in packets.
+    pub last_fec_interval: u64,
+}
 
-    // Adaptive Tamaraw (TODO-1010): congestion/anomaly overrides keep their
-    // defense priority; otherwise the upstream phase row picks the jitter
-    // scale - it is outbound timing we reshape. Dense upload stays tight
-    // (the real stream masks itself), sparse gets the baseline, and
-    // idle/bursty phases get the full range because burst edges are
-    // exactly where the fingerprint lives.
-    let timing_max_jitter_us = if inputs.ce_ratio_recent > 0.05 || inputs.rtt_spike_weight >= 4.0 {
-        (inputs.jitter_max_us as f64 * 0.85) as u32
-    } else {
-        let scale = match up_phase {
-            TrafficPhase::Dense => 0.4,
-            TrafficPhase::Sparse if external_pacing => 0.6,
-            TrafficPhase::Sparse => 0.4,
-            TrafficPhase::BurstEdge => 0.85,
-        };
-        (inputs.jitter_max_us as f64 * scale) as u32
-    };
-
-    let tos_anomaly = inputs.signal_tos > 0;
-    let (padding_enabled, padding_strategy, padding_max) = if inputs.level_hint == 0
-        && inputs.ce_ratio_recent < 0.01
-        && inputs.signal_other == 0
-        && !tos_anomaly
-    {
-        (false, 0, 0)
-    } else if inputs.ce_ratio_recent > 0.08
-        || inputs.reorder_ratio > 0.02
-        || inputs.signal_other > 0
-    {
-        (true, 1, inputs.pad_max_low)
-    } else if inputs.size_div + inputs.iat_div > 1.4 || tos_anomaly {
-        (true, 3, inputs.pad_max_high.min(512))
-    } else {
-        (true, 4, inputs.pad_max_low)
-    };
-
-    let mimic_bias =
-        if inputs.ce_ratio_recent > 0.05 || inputs.iat_div > 1.0 || inputs.signal_other > 0 {
-            1
-        } else if inputs.size_div > 1.0 {
-            2
-        } else if inputs.ack_us < 3_000.0 {
-            4
-        } else {
-            3
-        };
-
-    let adaptive_granularity = if inputs.ce_ratio_recent > 0.10 || inputs.signal_other > 0 {
-        32
-    } else if inputs.ce_ratio_recent < 0.001 {
-        128
-    } else {
-        64
-    };
-
-    let cc_profile = match mimic_bias {
-        1 => BrowserProfile::Safari,
-        2 => BrowserProfile::Firefox,
-        4 => BrowserProfile::Edge,
-        _ => BrowserProfile::Chrome,
-    };
-
-    let padding_rate = if !padding_enabled {
-        0
-    } else {
-        let base = match inputs.level_hint {
-            0 => 0,
-            1 => environment.parse::<u8>("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1").unwrap_or(50),
-            _ => 100,
-        };
-        // ChameleonFlow principle (TODO-1010): when the downstream
-        // ACK-clocked activity is dense, the return stream already carries
-        // burst structure, so purchased padding buys nothing and only
-        // widens the bandwidth footprint. The halving keys on the
-        // *downstream* density (TODO-1019): a dense upload alone must not
-        // shrink this row - upstream density steers jitter, downstream
-        // density steers padding/chaff. Sparse and burst-edge phases keep
-        // the full rate: with little real traffic, padding is the only
-        // cover.
-        if down_phase == TrafficPhase::Dense {
-            base / 2
-        } else {
-            base
-        }
-    };
-    let timing_rate = match inputs.level_hint {
-        0 | 1 => 0,
-        _ => 100,
-    };
-
-    StealthRuntimePolicy {
-        external_pacing,
-        timing_enabled: !external_pacing,
-        timing_max_jitter_us,
-        mimic_bias,
-        adaptive_granularity,
-        cc_profile,
-        padding_enabled,
-        padding_strategy,
-        padding_max,
-        padding_rate,
-        timing_rate,
+impl Default for IntelligentRepairState {
+    fn default() -> Self {
+        // `last_fec_interval: 0` lets the first tick adopt `desired_interval`
+        // directly — the step limit only applies to subsequent changes.
+        Self { red_ppm_momentum: 0.0, last_red_ppm: 100_000, last_fec_interval: 0 }
     }
+}
+
+/// The complete Intelligent-mode actuator output.
+///
+/// This is the whole contract: a repair-ratio hint and a Reality/MASQUE
+/// armed bit. There is deliberately no field that could carry a padding
+/// strategy, a jitter amplitude, a length set, or a framing choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct IntelligentActuatorHints {
+    /// Repair ratio in parts-per-million, inside the TODO-1052 byte cap.
+    /// Bounded to 80_000..=320_000 (8%-32% redundancy).
+    pub repair_ratio_ppm: u32,
+    /// Repair grouping interval in packets, bounded to 2..=20.
+    pub repair_interval_pkts: u64,
+    /// Whether the Reality/MASQUE relay should be armed for this connection.
+    pub reality_armed: bool,
+}
+
+/// Derive the allowed actuators for one Intelligent-mode signal snapshot.
+///
+/// `state` carries the repair-ratio smoother across ticks and is mutated in
+/// place; the Brain owns its own rate-limit on top (it only forwards a hint
+/// when the ppm moved enough or a publication is due).
+#[doc(hidden)]
+pub fn derive_intelligent_actuators(
+    inputs: IntelligentStealthInputs,
+    state: &mut IntelligentRepairState,
+) -> IntelligentActuatorHints {
+    // --- Repair ratio (loss-driven redundancy inside the byte cap) ---
+    let signal_penalty = inputs.rtt_spike_weight.min(8.0) * 0.02
+        + (inputs.signal_rst as f64 * 0.03)
+        + (inputs.signal_tos as f64 * 0.02)
+        + (inputs.signal_other as f64 * 0.04);
+    let desired_multiplier = (1.0
+        + inputs.ce_effective * 6.5
+        + inputs.reorder_ratio.min(0.06) * 6.0
+        + inputs.jitter_ratio.min(0.5) * 2.5
+        + f64::from(inputs.probe_level) * 0.08
+        + signal_penalty)
+        .clamp(0.8, 3.5);
+    let desired_ppm = (100_000.0 * desired_multiplier) as f32;
+    if state.red_ppm_momentum == 0.0 {
+        state.red_ppm_momentum = state.last_red_ppm as f32;
+    }
+    state.red_ppm_momentum = state.red_ppm_momentum * 0.7 + desired_ppm * 0.3;
+    let repair_ratio_ppm = state.red_ppm_momentum.round().clamp(80_000.0, 320_000.0) as u32;
+
+    let mut desired_interval: u64 = if inputs.ce_effective > 0.08 {
+        4
+    } else if inputs.ce_effective > 0.04 || inputs.reorder_ratio > 0.02 {
+        6
+    } else if inputs.ce_effective > 0.015 || inputs.reorder_ratio > 0.01 {
+        8
+    } else {
+        12
+    };
+    if inputs.signal_other > 0 || inputs.signal_rst > 0 {
+        desired_interval = desired_interval.saturating_sub(2);
+    }
+    if inputs.probe_level >= 2 {
+        desired_interval = desired_interval.saturating_sub(1);
+    }
+    desired_interval = desired_interval.clamp(3, 18);
+    if state.last_fec_interval == 0 {
+        state.last_fec_interval = desired_interval;
+    }
+    let mut interval = state.last_fec_interval as i64;
+    match desired_interval as i64 {
+        target if target > interval => interval += 1,
+        target if target < interval => interval -= 1,
+        _ => {}
+    }
+    let repair_interval_pkts = interval.clamp(2, 20) as u64;
+
+    // --- Reality/MASQUE armed bit ---
+    let reality_armed = inputs.ce_ratio_recent > 0.03
+        || inputs.rtt_spike_weight >= 2.0
+        || inputs.probe_level > 0
+        || inputs.signal_rst > 0
+        || inputs.signal_tos > 0
+        || (inputs.size_div + inputs.iat_div) > 1.6
+        || inputs.reorder_ratio > 0.02;
+
+    IntelligentActuatorHints { repair_ratio_ppm, repair_interval_pkts, reality_armed }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_intelligent_runtime_policy, IntelligentStealthInputs};
-    use qf_common::env_utils::EnvSnapshot;
-    use qf_transport_types::BrowserProfile;
+    use super::{
+        derive_intelligent_actuators, IntelligentActuatorHints, IntelligentRepairState,
+        IntelligentStealthInputs,
+    };
 
     fn inputs() -> IntelligentStealthInputs {
         IntelligentStealthInputs {
-            level_hint: 0,
+            ce_effective: 0.0,
             ce_ratio_recent: 0.0,
             ack_us: 2_400.0,
-            up_us: 0.0,
-            size_div: 0.2,
-            iat_div: 0.3,
+            jitter_ratio: 0.0,
             reorder_ratio: 0.0,
             rtt_spike_weight: 0.0,
+            size_div: 0.2,
+            iat_div: 0.3,
+            signal_rst: 0,
             signal_tos: 0,
             signal_other: 0,
-            jitter_max_us: 1_000,
-            pad_max_low: 128,
-            pad_max_high: 640,
+            probe_level: 0,
         }
     }
 
     #[test]
-    fn clean_level_uses_external_pacing_without_padding() {
-        // Dense clean traffic (ack_us=2400): the real stream masks itself,
-        // so the phase table keeps timing tight (0.4) rather than paying the
-        // old flat external-pacing scale.
-        let policy = derive_intelligent_runtime_policy(inputs(), &EnvSnapshot::default());
+    fn clean_path_emits_baseline_repair_and_disarms() {
+        let mut state = IntelligentRepairState::default();
+        let hints = derive_intelligent_actuators(inputs(), &mut state);
 
-        assert!(policy.external_pacing);
-        assert!(!policy.timing_enabled);
-        assert_eq!(policy.timing_max_jitter_us, 400);
-        assert!(!policy.padding_enabled);
-        assert_eq!(policy.padding_rate, 0);
-        assert_eq!(policy.cc_profile, BrowserProfile::Edge);
+        assert_eq!(hints.repair_ratio_ppm, 100_000);
+        assert_eq!(hints.repair_interval_pkts, 12);
+        assert!(!hints.reality_armed);
     }
 
     #[test]
-    fn tamaraw_phase_table_scales_jitter_by_density() {
-        // Sparse clean traffic keeps the 0.6 external-pacing baseline...
-        let sparse = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { ack_us: 5_000.0, ..inputs() },
-            &EnvSnapshot::default(),
-        );
-        assert!(sparse.external_pacing);
-        assert_eq!(sparse.timing_max_jitter_us, 600);
-
-        // ...while idle/bursty traffic (ack_us > 8ms) gets the full range:
-        // burst edges carry the fingerprint, so masking them costs the most.
-        let bursty = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { ack_us: 12_000.0, level_hint: 1, ..inputs() },
-            &EnvSnapshot::default(),
-        );
-        assert!(!bursty.external_pacing);
-        assert_eq!(bursty.timing_max_jitter_us, 850);
-    }
-
-    #[test]
-    fn pressure_raises_jitter_and_uses_random_padding() {
-        let policy = derive_intelligent_runtime_policy(
+    fn loss_moves_the_repair_ratio_inside_its_bounds() {
+        let mut state = IntelligentRepairState::default();
+        let clean = derive_intelligent_actuators(inputs(), &mut state);
+        let pressured = derive_intelligent_actuators(
             IntelligentStealthInputs {
-                level_hint: 2,
+                ce_effective: 0.12,
                 ce_ratio_recent: 0.12,
-                ack_us: 14_500.0,
-                up_us: 0.0,
-                size_div: 1.6,
-                iat_div: 1.1,
-                reorder_ratio: 0.03,
-                rtt_spike_weight: 5.0,
-                signal_tos: 1,
-                signal_other: 1,
-                jitter_max_us: 1_200,
-                pad_max_low: 96,
-                pad_max_high: 700,
-            },
-            &EnvSnapshot::default(),
-        );
-
-        assert!(!policy.external_pacing);
-        assert_eq!(policy.timing_max_jitter_us, 1_020);
-        assert_eq!(policy.padding_strategy, 1);
-        assert_eq!(policy.padding_max, 96);
-        assert_eq!(policy.padding_rate, 100);
-        assert_eq!(policy.timing_rate, 100);
-        assert_eq!(policy.cc_profile, BrowserProfile::Safari);
-    }
-
-    #[test]
-    fn level_one_padding_rate_uses_captured_override() {
-        let environment =
-            EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "37")]);
-        let policy = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs {
-                level_hint: 1,
-                signal_tos: 1,
-                // Sparse traffic keeps the full configured rate.
-                ack_us: 12_000.0,
+                reorder_ratio: 0.04,
+                jitter_ratio: 0.3,
                 ..inputs()
             },
-            &environment,
+            &mut state,
         );
 
-        assert_eq!(policy.padding_strategy, 3);
-        assert_eq!(policy.padding_max, 512);
-        assert_eq!(policy.padding_rate, 37);
-        assert_eq!(policy.timing_rate, 0);
+        assert!(pressured.repair_ratio_ppm > clean.repair_ratio_ppm);
+        assert!(pressured.repair_ratio_ppm <= 320_000);
+        assert!(pressured.repair_interval_pkts <= clean.repair_interval_pkts);
+        assert!(pressured.reality_armed);
     }
 
     #[test]
-    fn dense_traffic_halves_padding_rate() {
-        // ChameleonFlow principle (TODO-1010): dense ACK-clocked traffic
-        // already carries burst structure, so the purchased padding rate is
-        // halved instead of widening the bandwidth footprint.
-        let environment =
-            EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "40")]);
-        let dense = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { level_hint: 1, signal_tos: 1, ack_us: 1_000.0, ..inputs() },
-            &environment,
+    fn repair_ratio_is_smoothed_not_jumpy() {
+        let mut state = IntelligentRepairState::default();
+        let first = derive_intelligent_actuators(
+            IntelligentStealthInputs { ce_effective: 0.5, ..inputs() },
+            &mut state,
         );
-        let sparse = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { level_hint: 1, signal_tos: 1, ack_us: 12_000.0, ..inputs() },
-            &environment,
-        );
-        assert_eq!(dense.padding_rate, 20);
-        assert_eq!(sparse.padding_rate, 40);
+        // Momentum blends only 30% of the jump per tick.
+        assert!(first.repair_ratio_ppm < 200_000);
     }
 
     #[test]
-    fn direction_split_uses_upstream_density_for_jitter() {
-        // Downstream idle/bursty (ack_us=12ms) but a dense upload
-        // (up_us=200us): the jitter scale must come from the upstream
-        // row (Dense -> 0.4), not the symmetric burst-edge row (0.85).
-        let policy = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { ack_us: 12_000.0, up_us: 200.0, ..inputs() },
-            &EnvSnapshot::default(),
+    fn probes_arm_reality_without_loss() {
+        let mut state = IntelligentRepairState::default();
+        let probed = derive_intelligent_actuators(
+            IntelligentStealthInputs { signal_rst: 1, ..inputs() },
+            &mut state,
         );
-        assert_eq!(policy.timing_max_jitter_us, 400);
+        assert!(probed.reality_armed);
+        // Probe pressure also tightens the repair interval by two packets.
+        assert_eq!(probed.repair_interval_pkts, 10);
     }
 
     #[test]
-    fn direction_split_keeps_downstream_density_for_padding() {
-        // Dense download (ack_us=1ms -> down Dense) with an idle upload
-        // (up_us=12ms -> up BurstEdge): padding halves on the downstream
-        // density while jitter comes from the upstream burst-edge row.
-        let environment =
-            EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "40")]);
-        let policy = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs {
-                level_hint: 1,
-                signal_tos: 1,
-                ack_us: 1_000.0,
-                up_us: 12_000.0,
-                ..inputs()
-            },
-            &environment,
+    fn probe_escalation_raises_repair_hint_and_arms_reality() {
+        // TODO-1059/1060: probe escalation is the one channel that may move
+        // the repair-ratio hint — inside the byte cap, never a shape.
+        let mut state = IntelligentRepairState::default();
+        let baseline = derive_intelligent_actuators(inputs(), &mut state);
+        let probed = derive_intelligent_actuators(
+            IntelligentStealthInputs { probe_level: 2, ..inputs() },
+            &mut state,
         );
-        assert_eq!(policy.padding_rate, 20);
-        assert_eq!(policy.timing_max_jitter_us, 850);
+        assert!(probed.repair_ratio_ppm >= baseline.repair_ratio_ppm);
+        assert!(probed.repair_interval_pkts <= baseline.repair_interval_pkts);
+        assert!(probed.reality_armed);
     }
 
     #[test]
-    fn dense_upload_alone_does_not_halve_padding() {
-        // Inverted split: idle download (down BurstEdge) but dense upload.
-        // Upstream density steers jitter - it must NOT halve the
-        // downstream-keyed padding row.
-        let environment =
-            EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "40")]);
-        let policy = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs {
-                level_hint: 1,
-                signal_tos: 1,
-                ack_us: 12_000.0,
-                up_us: 500.0,
-                ..inputs()
-            },
-            &environment,
-        );
-        assert_eq!(policy.padding_rate, 40);
-        assert_eq!(policy.timing_max_jitter_us, 400);
-    }
-
-    #[test]
-    fn missing_upstream_signal_falls_back_to_symmetric_row() {
-        // up_us = 0 (cold start): identical inputs must produce the
-        // symmetric-table result, i.e. the downstream phase drives both.
-        let environment =
-            EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1", "40")]);
-        let cold = derive_intelligent_runtime_policy(
-            IntelligentStealthInputs { level_hint: 1, signal_tos: 1, ack_us: 1_000.0, ..inputs() },
-            &environment,
-        );
-        assert_eq!(cold.timing_max_jitter_us, 400);
-        assert_eq!(cold.padding_rate, 20);
+    fn the_hint_contract_has_no_shape_fields() {
+        // Compile-time contract: the actuator struct can only ever carry the
+        // repair hint and the armed bit. Adding a shape field here is the
+        // regression this TODO removes.
+        let hints = IntelligentActuatorHints {
+            repair_ratio_ppm: 100_000,
+            repair_interval_pkts: 8,
+            reality_armed: false,
+        };
+        assert_eq!(hints.repair_ratio_ppm, 100_000);
     }
 }

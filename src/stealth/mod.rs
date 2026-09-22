@@ -93,8 +93,6 @@ pub use fingerprint::{
 pub(crate) use qf_stealth::parse_fingerprint_profile_slot;
 #[cfg(test)]
 pub(crate) use qf_stealth::CdnProvider;
-#[cfg(test)]
-pub(crate) use qf_stealth::IntelligentStealthInputs;
 pub use qf_stealth::WireShape;
 pub use qf_stealth::{
     ActiveProbeDetector, ChaffGenerator, FecMode, Http3Masquerade, ProbeResponseMode, RotationMode,

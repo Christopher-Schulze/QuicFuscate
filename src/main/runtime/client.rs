@@ -1399,10 +1399,8 @@ pub(super) async fn run_client(
                 if now >= next_stats_log {
                     if let Some(diagnostics) = io_diagnostics.as_ref() {
                         let protocol_now = conn.protocol_clock().now();
-                        let (tamaraw_ack_us, tamaraw_up_us, tamaraw_pad, tamaraw_jitter_us) =
-                            conn.tamaraw_runtime_snapshot();
                         info!(
-                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} tun_drops={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?} ack_us={} up_us={} stealth_pad={} stealth_jitter_us={}",
+                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} tun_drops={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
                             conn.rtt_ms(),
                             conn.loss_rate() * 100.0,
                             conn.conn.stats().sent,
@@ -1429,10 +1427,6 @@ pub(super) async fn run_client(
                             conn.conn.recovery_deadline().map(|deadline| {
                                 deadline.saturating_duration_since(protocol_now).as_millis()
                             }),
-                            tamaraw_ack_us,
-                            tamaraw_up_us,
-                            tamaraw_pad,
-                            tamaraw_jitter_us,
                         );
                     } else {
                         info!(

@@ -807,33 +807,28 @@ The StealthBrain module (`src/brain.rs`) implements sophisticated ACK policy opt
 Runtime wiring is cohesive rather than feature-isolated:
 
 - `StealthManager` enforces mode/profile policy on stealth actuators, remains authoritative for non-Intelligent preset baselines, and delegates concrete Intelligent-mode runtime policy targets to the root-independent `qf-stealth` owner.
-- `StealthBrain` is attached via `CombinedObserver` and continuously translates one connection's transport signals into connection-local ACK/FEC hints plus an Intelligent-mode-only `StealthRuntimeDelta`.
-- `Connection::apply_brain_stealth_runtime_delta(...)` centrally applies that delta instead of receiving several scattered setter calls from the Brain observer.
+- `StealthBrain` is attached via `CombinedObserver` and continuously translates one connection's transport signals into three — and only three — actuators (TODO-1060): the repair-ratio hint, the Reality/MASQUE armed bit, and the congestion-driven ACK threshold.
 - `DeepIntegrationOrchestrator` (feature `orchestrator`) contributes cross-signal heuristics for escalation and cover-traffic coordination.
-- Profile-derived `stealth_mode`/`fec_mode` preferences are replayed through the same runtime mutation surface used by live intelligent control.
 
 #### StealthBrain Core Components
-- **`StealthBrain`**: Main orchestrator with epsilon-greedy bandit for ACK policy selection
-- **`CombinedObserver`**: Multi-observer pattern allowing attachment of multiple `TransportObserver` instances
-- **`StealthBrainConfig`**: Configuration with ACK bounds, exploration probability, and cooldown parameters
+- **`StealthBrain`**: Sensor-fusion engine; the bandit/pattern generator that picked padding, jitter and CC profiles was removed (TODO-1060 — a converging bandit is a stable pattern, and a stable pattern is a fingerprint).
+- **`CombinedObserver`**: Multi-observer pattern allowing attachment of multiple `TransportObserver` instances.
+- **`StealthBrainConfig`**: Configuration with ACK bounds, histogram geometry, probe budget and cooldown parameters.
+- **`derive_intelligent_actuators`** (`qf-stealth::intelligent_policy`): shape-free policy — consumes the sensor snapshot and emits `IntelligentActuatorHints { repair_ratio_ppm, repair_interval_pkts, reality_armed }`. There is deliberately no field that could carry a packet shape.
 
 #### Operational Parameters
-- Inputs: ACK delay (short/long EWMA), inter-arrival (IAT) histograms, size histograms, ECN (ECT0/ECT1/CE), delivery rate, reorder ratio.
-- ACK policy: epsilon-greedy bandit chooses thresholds from {2, 3, 4, 8}; step limiting moves by at most +/-1 per change, clamped to `[ack_min, ack_max]`.
-- Timing shaping: derived from deviation between short/long ACK EWMAs with +/-10% dithering; applied only through the Intelligent-mode `StealthRuntimeDelta`, which updates the live connection timing baseline directly.
-- External pacing: Brain may steer it only for Intelligent-mode connections, and only through the Stealth-derived runtime policy delta; non-Intelligent modes keep the baseline from `StealthManager` or explicit transport overrides.
-- Padding shaping: BrowserMimic bias `1..4`, adaptive granularity (`32|64|128`), and dynamic padding strategy are now derived in `stealth/` and applied through the same Intelligent-mode runtime policy delta; other presets keep the configured StealthManager baseline. At Brain level 0 (clean path, no pressure) padding is disabled for near-zero Intelligent-mode overhead.
-- Jitter direction: under ECN congestion (CE > 5%) or high RTT spikes, jitter increases to 85% of budget (more randomization defeats timing fingerprints). Only on the external-pacing clean path is it reduced.
-- `jitter_max_us` default: 5000 us (raised from 1500; 1500 was too small to meaningfully randomize timing against a modern DPI system).
-- Level-hint passthrough: Brain computes an `effective_level` (0/1/2) via hysteresis and passes it as `level_hint` to `derive_intelligent_runtime_policy`, enabling level-dependent padding and cover decisions.
-- Runtime overrides: `StealthManager` exposes `runtime_padding_rate` and `runtime_timing_rate` atomics. Padding and timing are set by `escalate_to_level(n)` (0=0%, 1=50% configurable padding and 0% timing, 2=100% padding and timing), then flow through `StealthRuntimePolicy` -> `StealthRuntimeDelta` -> connection config and are consumed by `compute_stealth_padding()` and `transport_stealth_jitter_delay()`. Fingerprint/persona rotation is next-session only; the mid-connection timer was removed (TODO-1056).
-- Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0->1 requires >=3 probes in 60s; 1->2 requires >=8 probes in 120s. A single probe does NOT trigger escalation. The state stores timestamp buckets at millisecond resolution, aggregates probes sharing a millisecond, keeps at most 120,001 buckets for the 120-second window, and maintains independent 60-/120-second counters. De-escalation drops at most one level per configurable quiet period (default: 300s), measured from the latest probe or level change. Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300), `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (default 50).
-- Explicit transport overrides win over Brain steering. If an operator sets ACK, pacing, jitter, padding, granularity, or mimic-bias overrides, the corresponding Intelligent-mode Brain actuator is locked out for that connection instead of silently re-overriding the operator choice at runtime.
+- Inputs (sensors only): ACK delay (short/long EWMA), inter-arrival (IAT) histograms, size histograms, ECN (ECT0/ECT1/CE with Kalman smoothing), RTT spike weight, reorder ratio, anomaly counters (RST/ToS/other), and the manager's probe-escalation level.
+- **Repair-ratio hint** (allowed actuator): `repair_ratio_ppm` is EMA-smoothed (30% blend per tick), bounded to `80_000..=320_000` ppm; `repair_interval_pkts` walks at most one packet per tick inside `2..=20`. Probe escalation may raise the hint (+8% per probe level) — it stays inside the TODO-1052 shared byte cap.
+- **Reality/MASQUE armed bit** (allowed actuator): flips on CE pressure, RTT spikes, reordering, histogram divergence, anomaly signals, or any probe-escalation level; rate-limited to one toggle per 800 ms.
+- **ACK-eliciting threshold** (allowed actuator): pure congestion feature — tighter under CE pressure and slow ACK cadence, looser on clean paths. It changes *when* ACKs are emitted, never the packet length set or framing, so it stays (recorded decision, TODO-1060). Step limiting moves by at most +/-1 per change, clamped to `[ack_min, ack_max]`; an explicit operator `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` override locks it out via `BrainRuntimePermissions`.
+- **Removed** (TODO-1060): epsilon-greedy bandit, bandit-chosen jitter amplitude, Tamaraw direction table, mimic-bias/granularity/CC-profile steering, `StealthRuntimePolicy`/`StealthRuntimeDelta`, the `intelligent_stealth_runtime` gate, the Tamaraw stats snapshot, `explore_prob`/`pad_max_*` config knobs, `TransportPolicyError`. The wire shape comes from the frozen image (TODO-1059); anything beyond belongs to the Maybenot machine (TODO-1061).
+- Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0->1 requires >=3 probes in 60s; 1->2 requires >=8 probes in 120s. A single probe does NOT trigger escalation. The state stores timestamp buckets at millisecond resolution, aggregates probes sharing a millisecond, keeps at most 120,001 buckets for the 120-second window, and maintains independent 60-/120-second counters. De-escalation drops at most one level per configurable quiet period (default: 300s), measured from the latest probe or level change. Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300).
+- `TransportPolicyTarget` (root-independent contract): only `brain_runtime_permissions()` and `set_ack_eliciting_threshold()` remain — no shape API is exposed to the Brain.
 - FEC hints: updates the connection-local `BrainFecHints` state consumed by that connection's `FecTransportObserver`; no FEC policy crosses connection boundaries.
 - ACK batches: `on_ack` aggregates a coherent sum/count batch under a short mutex and applies the batch mean to both ACK-delay EWMAs, so callbacks between policy ticks are not dropped.
 - Reorder pressure: lifetime counters remain telemetry, while policy uses exponentially decayed recent counters with a 30-second half-life.
-- Configuration: `StealthBrainConfig::try_from_env` validates interdependent bounds such as ACK ordering and padding ordering; `from_env` falls back to defaults and logs on invalid effective configuration.
-- Cooldowns: changes respect `policy_cooldown_ms`; exploration bounded by `explore_prob` and current CE ratio.
+- Configuration: `StealthBrainConfig::try_from_env` validates interdependent bounds such as ACK ordering; `from_env` falls back to defaults and logs on invalid effective configuration.
+- Cooldowns: actuator changes respect `policy_cooldown_ms`.
 
 #### Brain Configuration
 ```rust
@@ -842,11 +837,8 @@ use quicfuscate::brain::{StealthBrain, StealthBrainConfig};
 let cfg = StealthBrainConfig {
     ack_min: 2,
     ack_max: 8,
-    explore_prob: 0.1,
     policy_cooldown_ms: 200,
-    jitter_dither_pct: 10,
-    ack_ewma_alpha_short: 0.25,
-    ack_ewma_alpha_long: 0.95,
+    jitter_max_us: 5_000,
     ..Default::default()
 };
 
@@ -880,7 +872,7 @@ The StealthBrain module keeps runtime hints scoped to the owning connection:
 
 - **`BrainFecHints`**: streaming interval and redundancy hints shared only with that connection's `FecTransportObserver`.
 - **`IntelligentLevelHints`**: separate Brain-pressure and probe-threshold levels; consumers use their maximum so one source cannot erase the other.
-- Timing jitter is delivered only through `StealthRuntimeDelta`, and the live connection applies its own updated runtime timing configuration directly.
+- Timing jitter is frozen at connect with the wire image (TODO-1059); the Brain cannot retune it at runtime (TODO-1060).
 
 #### Combined Observer Pattern
 The module implements a multi-observer pattern for aggregating telemetry from multiple sources:
@@ -971,7 +963,7 @@ The stealth timing system has been fully refactored to eliminate blocking `std::
 - `QuicFuscateConnection::next_send_deadline()` merges the traffic-analysis deadline with outer pacing, stealth release, and QUIC recovery so live loops cannot oversleep the timer.
 - An enabled policy logs its estimated maximum pre-IP/UDP wire cost. Packet size and cadence are bounded by the validated transport policy and current path UDP payload.
 
-The active baseline comes from `[transport.traffic_analysis]`. `[transport.qkey_traffic_analysis_ceiling]` is an independent operator ceiling for per-QKey requests and remains inert until encrypted bearer authentication succeeds. `[transport.intelligent_traffic_analysis_ceiling]` controls post-authentication Intelligent level-2 escalation; its default `off` value is fail-closed. Failed or incomplete QKey authentication cannot activate either upgrade.
+The active baseline comes from `[transport.traffic_analysis]`. `[transport.qkey_traffic_analysis_ceiling]` is an independent operator ceiling for per-QKey requests and remains inert until encrypted bearer authentication succeeds. `[transport.intelligent_traffic_analysis_ceiling]` remains a validated operator ceiling surface for the Intelligent level-2 escalation path; since TODO-1059 froze the dynamic wire image, no production caller drives a mid-connection level flip — the ceiling API and its enforcement tests are retained for the Maybenot work (TODO-1061). Failed or incomplete QKey authentication cannot activate either upgrade.
 
 ### Compression Module
 
@@ -2074,29 +2066,25 @@ pub trait TransportObserver: Send + Sync {
 
 `FecTransportObserver` is the production observer used for transport-to-FEC coupling. It samples ACK/ECN signals, maintains ACK-delay smoothing for FEC cadence decisions, and syncs only FEC-owned transport deltas (`set_fec_*` and `take_fec_control_delta()`). Generic transport actuators such as ACK threshold and external pacing are no longer written by the FEC observer; those stay on the transport/stealth adaptive path, while `core.rs` periodically pulls the observer's FEC cadence/redundancy view into `AdaptiveFec`.
 
-##### FEC/Brain Timing Deep Dive (Kalman CE Ratio, Epsilon-Greedy ACK, Jitter Gate, Cooldown Redundancy) - 2026-08-20 - CORRECTED 2026-08-20
-This closes the gap where `Timing Gate (Brain-advised jitter)` and `FecTransportObserver` were listed as boxes without bandit or cooldown ownership. The previous `arms [0.5,1.0,2.0,4.0] ms`, `epsilon=0.1`, `reward=-ack_delay-0.1*ce` claims are removed (grep shows `brain.rs:649` has `arms: [u64;4]=[2,3,4,8]` via `cfg.explore_prob`, reward `dr_gain - penalty`).
+##### FEC/Brain Deep Dive (Kalman CE, Repair Hints, ACK Threshold) - CORRECTED for TODO-1060
 
 **Owners and data flow - verified:**
-- `src/brain.rs` (`StealthBrain`, `BrainFecHints`) imports `qf_fec::KalmanFilter` and owns `StealthBrainConfig { explore_prob, ack_min, ack_max, ... }`. `src/fec/adaptive.rs` (`AdaptiveFec`) and `src/fec/observer.rs` (`FecTransportObserver`) are the FEC side. `src/transport/connection.rs` owns the QUIC transport `send`/`recv` and `src/core.rs` wires `BrainFecHints` into `AdaptiveFec` periodically. No `TimingGate` struct exists as previously claimed (grep `TimingGate` in `transport/connection.rs` = 0 hits); the hallucinated `TimingGate { jitter_ms, last_send, cooldown }` is removed.
-- `FecTransportObserver` is `TransportObserver` (verified at `docs/DOCUMENTATION.md:2088`) and syncs only `set_fec_*` / `take_fec_control_delta()` (verified). Generic `ACK` threshold and pacing are not written by the FEC observer as previously correctly stated; they stay on the Brain/transport path. `StealthBrain` is not a `TransportObserver`; it is polled via `apply_policy`.
+- `src/brain.rs` (`StealthBrain`, `BrainFecHints`) imports `qf_fec::KalmanFilter` and owns `StealthBrainConfig`. `src/fec/adaptive.rs` (`AdaptiveFec`) and `src/fec/observer.rs` (`FecTransportObserver`) are the FEC side. `src/transport/connection.rs` owns the QUIC transport `send`/`recv` and `src/core.rs` wires `BrainFecHints` into `AdaptiveFec` periodically.
+- `FecTransportObserver` is `TransportObserver` and syncs only `set_fec_*` / `take_fec_control_delta()`. The ACK threshold is not written by the FEC observer; it stays on the Brain path. `StealthBrain` is polled via `apply_policy` from `transport/connection/recv.rs`.
 
-**Bandit for ACK threshold - verified against `src/brain.rs:630-683`:**
-- `src/brain.rs:649` defines `arms: [u64; 4] = [2, 3, 4, 8]` (u64, not ms floats as previously claimed). These are ACK-threshold packet counts, not milliseconds. No `epsilon=0.1` as previously claimed; exploration is `self.cfg.explore_prob` (from `StealthBrainConfig`) scaled by `if ce_ratio_recent < 0.005 { 1.0 } else { 0.5 }` at `652`.
-- Roll is `((ts ^ ts.rotate_left(17)) % 10_000) / 10_000.0` at `650`, `explore = roll < (cfg.explore_prob * scale)` at `651-652`. `pick` is `((ts >>13) & 3)` when exploring, otherwise `argmax bandit_avg_reward` (loop `658-663`), with fallback to nearest `thr_local` when `best_val` not finite (`664-677`). The previous `rand < epsilon` claim is removed.
-- Reward is at `630-646`: `r = dr_gain - penalty.max(0.0)` where `dr_gain = dr_now - st.last_delivery_rate` and `penalty` is derived from CE/loss (not `-ack_delay -0.1*ce` as previously claimed). Update is `new_avg = (old_avg * n + r)/(n+1)` and `bandit_counts[arm] = n+1` at `643-646`. `bandit_last_arm` is set at `679` to `Some(pick)` and `bandit_thr = arms[pick]` at `680` drives `thr_local` with `1`-step clamping to `[ack_min, ack_max]` (`689-697`) and `do_ack = cooldown && (last_ack_thr != thr_local)` at `699`.
-- When `transport_config.ack_threshold` is set, the bandit is not the sole owner; the operator value is honored via the same `cooldown` and `clamping` path, not a separate `ack_override` flag as previously claimed (grep `ack_override` = 0).
+**Brain actuators (TODO-1060 - the bandit is gone):**
+- The epsilon-greedy bandit, the arms table, the reward bookkeeping and the timestamp-roll exploration were removed. A converging bandit converges to a stable pattern, and a stable pattern is a fingerprint; there was no evaluation against DF/Tik-Tok/Var-CNN to justify keeping it.
+- What remains: `derive_intelligent_actuators` in `qf-stealth` turns the sensor snapshot into `IntelligentActuatorHints { repair_ratio_ppm, repair_interval_pkts, reality_armed }`. The repair ratio is EMA-smoothed and bounded to 80_000-320_000 ppm; the interval walks one packet per tick inside 2-20; probe escalation may raise the hint within the TODO-1052 byte cap.
+- The ACK-eliciting threshold stays as a pure congestion feature: CE pressure and slow ACK cadence tighten it, clean paths loosen it. It changes *when* ACKs are emitted, never the packet length set — recorded decision, TODO-1060. Step limiting (+/-1 per change) and the `BrainRuntimePermissions.ack_threshold` lock survive; operator `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` overrides win.
 
-**Kalman and histogram - verified existence, previous numbers corrected:**
-- `src/brain.rs:14` imports `qf_fec::{BrainFecHints, KalmanFilter}`. `drain_pending_histogram` and `decay` loops at `238, 358, 414` exist, but the previous `histogram [u32;64] 10us bins 640us` and `JS >0.3 Burst` thresholds are not verified in this file and are removed. The real histogram is via `pending_size_bins`/`pending_iat_bins` atomics drained into `Hist`, not a hard `64` bin array as previously claimed.
-- No `jitter_hint()` returning `0.5 ms` / `1.0+2*ce` etc. exists as previously claimed (grep `jitter_hint` = 0). The hallucinated `TimingGate::should_send` is removed.
+**Kalman and histogram:**
+- `src/brain.rs` imports `qf_fec::{BrainFecHints, KalmanFilter}`. The real histogram is via `pending_size_bins`/`pending_iat_bins` atomics drained into `Hist`; Jensen-Shannon divergence feeds the Reality/MASQUE armed bit and the repair hint — it never selects a padding strategy.
 
-**FEC coupling and cooldown - partially verified:**
-- `FecTransportObserver` verified to sample `ACK/ECN` and sync only `FEC`-owned deltas via `take_fec_control_delta()` (docs line `2096`). The previous `ack_delay_ewma 0.9/0.1` and `set_fec_stream_interval` details are not verified in `qf-transport-udp` and are kept as product-path description, not as `fastpath.rs` facts.
-- The previous `1-2 us` dual-apply `10 ms`/`5 ms` `AtomicU64` cooldown with `CombinedObserver` fan-out is not verified in `src/core.rs`/`transport/connection.rs` (grep `last_apply` in those files shows no such guard as described). It is removed and replaced with the verified fact: `FecTransportObserver` is the sole FEC delta owner; `core.rs` pulls `take_fec_control_delta()` into `AdaptiveFec`, and no generic transport actuators are written by the observer.
+**FEC coupling:**
+- `FecTransportObserver` samples ACK/ECN and syncs only FEC-owned deltas via `take_fec_control_delta()`; `core.rs` pulls the observer's FEC cadence/redundancy view into `AdaptiveFec`, and no generic transport actuators are written by the observer.
 
-**Repro contract - verified:**
-- `cargo bench --bench ci_regression --features benches -- brain` exists in `scripts/benchmarks/ci_regression.rs` for `brain_apply_policy`, but the previous `600 ns` Omega reference is not verified in this commit and is removed. The correct scope gating is `scripts/tests/suites/test-performance-regression.sh --only hotpath` for hotpath, not `test-stealth-brain.sh` as previously claimed (that script does not exist).
+**Repro contract:**
+- `cargo bench --bench ci_regression --features benches -- brain` exists in `scripts/benchmarks/ci_regression.rs` for `brain_apply_policy`; the correct scope gating is `scripts/tests/suites/test-performance-regression.sh --only hotpath` for hotpath.
 
 
 #### TLS Provider Interface
@@ -3496,7 +3484,7 @@ Environment parsing has a deterministic helper contract but is not a universal l
 #### Environment Parsing and Runtime Snapshot Contract
 
 - `EnvSnapshot::capture()` copies the Unicode process environment once. A runtime owner must pass that immutable snapshot through all dependent construction paths; it must not read the process environment again for the same runtime generation.
-- `StealthManager` owns the primary connection-generation snapshot. `QuicFuscateConnection` reuses it for FEC observer and adaptive-FEC policy, Brain, Reality, stealth overrides, TLS ClientHello overrides, and the intelligent orchestrator. `transport::Connection` receives the same snapshot before its first TLS enable and retains it for TLS provider rebuilds, recovery selection, and BBR2/BBR3 minimum-RTT configuration. **TODO-894 (2026-08-21):** `StealthBrain` now captures one `EnvSnapshot` at construction (`StealthBrain::new_with_level_hints`) and reuses it for every `apply_policy` tick via `&self.environment`; the previous per-tick `EnvSnapshot::capture()` (full `env::vars_os` with millions of allocations at 10k pps) is removed. The only Intelligent-policy consumer is `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1`, which is startup configuration, so stealth behavior is byte-identical while the send hot path loses its dominant allocation source.
+- `StealthManager` owns the primary connection-generation snapshot. `QuicFuscateConnection` reuses it for FEC observer and adaptive-FEC policy, Brain, Reality, stealth overrides, TLS ClientHello overrides, and the intelligent orchestrator. `transport::Connection` receives the same snapshot before its first TLS enable and retains it for TLS provider rebuilds, recovery selection, and BBR2/BBR3 minimum-RTT configuration. **TODO-894/TODO-1060:** the Brain reads no environment at policy time at all — `StealthBrainConfig` is validated once at construction, and the actuator derivation consumes only sensor inputs (the last env-dependent policy knob, `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1`, was removed with the shape actuators).
 - Standalone constructors that are not attached to a parent runtime capture their own snapshot at construction. Environment mutation after construction is unsupported; reconstruct or restart the owning runtime to apply changed values.
 - Boolean helpers trim whitespace and accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`. A present but invalid boolean warns and retains the configured default. Numeric helpers trim input, warn and ignore invalid values, reject non-finite floats, and reject non-positive values for positive-only controls. Range-constrained consumers warn and clamp or ignore values according to their existing safety contract.
 - Ordered alias helpers ignore empty and invalid canonical values before trying legacy aliases. Unset values and invalid values therefore remain distinguishable at the helper boundary even when the consumer intentionally preserves its default.
@@ -3557,10 +3545,7 @@ The following table is the ownership and invalid-value contract for every produc
 - `QUICFUSCATE_BRAIN_PROBE_MAX_PER_MIN`: integer (<=30)
 - `QUICFUSCATE_BRAIN_PROBE_COOLDOWN_MS`: integer - Probe cooldown in ms
 - `QUICFUSCATE_BRAIN_POLICY_COOLDOWN_MS`: integer - Policy cooldown in ms
-- `QUICFUSCATE_BRAIN_EXPLORE`: float (0.0..0.25) - Exploration probability
 - `QUICFUSCATE_BRAIN_HIST_DECAY`: float (0.80..0.999)
-- `QUICFUSCATE_BRAIN_PAD_MAX_LOW`: integer (16..512)
-- `QUICFUSCATE_BRAIN_PAD_MAX_HIGH`: integer (>= low, <=2048)
 
 **TLS Provider (qftls):**
 - `QUICFUSCATE_ALLOW_INVALID_CERTS=1|true|yes|on` - Accept invalid peer certificates (development/testing only)
@@ -6836,8 +6821,8 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Intelligent Stealth Policy Workspace Ownership (2026-08-10, TODO-562)
 
-- `crates/qf-stealth/src/intelligent_policy.rs` canonically owns `IntelligentStealthInputs` and the pure mapping from one Brain signal snapshot plus immutable `EnvSnapshot` to `StealthRuntimePolicy`: external pacing, pressure-sensitive jitter, padding strategy and rate, mimic bias, adaptive granularity, and browser CC profile.
-- `StealthManager::derive_intelligent_runtime_policy` preserves the historical root call path and captures the process environment once before delegating. Brain hysteresis, live connection mutation, preset baselines, runtime escalation, transport state, frontend, and Tauri behavior remain outside the child.
+- `crates/qf-stealth/src/intelligent_policy.rs` canonically owns `IntelligentStealthInputs` and the shape-free mapping from one Brain signal snapshot to `IntelligentActuatorHints`: the EMA-smoothed repair-ratio hint, the repair interval, and the Reality/MASQUE armed bit (TODO-1060). It consumes no `EnvSnapshot` — the former `StealthRuntimePolicy` output with pacing/jitter/padding/bias/granularity/CC-profile fields was deleted with the bandit generator.
+- The historical root `StealthManager::derive_intelligent_runtime_policy` adapter is removed; `src/brain.rs` calls `qf_stealth::derive_intelligent_actuators` directly inside `apply_policy`. Brain hysteresis, live connection mutation, preset baselines, runtime escalation, transport state, frontend, and Tauri behavior remain outside the child.
 - Verification passes qf-stealth `124/124`, root all-feature checking and library tests `1,697/1,697`, strict workspace library/binary/example Clippy, qf-stealth all-target strict Clippy, formatting, and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-intelligent-stealth-policy-postpush/workspace-seams.json` at source revision `cfa3ee80529fd9c716b23e075a8436d3567021d0`: `36` workspace packages, `333` Rust files, `207,092` source lines, `123` module edges, `115` Cargo workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`.
 
@@ -6874,9 +6859,8 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Brain Intelligent-Policy Dependency (2026-08-10, TODO-562)
 
-- `src/brain.rs` now invokes the canonical `qf-stealth::derive_intelligent_runtime_policy` contract directly with the same one-call `EnvSnapshot` capture and complete signal input. It no longer routes the pure mapping through the concrete root `StealthManager` compatibility adapter.
-- The legacy manager helper and its `IntelligentStealthInputs` compatibility import are test-only, preserving root compatibility coverage without dead production code. Focused Brain tests pass `65/65`; root all-feature checking, strict workspace library/binary/example Clippy, formatting, and diff hygiene pass. The final guard records `3,931,084 KiB` target usage and `18,602,192 KiB` free.
-- Brain hysteresis, telemetry, policy dithering, transport mutation, probe escalation, and all public behavior remain unchanged. This backend-only dependency correction requires no frontend or Tauri field/API projection.
+- `src/brain.rs` now invokes the canonical `qf_stealth::derive_intelligent_actuators` contract directly with the complete sensor snapshot (TODO-1060). It no longer routes any mapping through the concrete root `StealthManager` compatibility adapter — that adapter is deleted.
+- The legacy manager helper and its `IntelligentStealthInputs` compatibility import are gone with the shape actuators. Brain hysteresis, telemetry, transport mutation and probe escalation remain; the policy output is narrowed to repair-ratio + Reality armed bit + congestion-driven ACK threshold.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-brain-intelligent-policy-postpush/workspace-seams.json` at source revision `570223f68b3ef369ded291779355bc689b2fa765`: `36` packages, `334` Rust files, `207,083` source lines, `118` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `brain -> stealth` edge is removed; Brain retains only its concrete transport edge inside the SCC.
 
 ## Transport Stealth-Contract Dependency (2026-08-10, TODO-562)

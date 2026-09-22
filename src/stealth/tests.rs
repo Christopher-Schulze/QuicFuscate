@@ -96,12 +96,9 @@ fn stealth_manager_constructs_without_a_tokio_runtime() {
 fn brain_runtime_permissions_lock_operator_overrides() {
     let _env_lock = acquire_env_lock();
     let _ack = EnvGuard::set("QUICFUSCATE_ACK_THRESHOLD", "5");
-    let _jitter = EnvGuard::set("QUICFUSCATE_STEALTH_JITTER_US", "900");
-    let _padding = EnvGuard::set("QUICFUSCATE_STEALTH_PADDING_STRATEGY", "browser");
-    let _bias = EnvGuard::set("QUICFUSCATE_STEALTH_MIMIC_BIAS", "safari");
 
-    // Non-dynamic modes keep the lock table; `dynamic` denies every shape
-    // actuator regardless of env overrides (TODO-1059).
+    // TODO-1060: the only knob the permission still gates is the
+    // congestion-driven ACK threshold — locked when the operator claimed it.
     let manager = StealthManager::new(
         StealthConfig::stealth(),
         Arc::new(OptimizationManager::new()),
@@ -110,72 +107,55 @@ fn brain_runtime_permissions_lock_operator_overrides() {
     let permissions = manager.brain_runtime_permissions();
 
     assert!(!permissions.ack_threshold);
-    assert!(!permissions.external_pacing);
-    assert!(!permissions.timing);
-    assert!(!permissions.padding);
-    assert!(!permissions.mimic_bias);
-    assert!(!permissions.granularity);
-    assert!(!permissions.cc_profile);
 }
 
 #[test]
-fn intelligent_runtime_policy_prefers_clean_pacing_and_browser_padding() {
-    // Level 0 = clean path: padding must be disabled (near-zero Intelligent overhead guarantee).
-    let policy = StealthManager::derive_intelligent_runtime_policy(
-        crate::stealth::IntelligentStealthInputs {
-            level_hint: 0,
+fn intelligent_actuators_stay_inside_cap_and_arm_reality_under_pressure() {
+    // Clean path: baseline repair ratio, reality disarmed.
+    let mut state = qf_stealth::IntelligentRepairState::default();
+    let hints = qf_stealth::derive_intelligent_actuators(
+        qf_stealth::IntelligentStealthInputs {
+            ce_effective: 0.0005,
             ce_ratio_recent: 0.0005,
             ack_us: 2_400.0,
-            up_us: 0.0,
-            size_div: 0.2,
-            iat_div: 0.3,
+            jitter_ratio: 0.0,
             reorder_ratio: 0.0,
             rtt_spike_weight: 0.0,
+            size_div: 0.2,
+            iat_div: 0.3,
+            signal_rst: 0,
             signal_tos: 0,
             signal_other: 0,
-            jitter_max_us: 1_000,
-            pad_max_low: 128,
-            pad_max_high: 640,
+            probe_level: 0,
         },
+        &mut state,
     );
+    assert!(!hints.reality_armed);
+    assert!((80_000..=320_000).contains(&hints.repair_ratio_ppm));
 
-    assert!(policy.external_pacing);
-    assert!(!policy.timing_enabled);
-    // Level 0 clean path: padding is off.
-    assert!(!policy.padding_enabled);
-    assert_eq!(policy.padding_strategy, 0);
-    assert_eq!(policy.padding_max, 0);
-    assert_eq!(policy.mimic_bias, 4);
-    assert_eq!(policy.cc_profile, crate::transport::recovery::BrowserProfile::Edge);
-}
-
-#[test]
-fn intelligent_runtime_policy_escalates_under_loss_and_divergence() {
-    let policy = StealthManager::derive_intelligent_runtime_policy(
-        crate::stealth::IntelligentStealthInputs {
-            level_hint: 2,
+    // Loss + divergence: repair ratio climbs (EMA-smoothed, still bounded)
+    // and the Reality/MASQUE armed bit flips.
+    let hints = qf_stealth::derive_intelligent_actuators(
+        qf_stealth::IntelligentStealthInputs {
+            ce_effective: 0.12,
             ce_ratio_recent: 0.12,
             ack_us: 14_500.0,
-            up_us: 0.0,
-            size_div: 1.6,
-            iat_div: 1.1,
+            jitter_ratio: 0.3,
             reorder_ratio: 0.03,
             rtt_spike_weight: 5.0,
+            size_div: 1.6,
+            iat_div: 1.1,
+            signal_rst: 0,
             signal_tos: 1,
             signal_other: 1,
-            jitter_max_us: 1_200,
-            pad_max_low: 96,
-            pad_max_high: 700,
+            probe_level: 0,
         },
+        &mut state,
     );
-
-    assert!(!policy.external_pacing);
-    assert!(policy.timing_enabled);
-    assert_eq!(policy.padding_strategy, 1);
-    assert_eq!(policy.padding_max, 96);
-    assert_eq!(policy.mimic_bias, 1);
-    assert_eq!(policy.adaptive_granularity, 32);
-    assert_eq!(policy.cc_profile, crate::transport::recovery::BrowserProfile::Safari);
+    assert!(hints.reality_armed);
+    assert!(hints.repair_ratio_ppm > 100_000);
+    assert!((80_000..=320_000).contains(&hints.repair_ratio_ppm));
+    assert!((2..=20).contains(&hints.repair_interval_pkts));
 }
 
 // --- TLS Cover Tests (TODO-297) ---
@@ -713,17 +693,12 @@ fn test_dynamic_wire_image_frozen_under_probe_escalation() {
     );
 
     // Baseline: stealth image gates are already open at level 0; the Brain
-    // holds no packet-shape actuator at all.
+    // holds no packet-shape actuator at all — the permission table only
+    // carries the congestion-driven ACK threshold (TODO-1060).
     assert!(mgr.cover_header_emission_allowed());
     assert!(mgr.webtransport_cover_enabled());
     let perms = mgr.brain_runtime_permissions();
-    assert!(!perms.ack_threshold);
-    assert!(!perms.external_pacing);
-    assert!(!perms.timing);
-    assert!(!perms.padding);
-    assert!(!perms.mimic_bias);
-    assert!(!perms.granularity);
-    assert!(!perms.cc_profile);
+    assert!(perms.ack_threshold, "no operator override → ACK threshold unlocked");
     assert!(!mgr.masque_preferred());
 
     // Eight probes inside the window escalate to level 2 — the repair-ratio
@@ -747,8 +722,6 @@ fn test_dynamic_wire_image_frozen_under_probe_escalation() {
     // Frozen image: every wire-shape decision is identical to pre-escalation.
     assert!(mgr.cover_header_emission_allowed(), "cover gate must not re-key on level");
     assert!(mgr.webtransport_cover_enabled(), "WT gate must not re-key on level");
-    let perms = mgr.brain_runtime_permissions();
-    assert!(!perms.timing && !perms.padding && !perms.cc_profile);
     // AEAD stays AES-GCM regardless of escalation.
     assert!(!crate::engine::runtime_mode_uses_libaegis(StealthMode::Dynamic, false));
 }
@@ -901,73 +874,54 @@ fn test_de_escalation_after_quiet_period() {
     std::env::remove_var("QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC");
 }
 
-/// Padding rate in StealthRuntimePolicy scales correctly per level.
+/// Repair ratio in IntelligentActuatorHints climbs with pressure and stays
+/// bounded — it never touches the frozen wire shape (TODO-1060).
 #[test]
-fn test_policy_padding_rate_scales_per_level() {
-    use crate::stealth::IntelligentStealthInputs;
+fn test_repair_ratio_scales_with_pressure_not_shape() {
+    use qf_stealth::{
+        derive_intelligent_actuators, IntelligentRepairState, IntelligentStealthInputs,
+    };
 
-    // Level 0: padding_rate = 0
-    let policy_l0 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-        level_hint: 0,
-        ce_ratio_recent: 0.0,
-        ack_us: 5000.0,
-        up_us: 0.0,
-        size_div: 0.0,
-        iat_div: 0.0,
-        reorder_ratio: 0.0,
-        rtt_spike_weight: 0.0,
-        signal_tos: 0,
-        signal_other: 0,
-        jitter_max_us: 3000,
-        pad_max_low: 128,
-        pad_max_high: 512,
-    });
-    assert_eq!(policy_l0.padding_rate, 0, "level 0 padding rate should be 0");
-    assert_eq!(policy_l0.timing_rate, 0, "level 0 timing rate should be 0");
+    let mut state = IntelligentRepairState::default();
+    let clean = derive_intelligent_actuators(
+        IntelligentStealthInputs {
+            ce_effective: 0.0,
+            ce_ratio_recent: 0.0,
+            ack_us: 5_000.0,
+            jitter_ratio: 0.0,
+            reorder_ratio: 0.0,
+            rtt_spike_weight: 0.0,
+            size_div: 0.0,
+            iat_div: 0.0,
+            signal_rst: 0,
+            signal_tos: 0,
+            signal_other: 0,
+            probe_level: 0,
+        },
+        &mut state,
+    );
+    let pressured = derive_intelligent_actuators(
+        IntelligentStealthInputs {
+            ce_effective: 0.15,
+            ce_ratio_recent: 0.15,
+            ack_us: 15_000.0,
+            jitter_ratio: 0.4,
+            reorder_ratio: 0.05,
+            rtt_spike_weight: 4.0,
+            size_div: 1.5,
+            iat_div: 1.2,
+            signal_rst: 0,
+            signal_tos: 1,
+            signal_other: 1,
+            probe_level: 0,
+        },
+        &mut state,
+    );
 
-    // Level 2 with pressure: padding_rate = 100, timing_rate = 100
-    let policy_l2 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-        level_hint: 2,
-        ce_ratio_recent: 0.15,
-        ack_us: 15000.0,
-        up_us: 0.0,
-        size_div: 1.5,
-        iat_div: 1.2,
-        reorder_ratio: 0.05,
-        rtt_spike_weight: 4.0,
-        signal_tos: 1,
-        signal_other: 1,
-        jitter_max_us: 3000,
-        pad_max_low: 128,
-        pad_max_high: 512,
-    });
-    assert_eq!(policy_l2.padding_rate, 100, "level 2 padding rate should be 100");
-    assert_eq!(policy_l2.timing_rate, 100, "level 2 timing rate should be 100");
-}
-
-/// Timing rate in StealthRuntimePolicy is 0 at level 1, 100 at level 2.
-#[test]
-fn test_policy_timing_rate_per_level() {
-    use crate::stealth::IntelligentStealthInputs;
-
-    // Level 1 with pressure: timing_rate = 0 (timing only at level 2)
-    let policy_l1 = StealthManager::derive_intelligent_runtime_policy(IntelligentStealthInputs {
-        level_hint: 1,
-        ce_ratio_recent: 0.05,
-        ack_us: 8000.0,
-        up_us: 0.0,
-        size_div: 0.8,
-        iat_div: 0.5,
-        reorder_ratio: 0.01,
-        rtt_spike_weight: 1.0,
-        signal_tos: 0,
-        signal_other: 1,
-        jitter_max_us: 3000,
-        pad_max_low: 128,
-        pad_max_high: 512,
-    });
-    assert_eq!(policy_l1.timing_rate, 0, "level 1 timing rate should be 0");
-    assert!(policy_l1.padding_rate > 0, "level 1 padding rate should be > 0");
+    assert!(pressured.repair_ratio_ppm > clean.repair_ratio_ppm);
+    assert!((80_000..=320_000).contains(&pressured.repair_ratio_ppm));
+    assert!(pressured.repair_interval_pkts <= clean.repair_interval_pkts);
+    assert!(pressured.reality_armed);
 }
 
 // --- ChaffGenerator tests (TODO-455) ---

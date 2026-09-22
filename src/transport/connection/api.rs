@@ -965,12 +965,6 @@ impl Connection {
         self.config.stealth_padding_strategy
     }
 
-    /// Whether the Brain sensor-fusion engine may steer this connection (test accessor).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn intelligent_stealth_runtime_enabled_for_test(&self) -> bool {
-        self.intelligent_stealth_runtime
-    }
-
     /// Whether a stealth congestion-control wrapper is currently installed.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn stealth_cc_active_for_test(&self) -> bool {
@@ -986,20 +980,6 @@ impl Connection {
     /// Set or clear the transport observer (integration hook)
     pub fn set_observer(&mut self, obs: Option<Arc<dyn TransportObserver>>) {
         self.observer = obs;
-    }
-
-    pub(crate) fn intelligent_stealth_runtime_enabled(&self) -> bool {
-        self.intelligent_stealth_runtime
-    }
-
-    pub(crate) fn set_intelligent_stealth_runtime(&mut self, enabled: bool) {
-        self.intelligent_stealth_runtime = enabled;
-    }
-
-    /// Enables or disables Brain-driven stealth runtime for this connection (test helper).
-    #[cfg(any(test, feature = "rust-tests"))]
-    pub fn set_intelligent_stealth_runtime_for_test(&mut self, enabled: bool) {
-        self.set_intelligent_stealth_runtime(enabled);
     }
 
     pub(crate) fn brain_runtime_permissions(&self) -> crate::transport::BrainRuntimePermissions {
@@ -1058,78 +1038,21 @@ impl Connection {
     pub fn set_ack_eliciting_threshold(&mut self, thr: u64) {
         self.config.ack_eliciting_threshold = thr.max(1);
     }
-    /// Toggle external pacing controller at runtime
-    pub(crate) fn set_external_pacing(&mut self, v: bool) {
-        self.config.external_pacing = v;
-    }
     /// Toggles external pacing for this connection (test helper).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn set_external_pacing_for_test(&mut self, v: bool) {
-        self.set_external_pacing(v);
+        self.config.external_pacing = v;
+    }
+    /// Enables/disables stealth timing on the frozen image (test helper —
+    /// production shape is fixed at connect via `Config`).
+    #[cfg(any(test, feature = "rust-tests"))]
+    pub fn set_stealth_timing_for_test(&mut self, enabled: bool, max_jitter_us: u32) {
+        self.config.stealth_timing_enabled = enabled;
+        self.config.stealth_timing_max_jitter_us = max_jitter_us;
     }
     /// Adjust streaming FEC emission interval (AdaptiveFec only)
     pub fn set_fec_stream_every(&mut self, every: usize) {
         self.fec_ctrl_delta.stream_every = Some(every.clamp(1, 32));
-    }
-    /// Enable/disable stealth timing and set max jitter
-    pub(crate) fn set_stealth_timing(&mut self, enabled: bool, max_jitter_us: u32) {
-        self.config.stealth_timing_enabled = enabled;
-        self.config.stealth_timing_max_jitter_us = max_jitter_us;
-    }
-    /// Set adaptive padding granularity (>=1)
-    pub(crate) fn set_stealth_adaptive_granularity(&mut self, gran: u16) {
-        self.config.stealth_adaptive_granularity = if gran == 0 { 1 } else { gran };
-    }
-    /// Set browser mimic bias (1..=4)
-    pub(crate) fn set_stealth_mimic_bias(&mut self, bias: u8) {
-        self.config.stealth_mimic_bias = match bias {
-            1..=4 => bias,
-            _ => 3,
-        };
-    }
-    /// Adjust stealth padding parameters at runtime
-    pub(crate) fn set_stealth_padding(&mut self, enabled: bool, strategy: u8, max_size: usize) {
-        self.config.stealth_padding_enabled = enabled;
-        self.config.stealth_padding_strategy = strategy;
-        self.config.stealth_padding_max_size = max_size;
-    }
-    /// Set padding application rate (0-100%): fraction of packets that receive padding.
-    pub(crate) fn set_stealth_padding_rate(&mut self, rate: u8) {
-        self.config.stealth_padding_rate = rate.min(100);
-    }
-    /// Set timing obfuscation rate (0-100%): scales jitter magnitude.
-    pub(crate) fn set_stealth_timing_rate(&mut self, rate: u8) {
-        self.config.stealth_timing_rate = rate.min(100);
-    }
-    pub(crate) fn apply_brain_stealth_runtime_delta(
-        &mut self,
-        delta: crate::transport::StealthRuntimeDelta,
-    ) -> Result<(), crate::transport::recovery::StealthShaperError> {
-        if let Some(pacing) = delta.external_pacing {
-            self.set_external_pacing(pacing);
-        }
-        if let Some((enabled, max_jitter_us)) = delta.timing {
-            self.set_stealth_timing(enabled, max_jitter_us);
-        }
-        if let Some(bias) = delta.mimic_bias {
-            self.set_stealth_mimic_bias(bias);
-        }
-        if let Some(granularity) = delta.adaptive_granularity {
-            self.set_stealth_adaptive_granularity(granularity);
-        }
-        if let Some(profile) = delta.cc_profile {
-            self.set_cc_stealth_profile(true, profile)?;
-        }
-        if let Some((enabled, strategy, max_size)) = delta.padding {
-            self.set_stealth_padding(enabled, strategy, max_size);
-        }
-        if let Some(rate) = delta.padding_rate {
-            self.set_stealth_padding_rate(rate);
-        }
-        if let Some(rate) = delta.timing_rate {
-            self.set_stealth_timing_rate(rate);
-        }
-        Ok(())
     }
     /// Configure CC stealth profile to shape pacing like common browsers
     pub fn set_cc_stealth_profile(
@@ -1389,7 +1312,9 @@ impl Connection {
     /// Applies the authorized Level-2 defense or restores the authenticated baseline.
     /// Test-only: the production tick no longer swaps the traffic-analysis
     /// policy on probe level — it is part of the frozen wire image (TODO-1059).
+    /// Retained for the ceiling-enforcement tests and the Maybenot work (TODO-1061).
     #[cfg(any(test, feature = "rust-tests"))]
+    #[allow(dead_code)]
     pub(crate) fn apply_intelligent_traffic_analysis_level(
         &mut self,
         level: u32,

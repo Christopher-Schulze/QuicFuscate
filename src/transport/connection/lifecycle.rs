@@ -292,7 +292,7 @@ impl Connection {
             lost_stream_transmission_by_pn: BTreeMap::new(),
             next_stream_transmission_id: 0,
             stream_retransmit_bytes: 0,
-            intelligent_stealth_runtime: false,
+
             brain_runtime_permissions: crate::transport::BrainRuntimePermissions::default(),
             observer: None,
             h3: None,

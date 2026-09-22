@@ -169,17 +169,15 @@ impl Connection {
     }
 
     /// Run the transport stealth-padding decision logic for Criterion benchmarks.
-    pub fn bench_compute_stealth_padding(&self, cur_pt_len: usize, budget: usize) -> usize {
+    pub fn bench_compute_stealth_padding(&mut self, cur_pt_len: usize, budget: usize) -> usize {
         self.compute_stealth_padding(cur_pt_len, budget)
     }
 
     /// Configure Brain runtime gates for transport/brain benchmarks.
     pub fn bench_set_brain_runtime(
         &mut self,
-        enabled: bool,
         permissions: crate::transport::BrainRuntimePermissions,
     ) {
-        self.set_intelligent_stealth_runtime(enabled);
         self.set_brain_runtime_permissions(permissions);
     }
 

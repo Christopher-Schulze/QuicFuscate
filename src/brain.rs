@@ -5,7 +5,7 @@ use log::trace;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::optimize::brain as brain_accel;
 use qf_fec::{BrainFecHints, KalmanFilter};
@@ -105,20 +105,17 @@ fn elapsed_since(instant: Instant) -> Duration {
 }
 
 // ===== Brain ==================================================================
-/// Sensor-fusion engine that observes transport signals and emits stealth policy deltas.
+/// Sensor-fusion engine that observes transport signals and steers the two
+/// remaining actuators (TODO-1060): the FEC repair-ratio hint and the
+/// Reality/MASQUE armed bit, plus the congestion-driven ACK threshold.
 ///
-/// Consumes ACK delays, ECN counters, packet sizes, and inter-arrival times to
-/// adaptively tune FEC redundancy, ACK thresholds, padding, timing, and congestion
-/// control profiles via the `TransportObserver` trait.
+/// Consumes ACK delays, ECN counters, packet sizes, and inter-arrival times.
+/// The bandit/pattern generator that tuned padding, timing and CC profiles
+/// is gone — a converging bandit is a stable fingerprint; the wire image is
+/// frozen at connect (TODO-1059).
 pub struct StealthBrain {
     cfg: StealthBrainConfig,
     st: RwLock<StealthBrainState>,
-    /// Environment snapshot captured once at brain construction. The Intelligent
-    /// policy derivation only reads `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1`,
-    /// which is startup configuration, not a per-tick runtime knob. Capturing the
-    /// full process environment per apply_policy tick cost millions of allocs at
-    /// high pps for zero behavioral difference (TODO-894).
-    environment: qf_common::env_utils::EnvSnapshot,
     fec_hints: Arc<BrainFecHints>,
     level_hints: Arc<IntelligentLevelHints>,
     // Lock-free buffers for observer callbacks - drained in apply_policy's single write lock.
@@ -162,7 +159,6 @@ impl StealthBrain {
         let fec_hints = Arc::new(BrainFecHints::new());
         Arc::new(Self {
             st: RwLock::new(StealthBrainState::new(&cfg)),
-            environment: qf_common::env_utils::EnvSnapshot::capture(),
             cfg,
             fec_hints,
             level_hints,
@@ -321,11 +317,6 @@ impl TransportObserver for StealthBrain {
             crate::optimize::telemetry::STEALTH_SIGNAL_TOS_ANOM.swap(0, Ordering::Relaxed);
         let signal_other =
             crate::optimize::telemetry::STEALTH_SIGNAL_OTHER.swap(0, Ordering::Relaxed);
-        let dr_now = conn.delivery_rate();
-        let ts = crate::time_source::now_system()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .subsec_nanos() as u64;
 
         let actuators = {
             let mut st = self.st.write();
@@ -439,85 +430,61 @@ impl TransportObserver for StealthBrain {
                 ce_ratio_recent
             };
             let ce_effective = ce_filtered.max(ce_ratio_recent).min(0.5);
-            if st.red_ppm_momentum == 0.0 {
-                st.red_ppm_momentum = st.last_red_ppm as f32;
-            }
             let jitter_ratio =
                 if ack_us_long > 0.0 { (jitter_us / ack_us_long).min(0.5) } else { 0.0 };
-            let signal_penalty = (signal_rtt_spikes as f64).min(8.0) * 0.02
-                + (signal_rst as f64 * 0.03)
-                + (signal_tos as f64 * 0.02)
-                + (signal_other as f64 * 0.04);
-            let desired_multiplier = (1.0
-                + ce_effective * 6.5
-                + reorder_ratio.min(0.06) * 6.0
-                + jitter_ratio * 2.5
-                + signal_penalty)
-                .clamp(0.8, 3.5);
-            let desired_ppm = (100_000.0 * desired_multiplier) as f32;
-            st.red_ppm_momentum = st.red_ppm_momentum * 0.7 + desired_ppm * 0.3;
-            let ppm_u64 = st.red_ppm_momentum.round().clamp(80_000.0, 320_000.0) as u64;
+            // TODO-1060: the sensors feed exactly two actuators — the
+            // repair-ratio hint inside the byte cap and the Reality/MASQUE
+            // armed bit. No packet shape is derived anywhere: the wire image
+            // was frozen at connect (TODO-1059).
+            let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
+            let hints = qf_stealth::derive_intelligent_actuators(
+                qf_stealth::IntelligentStealthInputs {
+                    ce_effective,
+                    ce_ratio_recent,
+                    ack_us,
+                    jitter_ratio,
+                    reorder_ratio,
+                    rtt_spike_weight,
+                    size_div,
+                    iat_div,
+                    signal_rst,
+                    signal_tos,
+                    signal_other,
+                    probe_level: self.level_hints.probe_level(),
+                },
+                &mut st.repair_state,
+            );
+            let ppm_u64 = hints.repair_ratio_ppm as u64;
+            let interval_u64 = hints.repair_interval_pkts;
 
-            let mut desired_interval: u64 = if ce_effective > 0.08 {
-                4
-            } else if ce_effective > 0.04 || reorder_ratio > 0.02 {
-                6
-            } else if ce_effective > 0.015 || reorder_ratio > 0.01 {
-                8
-            } else {
-                12
-            };
-            if signal_other > 0 || signal_rst > 0 {
-                desired_interval = desired_interval.saturating_sub(2);
-            }
-            desired_interval = desired_interval.clamp(3, 18);
-            if st.last_fec_interval == 0 {
-                st.last_fec_interval = desired_interval;
-            }
-            let mut interval = st.last_fec_interval as i64;
-            let target_interval = desired_interval as i64;
-            match target_interval.cmp(&interval) {
-                std::cmp::Ordering::Greater => interval += 1,
-                std::cmp::Ordering::Less => interval -= 1,
-                std::cmp::Ordering::Equal => {}
-            }
-            interval = interval.clamp(2, 20);
-            let interval_u64 = interval as u64;
-
-            let ppm_changed = (ppm_u64 as i64 - st.last_red_ppm as i64).abs()
-                > ((st.last_red_ppm / 40).max(1500)) as i64;
-            let interval_changed = interval_u64 != st.last_fec_interval;
+            let ppm_changed = (ppm_u64 as i64 - st.repair_state.last_red_ppm as i64).abs()
+                > ((st.repair_state.last_red_ppm / 40).max(1500)) as i64;
+            let interval_changed = interval_u64 != st.repair_state.last_fec_interval;
             let due = now.duration_since(st.last_fec_update) > Duration::from_millis(300);
 
             let (fec_hint_ppm, fec_hint_interval) = if ppm_changed || interval_changed || due {
-                st.last_red_ppm = ppm_u64;
-                st.last_fec_interval = interval_u64;
+                st.repair_state.last_red_ppm = ppm_u64;
+                st.repair_state.last_fec_interval = interval_u64;
                 st.last_fec_update = now;
                 (Some(ppm_u64 as u32), Some(interval_u64))
             } else {
                 (None, None)
             };
 
-            // Derive ACK threshold: tighter under CE/jitter, looser on clean paths
-            let rtt_spike_weight = (signal_rtt_spikes as f64).min(8.0);
-            let mut thr = if ce_ratio_recent > 0.05 || ack_us > 12_000.0 || rtt_spike_weight >= 4.0
-            {
-                2
+            // ACK threshold is a pure congestion feature: tighter under CE
+            // pressure and path jitter, looser on clean paths. It changes
+            // *when* ACKs are emitted, never the packet length set or the
+            // framing — so it stays (TODO-1060 notes); the stealth-driven
+            // divergence clamp and the epsilon-greedy bandit are gone.
+            let thr = if ce_ratio_recent > 0.05 || ack_us > 12_000.0 || rtt_spike_weight >= 4.0 {
+                2u64
             } else if ce_ratio_recent < 0.001 && ack_us < 3_000.0 && rtt_spike_weight == 0.0 {
                 8
             } else {
                 4
-            } as u64;
-            if size_div + iat_div > 1.2 {
-                thr = thr.clamp(2, 4);
             }
-            thr = thr.clamp(self.cfg.ack_min, self.cfg.ack_max);
-            let prefer_masque_brain = ce_ratio_recent > 0.03
-                || rtt_spike_weight >= 2.0
-                || signal_rst > 0
-                || signal_tos > 0
-                || (size_div + iat_div) > 1.6
-                || reorder_ratio > 0.02;
+            .clamp(self.cfg.ack_min, self.cfg.ack_max);
+            let prefer_masque_brain = hints.reality_armed;
             let loss_pressure = ce_ratio_recent.min(1.0) as f32;
             let jitter_pressure =
                 (jitter_us / (self.cfg.jitter_max_us.max(1) as f64)).min(1.0) as f32;
@@ -585,210 +552,37 @@ impl TransportObserver for StealthBrain {
                 st.last_masque_hint_change = now;
             }
             let prefer_masque_effective = st.last_masque_hint;
-            // TODO-1019 upstream density: fold the congestion controller's
-            // delivery rate (bytes/s) into a packet inter-arrival estimate
-            // with a nominal MTU-sized datagram, so the direction-aware
-            // phase table can classify upload on the same microsecond
-            // axis as the downstream ACK cadence. Zero (no estimate yet,
-            // e.g. during handshake) keeps the symmetric fallback row.
-            const NOMINAL_PKT_BYTES: f64 = 1_200.0;
-            let up_rate = conn.pacing_rate_bps();
-            let up_us = if up_rate > 0 { (NOMINAL_PKT_BYTES * 1e6) / up_rate as f64 } else { 0.0 };
-            let density_us_u32 = |value: f64| -> u32 {
-                if value.is_finite() && value > 0.0 {
-                    value.min(u32::MAX as f64) as u32
-                } else {
-                    0
-                }
-            };
-            let mut stealth_policy = qf_stealth::derive_intelligent_runtime_policy(
-                qf_stealth::IntelligentStealthInputs {
-                    level_hint: effective_level,
-                    ce_ratio_recent,
-                    ack_us,
-                    up_us,
-                    size_div,
-                    iat_div,
-                    reorder_ratio,
-                    rtt_spike_weight,
-                    signal_tos,
-                    signal_other,
-                    jitter_max_us: self.cfg.jitter_max_us,
-                    pad_max_low: self.cfg.pad_max_low,
-                    pad_max_high: self.cfg.pad_max_high,
-                },
-                &self.environment,
-            );
-            let dither_pct = ((ts >> 7) % 21) as i64 - 10;
-            stealth_policy.timing_max_jitter_us = ((stealth_policy.timing_max_jitter_us as i64)
-                + ((stealth_policy.timing_max_jitter_us as i64 * dither_pct) / 100))
-                .max(0) as u32;
-            self.level_hints.set_tamaraw_snapshot(
-                density_us_u32(ack_us),
-                density_us_u32(up_us),
-                stealth_policy.padding_rate,
-                stealth_policy.timing_max_jitter_us,
-            );
 
-            let mut thr_local = thr;
-            if let Some(arm) = st.bandit_last_arm.take() {
-                let n = st.bandit_counts[arm];
-                let dr_prev = st.last_delivery_rate;
-                let dr_gain = if dr_now > 0 {
-                    (dr_now as f64 - dr_prev as f64) / (dr_now as f64)
-                } else {
-                    0.0
-                };
-                let penalty: f64 = 0.7 * ce_ratio_recent + 0.3 * (jitter_us / (ack_us.max(1.0)));
-                let r = dr_gain - penalty.max(0.0);
-                let new_avg = if n == 0 {
-                    r
-                } else {
-                    ((st.bandit_avg_reward[arm] * n as f64) + r) / (n as f64 + 1.0)
-                };
-                st.bandit_avg_reward[arm] = new_avg;
-                st.bandit_counts[arm] = n + 1;
-            }
-            st.last_delivery_rate = dr_now;
-            let arms: [u64; 4] = [2, 3, 4, 8];
-            let roll = ((ts ^ (ts.rotate_left(17))) % 10_000) as f64 / 10_000.0;
-            let explore = roll
-                < (self.cfg.explore_prob as f64 * if ce_ratio_recent < 0.005 { 1.0 } else { 0.5 });
-            let pick = if explore {
-                ((ts >> 13) as usize) & 3
-            } else {
-                let mut best = 0usize;
-                let mut best_val = f64::NEG_INFINITY;
-                for i in 0..4 {
-                    if st.bandit_avg_reward[i] > best_val {
-                        best = i;
-                        best_val = st.bandit_avg_reward[i];
-                    }
-                }
-                if best_val.is_finite() {
-                    best
-                } else {
-                    let mut idx = 0usize;
-                    let mut diff = u64::MAX;
-                    for (i, &a) in arms.iter().enumerate() {
-                        let d = a.abs_diff(thr_local);
-                        if d < diff {
-                            diff = d;
-                            idx = i;
-                        }
-                    }
-                    idx
-                }
-            };
-            st.bandit_last_arm = Some(pick);
-            let bandit_thr = arms[pick];
-            if bandit_thr != thr_local {
-                thr_local = bandit_thr;
-            }
-            let cooldown = cooldown_ok;
-            {
+            // Step-limit the congestion-driven ACK threshold so one noisy
+            // tick cannot swing the ACK cadence.
+            let thr = {
                 use core::cmp::Ordering;
                 let last = st.last_ack_thr as i64;
-                let tgt = thr_local as i64;
-                thr_local = match tgt.cmp(&last) {
+                let tgt = thr as i64;
+                match tgt.cmp(&last) {
                     Ordering::Greater => {
                         (last + 1).clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64) as u64
                     }
                     Ordering::Less => {
                         (last - 1).clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64) as u64
                     }
-                    Ordering::Equal => thr_local,
-                };
-            }
-            let do_ack = cooldown && (st.last_ack_thr != thr_local);
-            if do_ack {
-                st.last_ack_thr = thr_local;
-            }
-            let do_pacing = cooldown && (st.last_pacing != stealth_policy.external_pacing);
-            if do_pacing {
-                st.last_pacing = stealth_policy.external_pacing;
-            }
-            let j_old = st.last_jitter_hint;
-            let j_new = stealth_policy.timing_max_jitter_us;
-            let j_diff = if j_old == 0 || j_new == 0 {
-                j_old as i64 - j_new as i64
-            } else {
-                (j_old as i64 - j_new as i64).abs()
+                    Ordering::Equal => thr,
+                }
             };
-            let j_rel = if j_old > 0 { (j_diff.abs() as f64) / (j_old as f64) } else { 1.0 };
-            let do_timing = cooldown
-                && (st.last_timing_enabled != stealth_policy.timing_enabled
-                    || j_old == 0
-                    || j_new == 0
-                    || j_rel > 0.2);
-            if do_timing {
-                st.last_timing_enabled = stealth_policy.timing_enabled;
-                st.last_jitter_hint = j_new;
-            }
-            let do_bias = cooldown && (st.last_bias != stealth_policy.mimic_bias);
-            if do_bias {
-                st.last_bias = stealth_policy.mimic_bias;
-            }
-            let do_gran = cooldown && (st.last_gran != stealth_policy.adaptive_granularity);
-            if do_gran {
-                st.last_gran = stealth_policy.adaptive_granularity;
-            }
-            let do_cc = cooldown && (st.last_cc_profile != stealth_policy.cc_profile);
-            if do_cc {
-                st.last_cc_profile = stealth_policy.cc_profile;
-            }
-            let do_padding = cooldown
-                && (st.last_padding_enabled != stealth_policy.padding_enabled
-                    || st.last_padding_strategy != stealth_policy.padding_strategy
-                    || st.last_padding_max != stealth_policy.padding_max
-                    || st.last_padding_rate != stealth_policy.padding_rate);
-            if do_padding {
-                st.last_padding_enabled = stealth_policy.padding_enabled;
-                st.last_padding_strategy = stealth_policy.padding_strategy;
-                st.last_padding_max = stealth_policy.padding_max;
-                st.last_padding_rate = stealth_policy.padding_rate;
-            }
-            let do_timing_rate = cooldown && (st.last_timing_rate != stealth_policy.timing_rate);
-            if do_timing_rate {
-                st.last_timing_rate = stealth_policy.timing_rate;
-            }
-            if do_ack
-                || do_pacing
-                || do_timing
-                || do_bias
-                || do_gran
-                || do_cc
-                || do_padding
-                || do_timing_rate
-            {
+            let do_ack = cooldown_ok && (st.last_ack_thr != thr);
+            if do_ack {
+                st.last_ack_thr = thr;
                 st.last_policy_change = now;
             }
             Self::update_probing_budget(&mut st, &self.cfg);
             self.maybe_emit_dpi_probe(&mut st);
             PolicyActuatorSnap {
                 ce_ratio_recent,
-                ack_us,
-                ack_us_long,
-                jitter_us,
-                reorder_ratio,
-                cooldown_ok,
                 fec_hint_ppm,
                 fec_hint_interval,
-                size_div,
-                iat_div,
-                thr: thr_local,
+                thr,
                 do_ack,
-                do_pacing,
-                do_timing,
-                do_bias,
-                do_gran,
-                do_cc,
-                do_padding,
-                do_timing_rate,
-                bias: stealth_policy.mimic_bias,
-                gran: stealth_policy.adaptive_granularity,
                 prefer_masque_effective,
-                stealth_policy,
             }
         };
         if let Some(interval) = actuators.fec_hint_interval {
@@ -804,88 +598,22 @@ impl TransportObserver for StealthBrain {
         self.level_hints.set_prefer_masque(actuators.prefer_masque_effective);
         crate::optimize::telemetry::MASQUE_HINT
             .store(u64::from(actuators.prefer_masque_effective), Ordering::Relaxed);
-        let ce_ratio_recent = actuators.ce_ratio_recent;
-        let ack_us = actuators.ack_us;
-        let ack_us_long = actuators.ack_us_long;
-        let jitter_us = actuators.jitter_us;
-        let reorder_ratio = actuators.reorder_ratio;
-        let cooldown_ok = actuators.cooldown_ok;
-        let size_div = actuators.size_div;
-        let iat_div = actuators.iat_div;
-        let thr = actuators.thr;
-        let do_ack = actuators.do_ack;
-        let do_pacing = actuators.do_pacing;
-        let do_timing = actuators.do_timing;
-        let do_bias = actuators.do_bias;
-        let do_gran = actuators.do_gran;
-        let do_cc = actuators.do_cc;
-        let do_padding = actuators.do_padding;
-        let do_timing_rate = actuators.do_timing_rate;
-        let bias = actuators.bias;
-        let gran = actuators.gran;
-        let stealth_policy = actuators.stealth_policy;
 
-        let intelligent_runtime = conn.intelligent_stealth_runtime_enabled();
-        let permissions = conn.brain_runtime_permissions();
-        let mut stealth_delta = qf_transport_types::StealthRuntimeDelta::default();
-
-        if permissions.ack_threshold && do_ack {
-            conn.set_ack_eliciting_threshold(thr);
-        }
-        if intelligent_runtime && permissions.external_pacing && do_pacing {
-            stealth_delta.external_pacing = Some(stealth_policy.external_pacing);
-        }
-        if intelligent_runtime && permissions.timing && do_timing {
-            stealth_delta.timing =
-                Some((stealth_policy.timing_enabled, stealth_policy.timing_max_jitter_us));
-        }
-        // Do not set FEC actuators from the brain anymore.
-        if intelligent_runtime && permissions.mimic_bias && do_bias {
-            stealth_delta.mimic_bias = Some(stealth_policy.mimic_bias);
-        }
-        if intelligent_runtime && permissions.granularity && do_gran {
-            stealth_delta.adaptive_granularity = Some(stealth_policy.adaptive_granularity);
-        }
-        if intelligent_runtime && permissions.cc_profile && do_cc {
-            stealth_delta.cc_profile = Some(stealth_policy.cc_profile);
-        }
-        if intelligent_runtime && permissions.padding && do_padding {
-            stealth_delta.padding = Some((
-                stealth_policy.padding_enabled,
-                stealth_policy.padding_strategy,
-                stealth_policy.padding_max,
-            ));
-            stealth_delta.padding_rate = Some(stealth_policy.padding_rate);
-        }
-        if intelligent_runtime && permissions.timing && do_timing_rate {
-            stealth_delta.timing_rate = Some(stealth_policy.timing_rate);
-        }
-        if intelligent_runtime {
-            if let Err(error) = conn.apply_brain_stealth_runtime_delta(stealth_delta) {
-                trace!("brain stealth runtime delta could not activate CC shaping: {}", error);
-            }
+        // The congestion-driven ACK threshold is the only transport knob the
+        // Brain still writes — gated by the operator-lock permission.
+        if actuators.do_ack && conn.brain_runtime_permissions().ack_threshold {
+            conn.set_ack_eliciting_threshold(actuators.thr);
         }
 
-        if cooldown_ok && self.cfg.explore_prob > 0.0 {
-            let roll = ((ts ^ (ts.rotate_left(13))) % 10_000) as f64 / 10_000.0;
-            if roll < (self.cfg.explore_prob as f64) {
-                let alt_thr = (thr as i64 + if (ts & 1) == 0 { 1 } else { -1 })
-                    .clamp(self.cfg.ack_min as i64, self.cfg.ack_max as i64)
-                    as u64;
-                if permissions.ack_threshold {
-                    conn.set_ack_eliciting_threshold(alt_thr);
-                }
-            }
-        }
-
-        trace!("brain: policy ack_thr={}{} pacing={}{} bias={}{} gran={}{} pad(strat={},max={}) intelligent_rt={} ce_recent={:.3} ack_us(s/l)={:.0}/{:.0} jitter_us~{:.0} reorder={:.3} size_div={:.3} iat_div={:.3}",
-            thr, if do_ack {"*"} else {""},
-            stealth_policy.external_pacing, if do_pacing {"*"} else {""},
-            bias, if do_bias {"*"} else {""},
-            gran, if do_gran {"*"} else {""},
-            stealth_policy.padding_strategy, stealth_policy.padding_max,
-            intelligent_runtime,
-            ce_ratio_recent, ack_us, ack_us_long, jitter_us, reorder_ratio, size_div, iat_div);
+        trace!(
+            "brain: policy ack_thr={}{} fec_ppm={:?} fec_every={:?} reality_armed={} ce_recent={:.3}",
+            actuators.thr,
+            if actuators.do_ack { "*" } else { "" },
+            actuators.fec_hint_ppm,
+            actuators.fec_hint_interval,
+            actuators.prefer_masque_effective,
+            actuators.ce_ratio_recent,
+        );
     }
 }
 
@@ -995,9 +723,8 @@ mod intelligent_hysteresis_tests {
         let invalid_ack = StealthBrainConfig { ack_min: 4, ack_max: 2, ..Default::default() };
         assert!(invalid_ack.validate().is_err());
 
-        let invalid_padding =
-            StealthBrainConfig { pad_max_low: 256, pad_max_high: 128, ..Default::default() };
-        assert!(invalid_padding.validate().is_err());
+        let invalid_bins = StealthBrainConfig { size_bins: 0, ..Default::default() };
+        assert!(invalid_bins.validate().is_err());
 
         assert!(StealthBrainConfig::default().validate().is_ok());
     }
@@ -1005,12 +732,10 @@ mod intelligent_hysteresis_tests {
     #[test]
     fn brain_snapshot_retains_defaults_for_invalid_numeric_values() {
         let environment = crate::env_utils::EnvSnapshot::from_pairs([
-            ("QUICFUSCATE_BRAIN_EXPLORE", "NaN"),
             ("QUICFUSCATE_BRAIN_HIST_DECAY", "-inf"),
             ("QUICFUSCATE_BRAIN_ACK_MAX", "not-a-number"),
         ]);
         let config = StealthBrainConfig::from_env_with_snapshot(&environment);
-        assert_eq!(config.explore_prob, StealthBrainConfig::default().explore_prob);
         assert_eq!(config.hist_decay, StealthBrainConfig::default().hist_decay);
         assert_eq!(config.ack_max, StealthBrainConfig::default().ack_max);
     }
@@ -1026,7 +751,7 @@ mod time_source_tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::time::SystemTime;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     struct ManualTimeSource {
         instant_now: Mutex<Instant>,
@@ -1063,110 +788,154 @@ mod time_source_tests {
     }
 
     fn test_connection(local_port: u16, peer_port: u16) -> Connection {
-        let config = Config::new_with_version(PROTOCOL_VERSION).expect("config");
+        test_connection_with(local_port, peer_port, |_| {})
+    }
+
+    fn test_connection_with(
+        local_port: u16,
+        peer_port: u16,
+        configure: impl FnOnce(&mut Config),
+    ) -> Connection {
+        let mut config = Config::new_with_version(PROTOCOL_VERSION).expect("config");
+        configure(&mut config);
         Connection::new_client(&[7; 8], addr(local_port), addr(peer_port), config)
             .expect("valid test connection configuration")
     }
 
     #[test]
-    fn brain_preserves_non_intelligent_preset_stealth_knobs() {
+    fn brain_never_touches_the_frozen_wire_shape() {
         let base_instant = Instant::now();
         let base_system = UNIX_EPOCH + Duration::from_secs(20);
         let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
         let _time_guard = crate::time_source::install_for_test(manual.clone());
 
         let brain = StealthBrain::new(StealthBrainConfig::default());
-        let mut conn = test_connection(4460, 4461);
-        conn.set_intelligent_stealth_runtime_for_test(false);
-        conn.set_stealth_timing(true, 750);
-        conn.set_stealth_padding(true, 4, 86);
+        // Shape is chosen at connect time via Config — the image a `stealth`
+        // connection froze. The Brain must leave every bit of it alone.
+        let mut conn = test_connection_with(4460, 4461, |cfg| {
+            cfg.set_stealth_timing(true, 750);
+            cfg.set_stealth_padding(true, 4, 86);
+        });
 
+        // Feed sensors so the policy has real input to steer on.
+        for pn in 0..64 {
+            brain.on_packet_recv(pn, 96 + ((pn as usize) & 127));
+        }
+        brain.on_ack(9_000, &[]);
         manual.advance(Duration::from_millis(400));
         brain.apply_policy(&mut conn);
 
-        assert!(!conn.intelligent_stealth_runtime_enabled_for_test());
-        assert!(!conn.external_pacing_enabled());
         assert!(conn.stealth_timing_enabled_for_test());
         assert_eq!(conn.stealth_timing_max_jitter_us_for_test(), 750);
         assert!(conn.stealth_padding_enabled_for_test());
         assert_eq!(conn.stealth_padding_strategy_for_test(), 4);
+        assert!(
+            !conn.stealth_cc_active_for_test(),
+            "the Brain must never install a stealth CC wrapper"
+        );
+
+        // A clean connection without shaping stays unshaped, too.
+        let mut thin = test_connection(4462, 4463);
+        brain.apply_policy(&mut thin);
+        assert!(!thin.stealth_timing_enabled_for_test());
+        assert!(!thin.stealth_padding_enabled_for_test());
+        assert!(!thin.stealth_cc_active_for_test());
+    }
+
+    /// TODO-1060 acceptance: a thousand policy ticks under shifting loss,
+    /// ECN and reorder pressure must never move the frozen padding strategy
+    /// or the framing.
+    #[test]
+    fn thousand_ticks_under_shifting_loss_never_change_shape() {
+        let base_instant = Instant::now();
+        let base_system = UNIX_EPOCH + Duration::from_secs(25);
+        let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
+        let _time_guard = crate::time_source::install_for_test(manual.clone());
+
+        let brain = StealthBrain::new(StealthBrainConfig::default());
+        let mut conn = test_connection_with(4474, 4475, |cfg| {
+            cfg.set_stealth_timing(true, 900);
+            cfg.set_stealth_padding(true, 3, 96);
+        });
+
+        let mut pn = 0u64;
+        for tick in 0..1000usize {
+            // Oscillating loss/jitter signature across ticks.
+            let burst = 8 + (tick % 24);
+            for _ in 0..burst {
+                pn += 1;
+                // Reorder every 5th packet, vary sizes across classes.
+                let observed = if pn % 5 == 0 { pn + 1 } else { pn };
+                brain.on_packet_recv(observed, 64 + ((tick * 37) & 1023));
+            }
+            brain.on_ack(2_000 + ((tick % 9) as u64) * 2_500, &[]);
+            brain.on_ecn_update(0, 0, (tick % 7) as u64);
+            manual.advance(Duration::from_millis(120));
+            brain.apply_policy(&mut conn);
+        }
+
+        assert!(conn.stealth_timing_enabled_for_test());
+        assert_eq!(conn.stealth_timing_max_jitter_us_for_test(), 900);
+        assert!(conn.stealth_padding_enabled_for_test());
+        assert_eq!(conn.stealth_padding_strategy_for_test(), 3);
+        assert!(!conn.stealth_cc_active_for_test());
     }
 
     #[test]
-    fn brain_can_steer_stealth_runtime_when_connection_is_intelligent() {
+    fn brain_writes_repair_hints_and_ack_threshold_only() {
         let base_instant = Instant::now();
         let base_system = UNIX_EPOCH + Duration::from_secs(30);
         let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
         let _time_guard = crate::time_source::install_for_test(manual.clone());
 
         let brain = StealthBrain::new(StealthBrainConfig::default());
-        let mut conn = test_connection(4462, 4463);
-        conn.set_intelligent_stealth_runtime_for_test(true);
+        let fec_hints = brain.fec_hints();
+        let mut conn = test_connection(4464, 4465);
+        conn.set_ack_eliciting_threshold(7);
 
+        // Long ACK delay pushes the congestion-driven threshold down and
+        // emits the smoothed repair-ratio hint.
+        brain.on_ack(20_000, &[]);
         manual.advance(Duration::from_millis(400));
         brain.apply_policy(&mut conn);
 
-        assert!(conn.intelligent_stealth_runtime_enabled_for_test());
-        assert!(conn.external_pacing_enabled());
-        // Level 0 (clean path, no pressure) disables padding to keep Intelligent near-zero overhead.
-        assert!(!conn.stealth_padding_enabled_for_test());
-    }
-
-    #[test]
-    fn brain_keeps_base_cc_when_stealth_seed_fails() {
-        let base_instant = Instant::now();
-        let base_system = UNIX_EPOCH + Duration::from_secs(35);
-        let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
-        let _time_guard = crate::time_source::install_for_test(manual.clone());
-
-        let brain = StealthBrain::new(StealthBrainConfig::default());
-        let mut conn = test_connection(4463, 4464);
-        conn.set_intelligent_stealth_runtime_for_test(true);
-
-        let previous = crate::rng::test_force_secure_entropy_failure(true);
-        manual.advance(Duration::from_millis(400));
-        brain.apply_policy(&mut conn);
-        crate::rng::test_force_secure_entropy_failure(previous);
-
-        assert!(conn.intelligent_stealth_runtime_enabled_for_test());
         assert!(
-            !conn.stealth_cc_active_for_test(),
-            "Brain-driven seed failure must retain the base congestion controller"
+            conn.ack_eliciting_threshold() < 7,
+            "congestion-driven ACK threshold must react to slow ACK cadence"
         );
+        let ppm = fec_hints.redundancy_ppm();
+        let every = fec_hints.interval_pkts();
+        assert!((80_000..=320_000).contains(&ppm), "repair ppm in bounds: {ppm}");
+        assert!((2..=20).contains(&every), "repair interval in bounds: {every}");
     }
 
     #[test]
-    fn brain_respects_locked_transport_override_permissions() {
+    fn brain_respects_ack_threshold_lock() {
         let base_instant = Instant::now();
         let base_system = UNIX_EPOCH + Duration::from_secs(40);
         let manual = Arc::new(ManualTimeSource::new(base_instant, base_system));
         let _time_guard = crate::time_source::install_for_test(manual.clone());
 
         let brain = StealthBrain::new(StealthBrainConfig::default());
-        let mut conn = test_connection(4464, 4465);
-        conn.set_intelligent_stealth_runtime_for_test(true);
+        let mut conn = test_connection(4466, 4467);
         conn.set_brain_runtime_permissions_for_test(BrainRuntimePermissions {
             ack_threshold: false,
-            external_pacing: false,
-            timing: false,
-            padding: false,
-            mimic_bias: false,
-            granularity: false,
-            cc_profile: false,
         });
         conn.set_ack_eliciting_threshold(7);
-        conn.set_stealth_timing(true, 777);
-        conn.set_stealth_padding(true, 4, 86);
 
+        brain.on_ack(20_000, &[]);
         manual.advance(Duration::from_millis(400));
         brain.apply_policy(&mut conn);
 
-        assert_eq!(conn.ack_eliciting_threshold(), 7);
-        assert!(!conn.external_pacing_enabled());
-        assert!(conn.stealth_timing_enabled_for_test());
-        assert_eq!(conn.stealth_timing_max_jitter_us_for_test(), 777);
-        assert!(conn.stealth_padding_enabled_for_test());
-        assert_eq!(conn.stealth_padding_strategy_for_test(), 4);
+        assert_eq!(conn.ack_eliciting_threshold(), 7, "locked ACK threshold must not move");
+
+        // The same policy tick may still steer the unlocked actuators.
+        let mut unlocked = test_connection(4468, 4469);
+        unlocked.set_ack_eliciting_threshold(7);
+        brain.on_ack(20_000, &[]);
+        manual.advance(Duration::from_millis(400));
+        brain.apply_policy(&mut unlocked);
+        assert!(unlocked.ack_eliciting_threshold() < 7);
     }
 
     #[test]

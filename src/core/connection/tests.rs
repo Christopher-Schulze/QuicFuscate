@@ -1423,8 +1423,8 @@ fn reorder_window_tick_arms_gather_timer_not_packet_hold() {
 
     // Enabled stealth timing still skips a lone bulk packet. The bench pair
     // runs with external pacing on, which gates the jitter path off.
-    connection.conn.set_external_pacing(false);
-    connection.conn.set_stealth_timing(true, 5_000);
+    connection.conn.set_external_pacing_for_test(false);
+    connection.conn.set_stealth_timing_for_test(true, 5_000);
     connection.outgoing_fec_packets.clear();
     connection.reorder_window_tick(&bulk, now);
     assert!(
@@ -1475,8 +1475,8 @@ fn reorder_window_tick_arms_gather_timer_not_packet_hold() {
 #[test]
 fn reorder_quiet_phase_blocks_immediate_rearming() {
     let mut connection = test_connection();
-    connection.conn.set_external_pacing(false);
-    connection.conn.set_stealth_timing(true, 5_000);
+    connection.conn.set_external_pacing_for_test(false);
+    connection.conn.set_stealth_timing_for_test(true, 5_000);
     let bulk = bulk_send_info();
     let now = Instant::now();
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {
@@ -1533,8 +1533,8 @@ fn reorder_quiet_phase_blocks_immediate_rearming() {
 #[test]
 fn reorder_window_marks_burst_trains_by_time() {
     let mut connection = test_connection();
-    connection.conn.set_external_pacing(false);
-    connection.conn.set_stealth_timing(true, 5_000);
+    connection.conn.set_external_pacing_for_test(false);
+    connection.conn.set_stealth_timing_for_test(true, 5_000);
     let bulk = bulk_send_info();
     let t0 = Instant::now();
 
@@ -1612,8 +1612,8 @@ fn empty_transport_backlog_ends_the_drain_epoch() {
 #[test]
 fn reorder_window_tick_arms_under_committed_wire_fec() {
     let mut connection = test_connection();
-    connection.conn.set_external_pacing(false);
-    connection.conn.set_stealth_timing(true, 5_000);
+    connection.conn.set_external_pacing_for_test(false);
+    connection.conn.set_stealth_timing_for_test(true, 5_000);
     let now = Instant::now();
     let framed = test_send_info();
     assert!(!framed.bulk_only);
@@ -1688,8 +1688,8 @@ fn enqueue_dgrams(connection: &mut QuicFuscateConnection, n: usize) {
 #[test]
 fn deferral_window_skips_arm_under_dgram_pressure() {
     let mut connection = test_connection();
-    connection.conn.set_external_pacing(false);
-    connection.conn.set_stealth_timing(true, 5_000);
+    connection.conn.set_external_pacing_for_test(false);
+    connection.conn.set_stealth_timing_for_test(true, 5_000);
     let bulk = bulk_send_info();
     let now = Instant::now();
     connection.outgoing_fec_packets.push_back(OutgoingFecPacket {

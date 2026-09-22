@@ -1,65 +1,19 @@
 //! Root-independent transport observation and Brain-policy target contracts.
 
-use std::error::Error;
-use std::fmt;
-
-use crate::{BrainRuntimePermissions, StealthRuntimeDelta};
-
-/// Failure returned when a connection cannot apply a Brain-owned runtime delta.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
-pub struct TransportPolicyError {
-    message: String,
-}
-
-impl TransportPolicyError {
-    /// Creates a policy error from the concrete transport adapter's message.
-    #[doc(hidden)]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// Returns the adapter-provided diagnostic without exposing its concrete error type.
-    #[doc(hidden)]
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for TransportPolicyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl Error for TransportPolicyError {}
+use crate::BrainRuntimePermissions;
 
 /// Root-independent target that receives Brain-controlled transport mutations.
+///
+/// TODO-1060: the only mutation left is the congestion-driven ACK-eliciting
+/// threshold. Repair-ratio and the Reality/MASQUE armed bit travel through
+/// `IntelligentLevelHints`/FEC hints, not through this trait.
 #[doc(hidden)]
 pub trait TransportPolicyTarget {
-    /// Returns the latest delivery-rate estimate used by Brain's bandit.
-    fn delivery_rate(&self) -> u64;
-
-    /// Live CC pacing rate in bytes/s. Used only for the Tamaraw `up_us` row.
-    /// Default stays 0 so the bandit path is unchanged when a target has no CC.
-    fn pacing_rate_bps(&self) -> u64 {
-        0
-    }
-
-    /// Reports whether this connection accepts intelligent stealth mutations.
-    fn intelligent_stealth_runtime_enabled(&self) -> bool;
-
     /// Returns the operator/runtime permissions for Brain actuators.
     fn brain_runtime_permissions(&self) -> BrainRuntimePermissions;
 
     /// Sets the ACK-eliciting threshold after permission checks at the caller.
     fn set_ack_eliciting_threshold(&mut self, threshold: u64);
-
-    /// Applies a validated stealth delta and preserves a typed boundary error.
-    fn apply_brain_stealth_runtime_delta(
-        &mut self,
-        delta: StealthRuntimeDelta,
-    ) -> Result<(), TransportPolicyError>;
 }
 
 /// Root-independent observation callbacks consumed by transport connections.
@@ -80,42 +34,23 @@ pub trait TransportObserver: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransportObserver, TransportPolicyError, TransportPolicyTarget};
-    use crate::{BrainRuntimePermissions, StealthRuntimeDelta};
+    use super::{TransportObserver, TransportPolicyTarget};
+    use crate::BrainRuntimePermissions;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Default)]
     struct Target {
-        delivery_rate: u64,
-        intelligent: bool,
         permissions: BrainRuntimePermissions,
         threshold: u64,
-        delta: Option<StealthRuntimeDelta>,
     }
 
     impl TransportPolicyTarget for Target {
-        fn delivery_rate(&self) -> u64 {
-            self.delivery_rate
-        }
-
-        fn intelligent_stealth_runtime_enabled(&self) -> bool {
-            self.intelligent
-        }
-
         fn brain_runtime_permissions(&self) -> BrainRuntimePermissions {
             self.permissions
         }
 
         fn set_ack_eliciting_threshold(&mut self, threshold: u64) {
             self.threshold = threshold;
-        }
-
-        fn apply_brain_stealth_runtime_delta(
-            &mut self,
-            delta: StealthRuntimeDelta,
-        ) -> Result<(), TransportPolicyError> {
-            self.delta = Some(delta);
-            Ok(())
         }
     }
 
@@ -161,14 +96,5 @@ mod tests {
         assert_eq!(observer.packets.load(Ordering::Relaxed), 1);
         assert_eq!(observer.ecn.load(Ordering::Relaxed), 1);
         assert_eq!(target.threshold, 7);
-        assert_eq!(target.delivery_rate(), 0);
-        assert!(!target.intelligent_stealth_runtime_enabled());
-    }
-
-    #[test]
-    fn policy_error_preserves_adapter_diagnostic() {
-        let error = TransportPolicyError::new("stealth shaping unavailable");
-        assert_eq!(error.message(), "stealth shaping unavailable");
-        assert_eq!(error.to_string(), "stealth shaping unavailable");
     }
 }

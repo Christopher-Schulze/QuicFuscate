@@ -148,8 +148,6 @@ pub struct Connection {
     pub(super) next_stream_transmission_id: u64,
     pub(super) stream_retransmit_bytes: usize,
     // Stealth timing: next eligible send time (if timing obfuscation enabled)
-    // Whether Brain may actively steer stealth runtime actuators for this connection.
-    pub(super) intelligent_stealth_runtime: bool,
     // Fine-grained lock surface for explicit operator transport overrides.
     pub(super) brain_runtime_permissions: crate::transport::BrainRuntimePermissions,
     // Optional observer for external modules (Stealth/Brain) to tap into telemetry

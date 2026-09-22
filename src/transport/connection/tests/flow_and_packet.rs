@@ -521,27 +521,9 @@ fn fec_escalation_threshold_default() {
 // ---- Brain / Stealth Runtime -----------------------------------------
 
 #[test]
-fn intelligent_stealth_runtime_default_off() {
-    let c = make_conn();
-    assert!(
-        !c.intelligent_stealth_runtime_enabled_for_test(),
-        "intelligent stealth runtime must default to off"
-    );
-}
-
-#[test]
-fn set_intelligent_stealth_runtime_toggle() {
-    let mut c = make_conn();
-    c.set_intelligent_stealth_runtime_for_test(true);
-    assert!(c.intelligent_stealth_runtime_enabled_for_test());
-    c.set_intelligent_stealth_runtime_for_test(false);
-    assert!(!c.intelligent_stealth_runtime_enabled_for_test());
-}
-
-#[test]
 fn transport_stealth_jitter_disabled_when_external_pacing() {
     let mut c = make_conn();
-    c.set_stealth_timing(true, 5_000);
+    c.config.set_stealth_timing(true, 5_000);
     c.set_external_pacing_for_test(true);
     assert!(!c.transport_stealth_timing_active());
     assert!(c.transport_stealth_jitter_delay().is_none());
@@ -550,7 +532,7 @@ fn transport_stealth_jitter_disabled_when_external_pacing() {
 #[test]
 fn transport_stealth_jitter_bounded_when_gate_active() {
     let mut c = make_conn();
-    c.set_stealth_timing(true, 100);
+    c.config.set_stealth_timing(true, 100);
     c.set_external_pacing_for_test(false);
     assert!(c.transport_stealth_timing_active());
     let delay =
