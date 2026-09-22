@@ -46,7 +46,7 @@ fn main() {
     for datagram in &pcap.datagrams {
         analyze_datagram(datagram, &mut state, &mut report);
     }
-    report.finish();
+    report.finish(args.expect_standard);
     std::process::exit(if report.ok { 0 } else { 1 });
 }
 
@@ -55,6 +55,7 @@ struct Args {
     keylog: String,
     privdump: String,
     port: u16,
+    expect_standard: bool,
 }
 
 impl Args {
@@ -63,19 +64,23 @@ impl Args {
         let mut keylog = None;
         let mut privdump = None;
         let mut port = 4433u16;
+        let mut expect_standard = false;
         let mut it = env::args().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--pcap" => pcap = it.next(),
                 "--keylog" => keylog = it.next(),
                 "--privdump" => privdump = it.next(),
+                "--expect" => {
+                    expect_standard = it.next().map(|v| v == "standard").unwrap_or(false);
+                }
                 "--port" => {
                     port = it.next().and_then(|v| v.parse().ok()).unwrap_or(4433);
                 }
                 "-h" | "--help" => {
                     eprintln!(
                         "usage: qf-aead-wire-proof --pcap <file> --keylog <file> \
-                         [--privdump <file>] [--port N]"
+                         [--privdump <file>] [--port N] [--expect private|standard]"
                     );
                     std::process::exit(2);
                 }
@@ -87,6 +92,7 @@ impl Args {
             keylog: keylog.unwrap_or_else(|| fatal("missing --keylog")),
             privdump: privdump.unwrap_or_default(),
             port,
+            expect_standard,
         }
     }
 }
@@ -391,9 +397,12 @@ struct Report {
 }
 
 impl Report {
-    fn finish(&mut self) {
+    fn finish(&mut self, expect_standard: bool) {
         self.ok = true;
-        println!("\n=== AEAD WIRE PROOF SUMMARY ===");
+        println!(
+            "\n=== AEAD WIRE PROOF SUMMARY (expect={}) ===",
+            if expect_standard { "standard" } else { "private" }
+        );
         let mut failed = false;
         let mut check = |name: &str, pass: bool, detail: String| {
             println!("  [{}] {name}: {detail}", if pass { "PASS" } else { "FAIL" });
@@ -409,19 +418,29 @@ impl Report {
                 self.initial_opened, self.handshake_opened, self.long_failed
             ),
         );
-        check(
-            "pre-boundary 1-RTT opens with rustls keys",
-            self.rtt_standard > 0,
-            format!("standard_1rtt={}", self.rtt_standard),
-        );
-        check(
-            "post-boundary 1-RTT fails rustls, opens private",
-            self.rtt_private > 0 && self.rtt_private_below_boundary == 0,
-            format!(
-                "private_1rtt={} below_boundary={}",
-                self.rtt_private, self.rtt_private_below_boundary
-            ),
-        );
+        if expect_standard {
+            // Control run against a standard-pinned peer: every 1-RTT packet
+            // must stay inside the rustls owner.
+            check(
+                "all 1-RTT stays rustls-only",
+                self.rtt_standard > 0 && self.rtt_private == 0,
+                format!("standard_1rtt={} private_1rtt={}", self.rtt_standard, self.rtt_private),
+            );
+        } else {
+            check(
+                "pre-boundary 1-RTT opens with rustls keys",
+                self.rtt_standard > 0,
+                format!("standard_1rtt={}", self.rtt_standard),
+            );
+            check(
+                "post-boundary 1-RTT fails rustls, opens private",
+                self.rtt_private > 0 && self.rtt_private_below_boundary == 0,
+                format!(
+                    "private_1rtt={} below_boundary={}",
+                    self.rtt_private, self.rtt_private_below_boundary
+                ),
+            );
+        }
         check(
             "no packet fails every available key",
             self.rtt_failed == 0 && self.shape_violations == 0,
