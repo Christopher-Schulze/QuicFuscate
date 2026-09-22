@@ -579,6 +579,42 @@
   existing geoip tests stay green under default features.
 - Detail: none — edge-config repair, documented here.
 
+### TODO-1071 - Performance rebench and honest baselines after the crypto rebuild
+- OPEN. Cluster parent. Re-measure every dataplane baseline that moved under the crypto rebuild (libaegis private owner, ring-only standard path, qf-hpke ECH, MORUS removal): same-API AEAD cells (R-RING, R-LC opt-in, S-AEGIS), transport pps/latency, FEC encode/decode, stealth wire overhead, e2e TUN throughput. Omega/aarch64 Linux is the primary measurement host (product target); macOS numbers are recorded as secondary reference only and labeled as such. Output: a baseline table committed to docs, permanent criterion regression gates where missing, and the measurement input for TODO-1072/1073/1074.
+- Detail: `docs/todo/todo-1071-perf-rebench-baselines.md`
+
+### TODO-1072 - Dataplane performance and efficiency optimization cluster
+- OPEN. Cluster parent. Systematic optimization driven by TODO-1071 evidence: CPU cost per packet, allocation rate, syscall count, batching coverage, io_uring paths, memory-pool/pool-checkout costs, congestion/recovery hot loops, GSO/GRO coverage. The open `## Active` micro-items (TODO-913 through TODO-964 and siblings) are absorbed into this cluster's ordered execution list — worked in measurement-priority order, each with a before/after cell. Wire shape, auditability, and fail-closed behavior are non-negotiable: no optimization may change packet form, weaken the crypto-owner contract, or hide errors.
+- Detail: `docs/todo/todo-1072-dataplane-perf-efficiency.md`
+
+### TODO-1073 - FEC optimization cluster
+- OPEN. Cluster parent. Sliding-window/streaming GF(2^8) encode and decode paths, decoder matrix costs (multi-RHS landed in TODO-899 — measure what remains), repair-ratio cost/benefit under netem loss profiles, block-size selection, decode-under-load stability. Omega netem-impaired runs are the evidence; macOS numbers are secondary. No correctness regression: every optimization keeps the 82/82 qf-fec suite and the e2e recovery proofs green.
+- Detail: `docs/todo/todo-1073-fec-optimization.md`
+
+### TODO-1074 - Stealth optimization cluster
+- OPEN. Cluster parent. Measure and reduce the cost of the wire defenses: wire-image/persona-trace byte overhead, Maybenot pad share vs machine quality, ChameleonFlow/Adaptive-Tamaraw/UPGen candidates, timing/reorder/padding/cover budgets under the TODO-1052 ledger, persona fidelity per byte spent. Each defense gets a measured cost/effect table; unmeasured claims are not allowed. TODO-1060's sensor/actuator split stays: packet shape is never a runtime actuator.
+- Detail: `docs/todo/todo-1074-stealth-optimization.md`
+
+### TODO-1075 - Xray Reality / core-stack high-tech stealth adoption analysis
+- OPEN. Research + decision cluster. Systematically evaluate which concepts from Xray Vision/Reality and comparable state-of-the-art censorship-circumvention stacks (ShadowTLS, REALITY-derived flows, MASQUE-CONNECT-IP/UDP variants, uTLS research, WF defenses) are technically adoptable or worth evolving beyond — per candidate: threat model, wire effect, detection surface, implementation cost, measurement plan, adopt/evolve/reject verdict with rationale. No blind feature copying; domain fronting stays rejected per earlier research; GFW QUIC blocking stays classified residual/compute-limited. Output: a ranked candidate table and follow-up TODOs only where a verdict says adopt or evolve.
+- Detail: `docs/todo/todo-1075-reality-core-stack-adoption.md`
+
+### TODO-1076 - Stability and robustness cluster
+- OPEN. Cluster parent. Reconnect and fallback chains (outer-hop, UDP-blocked, standby promotion), FEC/stealth mode transitions, multi-hop circuit lifecycle, TUN/MASQUE lifecycle, resource release under error paths, error classification quality. Evidence: repeated Omega netns e2e runs including crash/restart, impaired-link runs, and session churn; plus targeted fault-injection tests. Every found leak/deadlock/misclassification gets its own fix commit.
+- Detail: `docs/todo/todo-1076-stability-robustness.md`
+
+### TODO-1077 - Frontend technical refresh (dependencies only)
+- OPEN. Refresh the Svelte admin + Tauri workspace to current stable dependencies: npm/cargo version bumps, lockfile regeneration, breaking-change fixes, advisory remediation where applicable (TODO-805/749 history). Existing tests, request-coordinator and generation checks must stay green. Explicitly out of scope: new features, redesign, UX changes — update only.
+- Detail: `docs/todo/todo-1077-frontend-deps-refresh.md`
+
+### TODO-1078 - Documentation and test synchronization standing task
+- OPEN. Standing requirement for the whole 1071+ series: every task that lands updates `docs/todo.md`, its detail file, `docs/DOCUMENTATION.md`, `docs/MAP.md`, and the owning tests/scripts/fixtures in the same commit. No task closes with stale docs; no doc claim ships without the test/bench/wire evidence behind it.
+- Detail: none — standing rule, enforced per commit.
+
+### TODO-1079 - Refactoring and code-quality cluster
+- OPEN. Cluster parent. Structural improvements only where they pay: module clarity, ownership boundaries, feature-gate correctness (TODO-1070 class of bugs), dead-path removal, shared-abstraction extraction. Hard gate: a refactor lands only with the behavior test suite green and a TODO-1071 baseline showing no dataplane regression. No cosmetic rewrites.
+- Detail: `docs/todo/todo-1079-refactoring-code-quality.md`
+
 ## Completed
 
 ### TODO-899 - Multi-RHS Gauss for FEC decode under loss
