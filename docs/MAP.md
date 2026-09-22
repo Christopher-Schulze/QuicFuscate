@@ -225,7 +225,7 @@ Probe escalation may raise the repair-ratio hint (+8% per level, still inside th
 - `optimize/brain.rs` plus `optimize/brain/histogram.rs` (37): sensor fusion, threshold logic, moving average, and histogram parity
 - `optimize/string.rs` (31): SIMD search, edge cases, multi-match, scalar parity
 - `transport/config.rs` (18): defaults audit, CC parsing, ALPN wire format, stealth config
-- `stealth/tls_cover.rs` (16): ClientHello format, browser-specific generation, GREASE, extensions
+- `qf-stealth/tls_cover.rs` + `stealth/tests.rs` cover tests (record planning, random cover plaintext — no stamped ClientHello since TODO-1062 — cipher resolution, material derivation, sequence/exhaustion)
 - `fec/gf_tables.rs` (16): GF multiply properties, exhaustive inverse (all 255), GF16
 - `optimize/transport.rs` (14): congestion aggregation, bitmap, ECN popcount, pn decode
 - `optimize/sort.rs` (13): radix sort, f32 sort, argsort, duplicates, large input

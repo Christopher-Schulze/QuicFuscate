@@ -44,7 +44,9 @@ impl Drop for ScopedEnvVar {
 }
 
 struct TestTlsFiles {
-    directory: std::path::PathBuf,
+    // Kept for fixture ownership; never read — the directory outlives the
+    // process-global TLS identity installed by `install`.
+    _directory: std::path::PathBuf,
     ca_path: std::path::PathBuf,
 }
 
@@ -78,7 +80,7 @@ impl TestTlsFiles {
             cert_path.to_str().ok_or("non-UTF-8 certificate path")?,
             key_path.to_str().ok_or("non-UTF-8 key path")?,
         );
-        Ok(Self { directory, ca_path })
+        Ok(Self { _directory: directory, ca_path })
     }
 }
 

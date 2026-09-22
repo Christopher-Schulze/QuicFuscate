@@ -593,7 +593,7 @@ register described below stays in place for the point where the wiring lands.
 - `QUICFUSCATE_STEALTH_MODE` is one of `off`, `performance`, `stealth`, `Stealth MAX`, `dynamic`, `manual`. `qftls` uses it only as a bootstrap hint before the runtime `TlsProfile` is applied. The cover-performance decision comes from `StealthManager::runtime_tls_profile(...)`.
 - `QUICFUSCATE_TLS_COVER_PROFILE=chrome|firefox|safari|edge|random` - select TLS Cover browser profile.
 - `QUICFUSCATE_TLS_COVER_CIPHER=auto|chacha|aes` - control TLS Cover cipher (auto prefers AES-128-GCM when hardware AES is detected, else ChaCha20-Poly1305).
-- `QUICFUSCATE_TLS_COVER_ULTRA=1` - enable the ultra TLS Cover profile variant (extra padding extension). ECH-GREASE (0xFE0D) is emitted unconditionally since TODO-1009 - real browsers send it always, so its absence was a JA4-visible tell.
+- `QUICFUSCATE_TLS_COVER_ULTRA=1` - Removed. No longer recognized; the ultra profile variant and the synthetic-cover ECH-GREASE emission were deleted with the synthetic ClientHello (TODO-1062). Real ECH on the outer hop is governed by DNS + rustls (TODO-1064); absent a record, nothing is emitted.
 - `QUICFUSCATE_TLS_COVER_ROTATE=1` - currently log-only (no rotation implementation).
 - `QUICFUSCATE_TLS_COVER_TELEMETRY=1` - currently log-only (no extra telemetry output).
 - `QUICFUSCATE_CHACHA20_X4=auto|avx2|avx|sse|scalar` - override the TLS Cover ChaCha20 backend for diagnostics.
@@ -3788,10 +3788,10 @@ the authenticated Core H3 connection.
 - Timer jitter for authenticity
 - Standard TLS 1.3 session-ticket plumbing with bounded client storage and shared server ticket protection. 0-RTT itself is not supported: see the 0-RTT capability note below.
 
-#### ECH GREASE
-- Encrypted Client Hello GREASE
-- Modern browser behavior
-- 64 Bytes GREASE Data
+#### ECH GREASE (removed, TODO-1062)
+- The synthetic-cover ECH-GREASE block (64-byte dummy `0xfe0d`) was deleted together with the
+  stamped cover ClientHello; cover plaintext is now random. Real ECH on the shared outer hop
+  follows the DNS record — see the TODO-1064 section under `[connection]` outer hop.
 
 ### Fingerprint Rotation
 

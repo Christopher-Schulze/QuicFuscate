@@ -623,7 +623,7 @@ window_fair = 30
 window_poor = 50
 
 [stealth]
-mode = "max"
+mode = "Stealth MAX"
 enable_doh = true
 doh_provider = "https://example.invalid/dns-query"
 reality_cover_targets = ["cover.example"]
@@ -698,7 +698,7 @@ mode = "auto"
 initial_mode = "auto"
 
 [stealth]
-mode = "auto"
+mode = "dynamic"
 
 [optimization]
 memory_pool_size = 655360
