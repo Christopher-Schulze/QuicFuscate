@@ -1619,15 +1619,21 @@ impl QuicFuscateConnection {
         crate::engine::runtime_mode_fec_framing(self.stealth_mode())
     }
 
+    #[cfg(test)]
     pub(crate) fn fec_wrapper_drops(&self) -> u64 {
         self.fec_wrapper_drops
     }
 
+    #[cfg(test)]
     pub(crate) fn fec_epoch_rejects(&self) -> u64 {
         self.fec_epoch_rejects
     }
 
     /// Reject in-QUIC FEC symbols whose epoch is older than `floor`.
+    /// Production raises the floor itself in `absorb_quic_fec_datagrams`
+    /// once a newer wire epoch is admitted; this explicit fence exists for
+    /// tests and future key-change callers.
+    #[cfg(test)]
     pub(crate) fn fence_fec_symbol_epoch(&mut self, floor: u32) {
         self.fec_symbol_epoch_floor = floor;
     }
@@ -1635,6 +1641,7 @@ impl QuicFuscateConnection {
     fn reject_cleartext_fec_wrapper(&mut self) -> bool {
         if self.fec_framing() == crate::engine::FecFraming::QuicFrame {
             self.fec_wrapper_drops = self.fec_wrapper_drops.saturating_add(1);
+            crate::telemetry::FEC_WRAPPER_DROPS.inc();
             true
         } else {
             false
@@ -1662,8 +1669,13 @@ impl QuicFuscateConnection {
             };
             if parsed.meta.profile.epoch < self.fec_symbol_epoch_floor {
                 self.fec_epoch_rejects = self.fec_epoch_rejects.saturating_add(1);
+                crate::telemetry::FEC_SYMBOL_EPOCH_REJECTS.inc();
                 continue;
             }
+            // The symbol bytes arrived inside a sealed QUIC packet, so a
+            // newer epoch here is authenticated. Fence older epochs out of
+            // the decoder: a FEC window never mixes wire epochs.
+            self.fec_symbol_epoch_floor = parsed.meta.profile.epoch;
             let mut recovered = std::mem::take(&mut self.fec_receive_scratch);
             if self.fec_wire_receiver.receive(&framed, &mut recovered).is_ok() {
                 for mut packet in recovered.drain(..) {

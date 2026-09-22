@@ -1665,13 +1665,10 @@ fn stealth_drops_cleartext_fec_wrapper() {
     assert_eq!(performance.fec_wrapper_drops(), 0);
 }
 
-#[test]
-fn quic_repair_from_previous_epoch_is_rejected() {
-    let mut conn = test_connection();
-    conn.fence_fec_symbol_epoch(8);
+fn enqueued_repair_symbol(conn: &mut QuicFuscateConnection, epoch: u32) {
     let meta = wire::WirePacketMeta {
         profile: wire::WireProfile {
-            epoch: 4,
+            epoch,
             codec: wire::WireCodec::Gf8,
             source_count: 4,
             total_count: 6,
@@ -1688,8 +1685,31 @@ fn quic_repair_from_previous_epoch_is_rejected() {
     let written = wire::write_symbol(meta, &[1, 2, 3, 4], &mut symbol).expect("symbol");
     let mut blob = vec![wire::QUIC_REPAIR_DISCRIMINATOR];
     blob.extend_from_slice(&symbol[..written]);
-    conn.conn.enqueue_received_datagram(std::borrow::Cow::Borrowed(&blob));
+    conn.conn.enqueue_received_datagram(std::borrow::Cow::Owned(blob));
+}
+
+#[test]
+fn quic_repair_from_previous_epoch_is_rejected() {
+    let mut conn = test_connection();
+    conn.fence_fec_symbol_epoch(8);
+    enqueued_repair_symbol(&mut conn, 4);
     conn.absorb_quic_fec_datagrams();
     assert_eq!(conn.fec_epoch_rejects(), 1);
     assert_eq!(conn.conn.dgram_recv_queue_len(), 0);
+}
+
+#[test]
+fn quic_repair_epoch_floor_advances_on_admission() {
+    let mut conn = test_connection();
+    enqueued_repair_symbol(&mut conn, 8);
+    conn.absorb_quic_fec_datagrams();
+    // The admitted epoch-8 symbol raised the floor without an explicit fence:
+    // a straggler from epoch 4 must now be rejected before it reaches the decoder.
+    enqueued_repair_symbol(&mut conn, 4);
+    conn.absorb_quic_fec_datagrams();
+    assert_eq!(conn.fec_epoch_rejects(), 1);
+    // Same-epoch traffic stays admitted (epoch is not "newer than floor").
+    enqueued_repair_symbol(&mut conn, 8);
+    conn.absorb_quic_fec_datagrams();
+    assert_eq!(conn.fec_epoch_rejects(), 1);
 }

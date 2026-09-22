@@ -365,6 +365,12 @@ pub fn export_telemetry_text() -> String {
         );
         let _ =
             writeln!(out, "quicfuscate_fec_repair_ack_stale_total {}", FEC_REPAIR_ACK_STALE.get());
+        let _ = writeln!(out, "quicfuscate_fec_wrapper_drops_total {}", FEC_WRAPPER_DROPS.get());
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_symbol_epoch_rejects_total {}",
+            FEC_SYMBOL_EPOCH_REJECTS.get()
+        );
     } // end fec
 
     // MASQUE

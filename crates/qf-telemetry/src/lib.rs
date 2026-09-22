@@ -645,6 +645,13 @@ pub static FEC_REPAIR_ACK_ENTRIES_RECEIVED: Counter = Counter::new();
 /// Repair-ACK datagrams dropped because their epoch does not match the
 /// active send profile - reports refer to a rotated sequence space.
 pub static FEC_REPAIR_ACK_STALE: Counter = Counter::new();
+/// Cleartext `0xF1 0xEC` FEC wrappers dropped by in-QUIC framing modes
+/// (stealth/manual): the wrapper prefix is not emitted or accepted there
+/// (TODO-1046).
+pub static FEC_WRAPPER_DROPS: Counter = Counter::new();
+/// In-QUIC repair symbols dropped because their wire epoch predates the
+/// newest epoch already admitted on the connection (TODO-1046).
+pub static FEC_SYMBOL_EPOCH_REJECTS: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
