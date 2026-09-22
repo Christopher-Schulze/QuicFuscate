@@ -67,7 +67,17 @@ RFC 9849 (2026-03) encrypts the inner ClientHello, including SNI. QUIC can carry
   declared for bakeoff comparisons only. Coverage: X25519/P-256/P-384 KEMs
   x AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305; a list offering only P-521
   suites fails closed at `EchConfig::new` (the rustcrypto backend has no
-  P-521).
+  P-521 — implementing DHKEM-P521 inside qf-hpke would be hand-rolled KEM
+  internals, which the standard-library policy deliberately rejects).
+- **Always-on at the right time**: the lookup runs before the engine dials,
+  its result lives on the `HopConfig`, and every engine-internal reconnect,
+  standby promotion, or `outer_hop` fallback retry reuses it automatically.
+  A transient DoH failure at startup no longer leaves ECH off for the whole
+  session — the HTTPS-record lookup retries up to 3 times at 250 ms spacing
+  (still fail-soft: a clean "no ech" answer is not retried, a persistent
+  outage still dials a normal ClientHello). Key rotation server-side is
+  handled by rustls' in-band ECH retry-config mechanism, so no periodic
+  re-resolution is needed.
 - **DoH path**: `qf_dns::https_record` builds the type-65 query and extracts
   the `ech` SvcParam (key 5) from the answer section — bounded parse,
   compression-aware names, fail-closed on malformed RDATA. The wire value is
@@ -101,6 +111,14 @@ RFC 9849 (2026-03) encrypts the inner ClientHello, including SNI. QUIC can carry
   accept/reject paths plus **real wire assertions** — the emitted ClientHello
   carries extension `0xfe0d` and the outer SNI becomes the ECH `public_name`
   for an ECH persona; a Brave persona and an absent list both emit no `0xfe0d`.
+  The strongest proof is `ech_payload_decrypts_to_inner_hello_with_real_sni`:
+  the fixture list carries a real X25519 public key, the emitted outer hello's
+  ECH payload is decrypted with the matching private key under the exact
+  draft-ietf-tls-esni-17 construction (`info = "tls ech"‖0x00‖ECHConfig`,
+  AAD = serialized outer hello with the payload field zeroed), and the
+  recovered `EncodedClientHelloInner` carries the true service SNI. So the
+  wire bytes are not merely shaped right — a real ECH terminator could
+  decrypt them.
 - `engine::engine::tests`: the synthesized fallback circuit carries
   `ech_config_list` on the entry hop only, and the field never serializes.
 - `implementations::client::ech`: hostname selection (SNI > endpoint host,

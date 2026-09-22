@@ -12,6 +12,12 @@
 //! greases an ECH configuration.
 
 use qf_engine_types::EngineConfig;
+use std::time::Duration;
+
+/// Bounded retry for the DoH HTTPS-record lookup — covers transient resolver
+/// or network failures at startup without delaying the dial path.
+const ECH_LOOKUP_ATTEMPTS: usize = 3;
+const ECH_LOOKUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// Resolve the outer hop's `HTTPS` record via DoH and attach an advertised
 /// `ech` SvcParam to that hop's runtime config.
@@ -54,15 +60,30 @@ pub async fn resolve_outer_hop_ech(config: &mut EngineConfig) {
         log::warn!("ECH: outer hop name '{hostname}' is not a valid DNS name");
         return;
     };
-    let response = match qf_dns::resolve_via_doh_with_client(&query, &endpoint, &client).await {
-        Ok(response) => response,
-        Err(error) => {
-            log::info!(
-                "ECH: HTTPS record lookup for '{hostname}' failed ({error}); \
-                 dialing without ECH"
-            );
-            return;
+    // A transient DoH failure at startup must not leave ECH off for the
+    // whole session when the hop actually advertises a config — bounded
+    // retry, still fail-soft: a definitive "no ech" answer is not retried
+    // and a persistent resolver outage still dials a normal ClientHello.
+    let mut response = None;
+    let mut last_error = String::new();
+    for attempt in 1..=ECH_LOOKUP_ATTEMPTS {
+        match qf_dns::resolve_via_doh_with_client(&query, &endpoint, &client).await {
+            Ok(r) => {
+                response = Some(r);
+                break;
+            }
+            Err(error) => last_error = error.to_string(),
         }
+        if attempt < ECH_LOOKUP_ATTEMPTS {
+            tokio::time::sleep(ECH_LOOKUP_RETRY_DELAY).await;
+        }
+    }
+    let Some(response) = response else {
+        log::info!(
+            "ECH: HTTPS record lookup for '{hostname}' failed after \
+             {ECH_LOOKUP_ATTEMPTS} attempts ({last_error}); dialing without ECH"
+        );
+        return;
     };
     match qf_dns::https_record::extract_ech_config_list(&response) {
         Some(bytes) => {

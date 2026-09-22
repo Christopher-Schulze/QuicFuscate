@@ -897,11 +897,17 @@ mod ech_tests {
     /// DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256/AES-128-GCM — a suite qf-hpke
     /// ships in `ALL_SUPPORTED_SUITES`.
     fn fixture_ech_config_list() -> Vec<u8> {
+        fixture_ech_config_list_with_key(&[0x42u8; 32])
+    }
+
+    /// Same list, but carrying a real X25519 public key so the matching
+    /// private key can decrypt what the client seals (end-to-end proof).
+    fn fixture_ech_config_list_with_key(public_key: &[u8]) -> Vec<u8> {
         let mut contents = Vec::new();
         contents.push(1u8); // key_config.config_id
         contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM X25519
-        contents.extend_from_slice(&32u16.to_be_bytes()); // public key length
-        contents.extend_from_slice(&[0x42u8; 32]);
+        contents.extend_from_slice(&(public_key.len() as u16).to_be_bytes());
+        contents.extend_from_slice(public_key);
         contents.extend_from_slice(&4u16.to_be_bytes()); // cipher_suites length
         contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
         contents.extend_from_slice(&0x0001u16.to_be_bytes()); // AES-128-GCM
@@ -963,6 +969,99 @@ mod ech_tests {
         // service SNI — proof rustls actually engaged the ECH path.
         let sni = client_hello_sni(client_hello_extension(&extensions, 0x0000));
         assert_eq!(sni, "example.com");
+    }
+
+    /// Full end-to-end proof, not just "extension present": build the
+    /// ECHConfigList around a real key pair, then decrypt the emitted wire
+    /// payload under the draft-ietf-tls-esni-17 construction with the
+    /// matching private key. Recovers the real EncodedClientHelloInner —
+    /// which must carry the true service SNI, not the public_name.
+    #[test]
+    fn ech_payload_decrypts_to_inner_hello_with_real_sni() {
+        use rustls::crypto::hpke::{EncapsulatedSecret, Hpke};
+
+        let suite = qf_hpke::DH_KEM_X25519_HKDF_SHA256_AES_128;
+        let (public_key, secret_key) = suite.generate_key_pair().expect("key pair");
+        let list = fixture_ech_config_list_with_key(&public_key.0);
+
+        let mut provider = client_provider(Some(&list));
+        let mut profile = TlsProfile::chrome_130();
+        profile.timing_jitter = None;
+        provider.configure(&profile).expect("configure profile");
+        let (_, frame) = provider
+            .next_crypto_frame(Level::Initial, usize::MAX)
+            .expect("next initial frame")
+            .expect("initial ClientHello");
+
+        // Handshake message: type(1) || len(3) || ClientHelloPayload.
+        let body_len =
+            usize::try_from(u32::from_be_bytes([0, frame[1], frame[2], frame[3]])).unwrap();
+        let body = &frame[4..4 + body_len];
+
+        // Locate the encrypted_client_hello extension inside the serialized
+        // ClientHelloOuter — its `payload` field is zeroed for the AAD.
+        let (enc, payload, payload_field_offset) = ech_outer_fields(body);
+        assert_eq!(enc.len(), 32, "X25519 encapsulated secret");
+
+        // ClientHelloOuterAAD: the serialized outer hello with the payload
+        // field set to zero bytes of identical length (draft-17 §6.1.3).
+        let mut aad = body.to_vec();
+        aad[payload_field_offset..payload_field_offset + payload.len()].fill(0);
+
+        // HPKE info: "tls ech" || 0x00 || ECHConfig (draft-17 §6.1).
+        // The ECHConfig is the config bytes inside the list — skip the
+        // outer u16 list length.
+        let mut info = b"tls ech\0".to_vec();
+        info.extend_from_slice(&list[2..]);
+
+        let plaintext = suite
+            .open(&EncapsulatedSecret(enc.to_vec()), &info, &aad, payload, &secret_key)
+            .expect("wire ECH payload must decrypt under the advertised key");
+
+        // EncodedClientHelloInner is a serialized inner hello: it begins
+        // with legacy_version 0x0303 and carries the real service SNI
+        // (DEFAULT_TLS_SNI_HOST) — never the ECH public_name.
+        assert_eq!(&plaintext[..2], &[0x03, 0x03], "inner hello legacy_version");
+        let inner_sni = b"cdn.cloudflare.com";
+        assert!(
+            plaintext.windows(inner_sni.len()).any(|window| window == inner_sni),
+            "decrypted inner hello must carry the real service SNI"
+        );
+        assert!(
+            !plaintext.windows(b"example.com".len()).any(|window| window == b"example.com"),
+            "decrypted inner hello must not leak the public_name"
+        );
+    }
+
+    /// Parse the encrypted_client_hello extension out of a serialized
+    /// ClientHelloPayload, returning (enc, payload, absolute offset of the
+    /// payload field inside `body`).
+    fn ech_outer_fields(body: &[u8]) -> (Vec<u8>, &[u8], usize) {
+        let session_id_end = 35 + usize::from(body[34]);
+        let suites_len =
+            usize::from(u16::from_be_bytes([body[session_id_end], body[session_id_end + 1]]));
+        let suites_end = session_id_end + 2 + suites_len;
+        let compression_end = suites_end + 1 + usize::from(body[suites_end]);
+        let mut offset = compression_end + 2;
+        loop {
+            let extension_type = u16::from_be_bytes([body[offset], body[offset + 1]]);
+            let extension_len =
+                usize::from(u16::from_be_bytes([body[offset + 2], body[offset + 3]]));
+            if extension_type == 0xfe0d {
+                let ext = &body[offset + 4..offset + 4 + extension_len];
+                // ECHClientHello type(1, outer=0) then EncryptedClientHelloOuter:
+                // cipher_suite(4) | config_id(1) | enc<u16+bytes> | payload<u16+bytes>
+                assert_eq!(ext[0], 0, "client must offer an outer ECH, not inner");
+                let enc_len = usize::from(u16::from_be_bytes([ext[6], ext[7]]));
+                let enc = ext[8..8 + enc_len].to_vec();
+                let payload_len =
+                    usize::from(u16::from_be_bytes([ext[8 + enc_len], ext[9 + enc_len]]));
+                let payload_start = 10 + enc_len;
+                let payload = &ext[payload_start..payload_start + payload_len];
+                return (enc, payload, offset + 4 + payload_start);
+            }
+            offset += 4 + extension_len;
+        }
     }
 
     #[test]
