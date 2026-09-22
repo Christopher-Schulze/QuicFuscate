@@ -922,6 +922,94 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
             }
         }
     }
+    // Coalesced datagram: the send path may concatenate several QUIC packets
+    // into one UDP datagram (userland GSO/GRO in the dataplane). Short-header
+    // packets carry no length field, so the boundary is recovered by trial
+    // open at every plausible split position; the remainder is re-analyzed
+    // as its own packet.
+    let min_rest = 1 + 20 + 1 + TAG_LEN; // smallest plausible trailing short packet
+    if packet.len() > pn_offset + pn_len + TAG_LEN + min_rest {
+        let family0 = state.private.family.unwrap_or(PrivateAeadFamily::Aegis128L);
+        let mut split_keys: Vec<(String, Box<dyn AeadOpen + Send + Sync>)> = Vec::new();
+        if let Some(secret) = state.secrets.get(std_secret_name) {
+            if let Some(k) = DirectionKeys::from_secret(secret, version) {
+                split_keys.push(("std-1rtt".to_string(), Box::new(k.open)));
+            }
+        }
+        if let (Some(k), Some(i)) = (key, iv) {
+            if let Ok((_, o)) = qf_crypto::select_private_packet_data_aead(family0, k, i) {
+                split_keys.push(("private-epoch1".to_string(), Box::new(o)));
+            }
+        }
+        if let (Some(root), Some(ctx)) = (&state.private.schedule_root, &state.private.context_hash)
+        {
+            for dir_label in [b"client-write".as_slice(), b"server-write".as_slice()] {
+                for epoch in 2u32..=8 {
+                    let mut info = Vec::with_capacity(128);
+                    info.extend_from_slice(PRIVATE_EXPORTER_LABEL);
+                    info.push(family0.protocol_id());
+                    info.extend_from_slice(dir_label);
+                    info.extend_from_slice(&epoch.to_be_bytes());
+                    info.extend_from_slice(ctx);
+                    let prk = qf_crypto::hkdf::hkdf_extract(PRIVATE_EXPORTER_SALT, root);
+                    if let Ok(material) = qf_crypto::hkdf::hkdf_expand(
+                        &prk,
+                        &info,
+                        PrivateAeadFamily::KEY_LEN + PrivateAeadFamily::IV_LEN,
+                    ) {
+                        if let Ok((_, o)) = qf_crypto::select_private_packet_data_aead(
+                            family0,
+                            &material[..PrivateAeadFamily::KEY_LEN],
+                            &material[PrivateAeadFamily::KEY_LEN..],
+                        ) {
+                            split_keys.push((
+                                format!("private-{}-{}", String::from_utf8_lossy(dir_label), epoch),
+                                Box::new(o),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let mut end = packet.len() - min_rest;
+        while end > pn_offset + pn_len + TAG_LEN {
+            let body2 = &packet[pn_offset + pn_len..end];
+            for (name, open) in &split_keys {
+                let mut buf = body2.to_vec();
+                if open.open_with_u64_counter(pn, &aad, &mut buf).is_ok() {
+                    println!(
+                        "  1rtt {dir_name} pn={pn} opened {name} at coalesced split end={end} (datagram {} bytes)",
+                        packet.len()
+                    );
+                    *expect = pn + 1;
+                    if name.starts_with("private") {
+                        report.rtt_private += 1;
+                        if boundary != 0 && pn < boundary {
+                            report.rtt_private_below_boundary += 1;
+                        }
+                    } else {
+                        report.rtt_standard += 1;
+                        if boundary != 0 && pn >= boundary {
+                            report.rtt_standard_above_boundary += 1;
+                        }
+                    }
+                    let rest = &packet[end..];
+                    if !rest.is_empty() {
+                        if rest[0] & 0x80 == 0 {
+                            analyze_short(rest, c2s, state, report);
+                        } else {
+                            report.shape_violations += 1;
+                            println!(
+                                "  1rtt {dir_name}: coalesced remainder starts with long header (unhandled)"
+                            );
+                        }
+                    }
+                    return;
+                }
+            }
+            end -= 1;
+        }
+    }
     // Exhaustive sweep before declaring the packet unopenable: every pn_len
     // encoding, small pn range around the boundary, every derivable private
     // epoch in both directions, and standard key-update hops. A packet that
