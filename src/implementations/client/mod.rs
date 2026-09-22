@@ -18,6 +18,7 @@ mod backend;
 mod circuit_runtime;
 mod connection;
 mod dns_runtime;
+mod ech;
 #[cfg(test)]
 mod integration;
 mod io_driver;
@@ -34,6 +35,7 @@ pub use backend::*;
 pub use circuit_runtime::{CircuitDiagnostics, CircuitHopDiagnostics, CircuitLifecycleState};
 pub use connection::*;
 pub use dns_runtime::ClientDnsRuntime;
+pub use ech::resolve_outer_hop_ech;
 pub use io_driver::*;
 pub use killswitch::{KillSwitch, VpnFirewallPolicy};
 pub use profile::{Profile, ProfileError, ProfileManager};

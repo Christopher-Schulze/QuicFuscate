@@ -654,6 +654,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
         clock,
         rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
         &[],
+        None,
     )
 }
 
@@ -668,6 +669,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
     clock: &crate::time_source::ProtocolClock,
     max_udp_payload_size: usize,
     local_scid: &[u8],
+    ech_config_list: Option<&[u8]>,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
     Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
@@ -679,6 +681,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
         clock,
         max_udp_payload_size,
         local_scid,
+        ech_config_list,
     )?))
 }
 
@@ -769,6 +772,7 @@ impl CombinedProvider {
             clock,
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
             &[],
+            None,
         )
     }
 
@@ -783,6 +787,7 @@ impl CombinedProvider {
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
         local_scid: &[u8],
+        ech_config_list: Option<&[u8]>,
     ) -> Result<Self, ConnectionError> {
         let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
@@ -794,6 +799,7 @@ impl CombinedProvider {
             clock,
             max_udp_payload_size,
             local_scid,
+            ech_config_list,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
@@ -1077,6 +1083,7 @@ impl RustlsProvider {
             clock,
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
             &[],
+            None,
         )
     }
 
@@ -1091,6 +1098,7 @@ impl RustlsProvider {
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
         local_scid: &[u8],
+        ech_config_list: Option<&[u8]>,
     ) -> Result<Self, ConnectionError> {
         Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
@@ -1102,6 +1110,7 @@ impl RustlsProvider {
             clock,
             max_udp_payload_size,
             local_scid,
+            ech_config_list,
         )?))
     }
 }

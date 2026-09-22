@@ -157,6 +157,25 @@ fn crypto_provider_for_profile(
     Ok(provider)
 }
 
+/// Build the ECH mode for a connection carrying a DNS-sourced ECHConfigList
+/// (TODO-1064). Only a shared outer hop supplies `ech_config_list`; every
+/// other path passes `None` and gets a plain TLS 1.3 builder. An advertised
+/// list that rustls rejects is a dial error — never silently downgraded.
+#[cfg(feature = "rustls-aws-lc")]
+pub(super) fn ech_mode_for_config_list(
+    ech_config_list: Option<&[u8]>,
+) -> Result<Option<rustls::client::EchMode>, ConnectionError> {
+    let Some(bytes) = ech_config_list else {
+        return Ok(None);
+    };
+    let config = rustls::client::EchConfig::new(
+        rustls::pki_types::EchConfigListBytes::from(bytes),
+        rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
+    )
+    .map_err(|e| ConnectionError::TlsError(format!("ECHConfigList rejected: {e}")))?;
+    Ok(Some(rustls::client::EchMode::Enable(config)))
+}
+
 #[derive(Debug)]
 struct NoClientCertificate;
 
@@ -254,6 +273,10 @@ pub struct RustlsProviderImpl {
     pub verify_peer: bool,
     /// Client-scoped CA bundle path copied from the owning transport config.
     pub client_ca_path: Option<String>,
+    /// DNS-sourced ECHConfigList for this client connection (shared outer hop
+    /// only). `None` on every other connection — the ClientHello then carries
+    /// no ECH extension at all.
+    pub ech_config_list: Option<Vec<u8>>,
     /// Whether the TLS handshake has completed.
     pub handshake_complete: bool,
     /// Current write-side encryption level.
@@ -421,6 +444,7 @@ impl RustlsProviderImpl {
             clock,
             DEFAULT_MAX_UDP_PAYLOAD_SIZE,
             &[],
+            None,
         )
     }
 
@@ -435,6 +459,7 @@ impl RustlsProviderImpl {
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
         local_scid: &[u8],
+        ech_config_list: Option<&[u8]>,
     ) -> Result<Self, ConnectionError> {
         let quic_version = Self::map_quic_version(version)?;
         // The fixture block is built for the baseline (Chromium) engine at
@@ -456,6 +481,7 @@ impl RustlsProviderImpl {
                 transport_params.clone(),
                 client_ca_path.as_deref(),
                 environment,
+                ech_config_list,
             )?
         };
         let this = Self {
@@ -472,6 +498,7 @@ impl RustlsProviderImpl {
             #[cfg(debug_assertions)]
             verify_peer,
             client_ca_path,
+            ech_config_list: ech_config_list.map(|bytes| bytes.to_vec()),
             handshake_complete: false,
             write_level: super::Level::Initial,
             alpn: None,
@@ -693,6 +720,7 @@ impl RustlsProviderImpl {
         transport_params: Vec<u8>,
         ca_path: Option<&str>,
         environment: &crate::env_utils::EnvSnapshot,
+        ech_config_list: Option<&[u8]>,
     ) -> Result<rustls::quic::Connection, ConnectionError> {
         #[cfg(not(debug_assertions))]
         let _ = verify_peer;
@@ -701,9 +729,24 @@ impl RustlsProviderImpl {
         let roots = Self::build_client_root_store(ca_path)?;
 
         let builder =
-            ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
+            ClientConfig::builder_with_provider(Arc::new(crypto_provider_without_chacha()));
+        #[cfg(feature = "rustls-aws-lc")]
+        let builder = match ech_mode_for_config_list(ech_config_list)? {
+            Some(mode) => builder.with_ech(mode),
+            None => builder.with_protocol_versions(&[&rustls::version::TLS13]),
+        };
+        #[cfg(not(feature = "rustls-aws-lc"))]
+        let builder = {
+            if ech_config_list.is_some() {
+                log::warn!(
+                    "ECHConfigList resolved for this hop but the rustls-aws-lc feature is off; \
+                     dialing without ECH"
+                );
+            }
+            builder.with_protocol_versions(&[&rustls::version::TLS13])
+        };
+        let builder = builder
+            .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
         #[cfg(debug_assertions)]
         let allow_invalid =
             !verify_peer || environment.flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
@@ -970,9 +1013,31 @@ impl RustlsProviderImpl {
         // after a profile or SNI rebuild.
         let roots = Self::build_client_root_store(self.client_ca_path.as_deref())?;
         let builder =
-            ClientConfig::builder_with_provider(Arc::new(crypto_provider_for_profile(profile)?))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
+            ClientConfig::builder_with_provider(Arc::new(crypto_provider_for_profile(profile)?));
+        #[cfg(feature = "rustls-aws-lc")]
+        let builder = if profile.enable_ech {
+            match ech_mode_for_config_list(self.ech_config_list.as_deref())? {
+                Some(mode) => builder.with_ech(mode),
+                None => builder.with_protocol_versions(&[&rustls::version::TLS13]),
+            }
+        } else {
+            // A persona that never sends ECH (e.g. Brave) must not advertise it
+            // even when the hop's DNS record offers a config — the ClientHello
+            // shape stays faithful to the captured fingerprint.
+            builder.with_protocol_versions(&[&rustls::version::TLS13])
+        };
+        #[cfg(not(feature = "rustls-aws-lc"))]
+        let builder = {
+            if self.ech_config_list.is_some() {
+                log::warn!(
+                    "ECHConfigList resolved for this hop but the rustls-aws-lc feature is off; \
+                     dialing without ECH"
+                );
+            }
+            builder.with_protocol_versions(&[&rustls::version::TLS13])
+        };
+        let builder = builder
+            .map_err(|e| ConnectionError::TlsError(format!("Protocol version error: {}", e)))?;
         #[cfg(debug_assertions)]
         let allow_invalid =
             !self.verify_peer || self.environment.flag("QUICFUSCATE_ALLOW_INVALID_CERTS", false);
@@ -1407,6 +1472,7 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
     clock: &crate::time_source::ProtocolClock,
     max_udp_payload_size: usize,
     local_scid: &[u8],
+    ech_config_list: Option<&[u8]>,
 ) -> Result<RustlsProviderImpl, ConnectionError> {
     RustlsProviderImpl::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
@@ -1418,5 +1484,6 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         clock,
         max_udp_payload_size,
         local_scid,
+        ech_config_list,
     )
 }

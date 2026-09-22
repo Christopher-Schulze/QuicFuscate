@@ -56,6 +56,10 @@ pub struct Config {
     pub(crate) priv_key_path: Option<String>,
     pub(crate) verify_locations_file: Option<String>,
     pub(crate) verify_locations_directory: Option<String>,
+    /// Raw ECHConfigList bytes for Encrypted Client Hello on this connection.
+    /// Only set on a shared outer hop whose DNS HTTPS record advertises `ech`.
+    /// Direct dedicated-IP dials and inner circuit hops leave this `None`.
+    pub(crate) ech_config_list: Option<Vec<u8>>,
     // Parity fields
     pub(crate) dgram_recv_max_queue_len: usize,
     pub(crate) dgram_send_max_queue_len: usize,
@@ -187,6 +191,7 @@ impl Config {
             priv_key_path: None,
             verify_locations_file: None,
             verify_locations_directory: None,
+            ech_config_list: None,
             dgram_recv_max_queue_len: 0,
             dgram_send_max_queue_len: 0,
             path_challenge_recv_max_queue_len: 3,

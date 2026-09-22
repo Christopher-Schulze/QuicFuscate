@@ -3054,6 +3054,17 @@ Eligibility is mode-gated: `stealth`, `Stealth MAX`, and `dynamic` may arm the f
 
 An outer hop does **not** hide a dedicated IP — it only helps when the relay address is shared with real traffic. Also note the wire budget: the outer `max_udp_payload` must exceed 1,200 bytes plus the MASQUE Flow-ID prefix for full-size inner Initials to fit (the nested-hop budget already subtracts 87 bytes per relay layer).
 
+#### Encrypted Client Hello on the outer hop (TODO-1064)
+
+When `outer_hop = "masque"` (or a configured `[[circuit.hops]]` topology is used), the client resolves the entry hop's DNS `HTTPS` record over the TODO-1058 DoH path — same `stealth.doh_provider` endpoint, same TLS persona — before the engine dials. If the answer carries an `ech` SvcParam, the raw ECHConfigList bytes are attached to that hop (`HopConfig::ech_config_list`, `#[serde(skip)]`, runtime-injected) and rustls configures `EchMode::Enable` via `rustls::client::EchConfig` + `ConfigBuilder::with_ech`. If the record has no `ech`, the hop sends a normal ClientHello — nothing is invented or greased.
+
+Boundaries, deliberately:
+
+- ECH applies **only** to the shared outer hop / circuit entry hop — the one TLS handshake an observer on the client uplink can see. The direct UDP dial and the dedicated inner listener always carry no ECH state: an encrypted SNI cannot conceal an IP that is already unique to the customer.
+- ECH requires a build with the `rustls-aws-lc` cargo feature (HPKE suites from `rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES`; the ring provider ships no HPKE). Without the feature the hop logs once and dials without ECH.
+- A persona whose captured fingerprint never sends ECH (e.g. Brave) stays faithful: the persona `enable_ech` gate suppresses the extension even when a record exists.
+- `EchConfig::new` validates the list; a corrupt or invented configuration is a dial error, never a silent downgrade. Server-side ECH is not implemented (rustls lacks it) — the listener does not pretend to speak ECH.
+
 ---
 
 ### NAT Traversal and Path Discovery

@@ -204,6 +204,7 @@ fn apply_profile_rebuilds_transport_params_from_persona_fixture() {
         &clock,
         1350,
         &scid,
+        None,
     )
     .expect("client provider");
 

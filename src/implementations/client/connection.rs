@@ -151,6 +151,10 @@ impl ClientConnection {
                 qkey_token,
                 qkey_initial_token,
                 None,
+                // Direct dials target the dedicated endpoint itself — ECH
+                // would conceal nothing (the IP is already unique to this
+                // customer) and is never applied here (TODO-1064).
+                None,
             )?;
             (ClientDataPlane::single(connection), remote_addr)
         };
@@ -179,8 +183,10 @@ impl ClientConnection {
         qkey_token: Option<qf_engine_types::QKeyToken>,
         qkey_initial_token: Option<Vec<u8>>,
         pto_backoff_cap: Option<u32>,
+        ech_config_list: Option<&[u8]>,
     ) -> Result<QuicFuscateConnection, EngineError> {
         let mut transport_config = Self::build_transport_config(config, udp_payload_limit)?;
+        transport_config.ech_config_list = ech_config_list.map(|bytes| bytes.to_vec());
         transport_config.set_max_idle_timeout(idle_timeout_ms);
         if let Some(cap) = pto_backoff_cap {
             transport_config.set_pto_backoff_cap(cap);
@@ -273,6 +279,10 @@ impl ClientConnection {
             // backoff so a loss burst cannot compound into multi-second probe
             // gaps that stall tunneled flows (TODO-895 diagnosis).
             (hop_count > 1).then_some(NESTED_CIRCUIT_PTO_BACKOFF_CAP),
+            // ECH only reaches the hop whose own DNS HTTPS record advertised
+            // it — the client resolver injects `ech_config_list` solely on the
+            // shared outer hop (TODO-1064); inner hops keep `None`.
+            hop.ech_config_list.as_deref(),
         )
     }
 

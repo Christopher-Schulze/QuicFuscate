@@ -40,9 +40,14 @@ fn enable_client_gro(socket: &tokio::net::UdpSocket) {
 
 async fn run_circuit_client(
     config_path: &Path,
-    config: quicfuscate::engine::EngineConfig,
+    mut config: quicfuscate::engine::EngineConfig,
 ) -> std::io::Result<()> {
     use quicfuscate::engine::{EngineState, QuicFuscateEngine};
+
+    // ECH applies only to the shared outer hop — the entry TLS handshake an
+    // observer on the client uplink can see (TODO-1064). The dedicated exit
+    // listener never carries ECH state.
+    quicfuscate::implementations::client::resolve_outer_hop_ech(&mut config).await;
 
     let mut engine = QuicFuscateEngine::new(config).map_err(|error| {
         std::io::Error::new(

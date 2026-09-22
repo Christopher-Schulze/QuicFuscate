@@ -816,3 +816,131 @@ fn test_client_policy_constructor_carries_stealth_flags() {
     assert_eq!(config.doh_persona_ciphers, Some(vec![0x1301, 0x1302, 0x1303]));
     assert!(config.doh_client_inner(), "persona client must build at prepare time");
 }
+
+// ---- TODO-1064: HTTPS-record ECH extraction ----
+
+fn https_record_rdata(ech: Option<&[u8]>, extra_key: Option<(u16, &[u8])>) -> Vec<u8> {
+    let mut rdata = Vec::new();
+    rdata.extend_from_slice(&1u16.to_be_bytes()); // SvcPriority
+    rdata.push(0); // TargetName = root
+    if let Some((key, value)) = extra_key {
+        rdata.extend_from_slice(&key.to_be_bytes());
+        rdata.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        rdata.extend_from_slice(value);
+    }
+    if let Some(ech) = ech {
+        rdata.extend_from_slice(&5u16.to_be_bytes()); // "ech" SvcParam
+        rdata.extend_from_slice(&(ech.len() as u16).to_be_bytes());
+        rdata.extend_from_slice(ech);
+    }
+    rdata
+}
+
+fn https_response(name: &str, rdata: Option<Vec<u8>>) -> Vec<u8> {
+    let query = crate::https_record::build_https_query(name, 0x1234).expect("query");
+    let mut response = query[..DNS_HEADER_SIZE].to_vec();
+    response[2] = 0x81;
+    response[3] = 0x80;
+    response[4..6].copy_from_slice(&1u16.to_be_bytes());
+    let ancount = u16::from(rdata.is_some());
+    response[6..8].copy_from_slice(&ancount.to_be_bytes());
+    response.extend_from_slice(&query[DNS_HEADER_SIZE..]);
+    if let Some(rdata) = rdata {
+        response.extend_from_slice(&[0xc0, 0x0c]); // owner = question name
+        response.extend_from_slice(&65u16.to_be_bytes()); // TYPE HTTPS
+        response.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        response.extend_from_slice(&300u32.to_be_bytes()); // TTL
+        response.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        response.extend_from_slice(&rdata);
+    }
+    response
+}
+
+fn fixture_ech_config_list() -> Vec<u8> {
+    let mut contents = Vec::new();
+    contents.push(1u8); // key_config.config_id
+    contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM(X25519, HKDF-SHA256)
+    contents.extend_from_slice(&32u16.to_be_bytes()); // HpkePublicKey length
+    contents.extend_from_slice(&[0x42u8; 32]);
+    contents.extend_from_slice(&4u16.to_be_bytes()); // cipher_suites length
+    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
+    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // AES-128-GCM
+    contents.push(0u8); // maximum_name_length
+    contents.push(11u8); // public_name: u8 length prefix
+    contents.extend_from_slice(b"example.com");
+    contents.extend_from_slice(&0u16.to_be_bytes()); // extensions
+    let mut config = Vec::new();
+    config.extend_from_slice(&0xfe0du16.to_be_bytes()); // ECHConfig version
+    config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+    config.extend_from_slice(&contents);
+    let mut list = Vec::new();
+    list.extend_from_slice(&(config.len() as u16).to_be_bytes());
+    list.extend_from_slice(&config);
+    list
+}
+
+#[test]
+fn test_https_query_builds_type65_question() {
+    let query = crate::https_record::build_https_query("relay.example.com", 0xBEEF).expect("query");
+    assert_eq!(&query[..2], &0xBEEFu16.to_be_bytes());
+    assert_eq!(&query[2..4], &0x0100u16.to_be_bytes()); // RD
+    assert_eq!(&query[4..6], &1u16.to_be_bytes()); // QDCOUNT
+    let qname_end = DNS_HEADER_SIZE + "relay".len() + "example".len() + "com".len() + 3 + 1;
+    assert_eq!(&query[qname_end..qname_end + 2], &65u16.to_be_bytes()); // HTTPS
+    assert_eq!(&query[qname_end + 2..qname_end + 4], &1u16.to_be_bytes()); // IN
+    assert_eq!(query.len(), qname_end + 4);
+}
+
+#[test]
+fn test_https_query_rejects_invalid_names() {
+    assert!(crate::https_record::build_https_query("", 1).is_none());
+    assert!(crate::https_record::build_https_query("bad..name", 1).is_none());
+    assert!(crate::https_record::build_https_query(&"x".repeat(64), 1).is_none());
+}
+
+#[test]
+fn test_ech_param_extracted_from_https_record() {
+    let ech = fixture_ech_config_list();
+    let response = https_response("relay.example.com", Some(https_record_rdata(Some(&ech), None)));
+    assert_eq!(crate::https_record::extract_ech_config_list(&response), Some(ech));
+}
+
+#[test]
+fn test_ech_param_absent_returns_none() {
+    // HTTPS record exists but only carries an unrelated SvcParam (alpn).
+    let rdata = https_record_rdata(None, Some((1, b"h2")));
+    let response = https_response("relay.example.com", Some(rdata));
+    assert_eq!(crate::https_record::extract_ech_config_list(&response), None);
+}
+
+#[test]
+fn test_ech_param_empty_answer_returns_none() {
+    let response = https_response("relay.example.com", None);
+    assert_eq!(crate::https_record::extract_ech_config_list(&response), None);
+}
+
+#[test]
+fn test_ech_param_non_https_answer_ignored() {
+    let mut response = https_response("relay.example.com", None);
+    response[6..8].copy_from_slice(&1u16.to_be_bytes());
+    response.extend_from_slice(&[0xc0, 0x0c]); // owner
+    response.extend_from_slice(&1u16.to_be_bytes()); // TYPE A, not HTTPS
+    response.extend_from_slice(&1u16.to_be_bytes());
+    response.extend_from_slice(&300u32.to_be_bytes());
+    response.extend_from_slice(&4u16.to_be_bytes());
+    response.extend_from_slice(&[192, 0, 2, 1]);
+    assert_eq!(crate::https_record::extract_ech_config_list(&response), None);
+}
+
+#[test]
+fn test_ech_param_malformed_rdata_returns_none() {
+    // RDATA declares a longer ech value than it actually carries.
+    let mut rdata = Vec::new();
+    rdata.extend_from_slice(&1u16.to_be_bytes());
+    rdata.push(0);
+    rdata.extend_from_slice(&5u16.to_be_bytes());
+    rdata.extend_from_slice(&512u16.to_be_bytes()); // bogus length
+    rdata.extend_from_slice(&[0u8; 8]);
+    let response = https_response("relay.example.com", Some(rdata));
+    assert_eq!(crate::https_record::extract_ech_config_list(&response), None);
+}

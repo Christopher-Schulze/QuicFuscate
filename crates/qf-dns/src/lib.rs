@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use qf_common::time_source::ProtocolClock;
 
 mod forwarding;
+pub mod https_record;
 
 #[cfg(test)]
 use forwarding::{
@@ -609,14 +610,14 @@ fn valid_dns_query_flags(flags: u16) -> bool {
         == 0
 }
 
-struct ParsedDnsName {
-    display: String,
-    wire: Vec<u8>,
-    end: usize,
+pub(crate) struct ParsedDnsName {
+    pub(crate) display: String,
+    pub(crate) wire: Vec<u8>,
+    pub(crate) end: usize,
 }
 
 /// Parse a bounded DNS name while preserving its expanded wire bytes.
-fn parse_dns_name(pkt: &[u8], start: usize) -> Option<ParsedDnsName> {
+pub(crate) fn parse_dns_name(pkt: &[u8], start: usize) -> Option<ParsedDnsName> {
     let mut labels: Vec<Vec<u8>> = Vec::new();
     let mut wire = Vec::with_capacity(32);
     let mut cursor = start;

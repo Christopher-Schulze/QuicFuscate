@@ -884,3 +884,139 @@ fn test_all_browser_profiles_have_cipher_suites() {
         );
     }
 }
+
+#[cfg(feature = "rustls-aws-lc")]
+mod ech_tests {
+    //! TODO-1064: ECH only rides the shared outer hop. These tests build real
+    //! rustls QUIC client connections with a DNS-sourced ECHConfigList and
+    //! inspect the emitted ClientHello on the wire.
+
+    use super::*;
+
+    /// Wire-format ECHConfigList (draft-ietf-tls-esni-18 §4): one config with
+    /// DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256/AES-128-GCM — a suite rustls
+    /// ships in `aws_lc_rs::hpke::ALL_SUPPORTED_SUITES`.
+    fn fixture_ech_config_list() -> Vec<u8> {
+        let mut contents = Vec::new();
+        contents.push(1u8); // key_config.config_id
+        contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM X25519
+        contents.extend_from_slice(&32u16.to_be_bytes()); // public key length
+        contents.extend_from_slice(&[0x42u8; 32]);
+        contents.extend_from_slice(&4u16.to_be_bytes()); // cipher_suites length
+        contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
+        contents.extend_from_slice(&0x0001u16.to_be_bytes()); // AES-128-GCM
+        contents.push(0u8); // maximum_name_length
+        contents.push(11u8); // public_name: u8 length prefix
+        contents.extend_from_slice(b"example.com");
+        contents.extend_from_slice(&0u16.to_be_bytes()); // extensions
+        let mut config = Vec::new();
+        config.extend_from_slice(&0xfe0du16.to_be_bytes()); // ECHConfig version
+        config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+        config.extend_from_slice(&contents);
+        let mut list = Vec::new();
+        list.extend_from_slice(&(config.len() as u16).to_be_bytes());
+        list.extend_from_slice(&config);
+        list
+    }
+
+    fn client_provider(ech_config_list: Option<&[u8]>) -> RustlsProvider {
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        let clock = crate::time_source::ProtocolClock::default();
+        let scid = [0x42u8; 16];
+        RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+            false,
+            false,
+            PROTOCOL_VERSION,
+            &[],
+            None,
+            &environment,
+            &clock,
+            1350,
+            &scid,
+            ech_config_list,
+        )
+        .expect("client provider")
+    }
+
+    fn client_hello_extensions_with(
+        provider: &mut RustlsProvider,
+        mut profile: TlsProfile,
+    ) -> Vec<(u16, Vec<u8>)> {
+        profile.timing_jitter = None;
+        provider.configure(&profile).expect("configure profile");
+        let (_, frame) = provider
+            .next_crypto_frame(Level::Initial, usize::MAX)
+            .expect("next initial frame")
+            .expect("initial ClientHello");
+        client_hello_extensions(&frame)
+    }
+
+    #[test]
+    fn ech_extension_reaches_the_wire_for_ech_persona() {
+        let mut provider = client_provider(Some(&fixture_ech_config_list()));
+        let extensions = client_hello_extensions_with(&mut provider, TlsProfile::chrome_130());
+        assert!(
+            extensions.iter().any(|(kind, _)| *kind == 0xfe0d),
+            "ECH-enabled persona + DNS ECHConfigList must emit extension 0xfe0d"
+        );
+        // The outer ClientHello presents the ECH public_name, not the real
+        // service SNI — proof rustls actually engaged the ECH path.
+        let sni = client_hello_sni(client_hello_extension(&extensions, 0x0000));
+        assert_eq!(sni, "example.com");
+    }
+
+    #[test]
+    fn ech_persona_gate_suppresses_extension() {
+        // Brave's captured persona never sends ECH. Even with a DNS record
+        // present the ClientHello must stay faithful to the fingerprint.
+        let mut provider = client_provider(Some(&fixture_ech_config_list()));
+        let extensions = client_hello_extensions_with(&mut provider, TlsProfile::brave_1_73());
+        assert!(
+            extensions.iter().all(|(kind, _)| *kind != 0xfe0d),
+            "ECH-disabled persona must not emit extension 0xfe0d"
+        );
+    }
+
+    #[test]
+    fn no_dns_record_means_no_ech_state() {
+        // No `ech` SvcParam → no ECHConfigList → a plain ClientHello. The
+        // client must not grease or invent a configuration (TODO-1064).
+        let mut provider = client_provider(None);
+        let extensions = client_hello_extensions_with(&mut provider, TlsProfile::chrome_130());
+        assert!(
+            extensions.iter().all(|(kind, _)| *kind != 0xfe0d),
+            "absent ECHConfigList must produce a normal ClientHello"
+        );
+    }
+
+    #[test]
+    fn valid_ech_config_list_produces_enable_mode() {
+        let list = fixture_ech_config_list();
+        let mode = super::rustls_provider::ech_mode_for_config_list(Some(&list))
+            .expect("ECHConfigList must parse");
+        assert!(matches!(mode, Some(rustls::client::EchMode::Enable(_))));
+    }
+
+    #[test]
+    fn absent_ech_config_list_produces_no_mode() {
+        assert!(super::rustls_provider::ech_mode_for_config_list(None).expect("no ECH").is_none());
+    }
+
+    #[test]
+    fn invalid_ech_config_list_is_a_dial_error() {
+        // Fail-closed: a corrupted or invented list must never silently pass.
+        assert!(super::rustls_provider::ech_mode_for_config_list(Some(&[0xde, 0xad])).is_err());
+        assert!(super::rustls_provider::ech_mode_for_config_list(Some(&[])).is_err());
+    }
+
+    #[test]
+    fn unsupported_kem_ech_config_list_is_rejected() {
+        // Same wire shape but an unknown KEM: rustls must refuse it — no HPKE
+        // suite matches, so the hop would otherwise claim ECH it cannot do.
+        let mut list = fixture_ech_config_list();
+        // offset: list_len(2) + version(2) + length(2) + config_id(1) → kem_id
+        list[7] = 0xff;
+        list[8] = 0xff;
+        assert!(super::rustls_provider::ech_mode_for_config_list(Some(&list)).is_err());
+    }
+}

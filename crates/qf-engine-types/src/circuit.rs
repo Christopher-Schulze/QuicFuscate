@@ -106,6 +106,11 @@ pub struct HopConfig {
     /// Runtime-pinned entry address shared by firewall and socket ownership. Never serialized.
     #[serde(skip)]
     pub pinned_endpoint: Option<SocketAddr>,
+    /// Raw ECHConfigList bytes resolved from this hop's DNS HTTPS record via DoH.
+    /// Runtime-injected by the client resolver before dialing — never operator
+    /// configuration, never serialized. Only meaningful on a shared outer hop.
+    #[serde(skip)]
+    pub ech_config_list: Option<Vec<u8>>,
     /// TLS SNI or browser-persona authority for this hop.
     pub sni: String,
     /// Whether the peer certificate must be verified.
@@ -143,6 +148,7 @@ impl Default for HopConfig {
             label: String::new(),
             endpoint: String::new(),
             pinned_endpoint: None,
+            ech_config_list: None,
             sni: String::new(),
             verify_peer: true,
             ca_file: String::new(),

@@ -785,3 +785,21 @@ fn dial_failure_classification_is_fail_safe() {
         assert!(!dial_failure_is_reachability(&error), "{error:?} must not arm the fallback");
     }
 }
+
+#[test]
+fn outer_hop_fallback_carries_ech_config_list_to_entry_hop() {
+    // TODO-1064: the DoH-resolved ECHConfigList lives on the configured relay
+    // hop and must reach the synthesized circuit's entry hop — and only that
+    // hop. The exit hop (dedicated listener) never carries ECH state.
+    let mut config = outer_hop_test_config(qf_engine_types::StealthMode::Stealth);
+    let ech_bytes = vec![0xfe, 0x0d, 0x00, 0x20];
+    config.connection.outer_hop_relay.as_mut().expect("relay").ech_config_list =
+        Some(ech_bytes.clone());
+
+    let fallback = outer_hop_fallback_config(&config).expect("synthesis").expect("fallback plan");
+    let circuit = fallback.circuit.as_ref().expect("circuit");
+    assert_eq!(circuit.hops[0].ech_config_list.as_deref(), Some(ech_bytes.as_slice()));
+    assert!(circuit.hops[1].ech_config_list.is_none());
+    // Runtime-injected: the field must never reach the serialized config.
+    assert!(!toml::to_string(&fallback).expect("serialize").contains("ech_config_list"));
+}
