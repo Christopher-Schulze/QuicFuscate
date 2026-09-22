@@ -391,6 +391,53 @@ impl StealthManager {
         Some(FingerprintProfile::new(browser, os))
     }
 
+    /// Builds the shared wire byte ledger for a new connection (TODO-1052).
+    ///
+    /// One account for repairs, padding, and cover traffic. `off` and
+    /// `performance` profiles carry a zero cap and yield `None` — no ledger
+    /// is installed and the connection adds zero stealth bytes. `manual`
+    /// keeps the operator-selected shape; every other stealth mode replays
+    /// the active persona's captured length classes.
+    ///
+    /// `dynamic` installs the ledger at connect even though padding starts
+    /// disabled: when the escalation engine later turns padding on through
+    /// the brain runtime delta, the stealth bytes flow through the shape
+    /// the connection committed to (TODO-1052/1059). The transport-side
+    /// `stealth_padding_enabled` flag stays false until then, so an
+    /// unescalated dynamic connection still emits zero stealth bytes.
+    pub(crate) fn build_wire_ledger(&self, now: std::time::Instant) -> Option<BudgetLedger> {
+        let dynamic = matches!(self.config.mode, StealthMode::Dynamic);
+        if !dynamic && !self.config.enable_traffic_padding {
+            return None;
+        }
+        // Every connection that can emit stealth bytes owns a ledger —
+        // `dynamic` because the brain may escalate later, every padded
+        // mode because the ledger is the only padding authority. A zero
+        // cap means "operator never configured one": inherit the stealth
+        // default. An operator who truly wants zero uses `off`, which
+        // never installs a ledger at all.
+        let (cap_sec, cap_burst) = if self.config.wire_cap_bytes_per_sec == 0 {
+            let d = WireBudget::stealth_default();
+            (d.cap_bytes_per_sec, d.cap_bytes_per_burst)
+        } else {
+            (self.config.wire_cap_bytes_per_sec, self.config.wire_cap_bytes_per_burst)
+        };
+        let budget = WireBudget {
+            cap_bytes_per_sec: cap_sec,
+            cap_bytes_per_burst: cap_burst,
+            shape: self.config.wire_shape,
+        };
+        let trace = match self.config.wire_shape {
+            WireShape::PersonaTrace => Some(qf_stealth::wire_budget::persona_trace(
+                qf_stealth::transport_params::EngineFamily::from_browser(
+                    self.current_fingerprint().browser,
+                ),
+            )),
+            WireShape::FixedCell => None,
+        };
+        Some(BudgetLedger::new(budget, trace, self.config.normalize_target_size, now))
+    }
+
     /// Returns a clone of the current fingerprint profile for TLS/ALPN mapping.
     fn current_fingerprint(&self) -> FingerprintProfile {
         match self.fingerprint.lock() {
@@ -539,24 +586,19 @@ impl StealthManager {
             config.set_external_pacing(enabled);
         }
 
-        // Apply stealth padding knobs to transport config so Connection::send() can pad before sealing
-        let strategy_code = match self.config.padding_strategy {
-            PaddingStrategy::Random => 1,
-            PaddingStrategy::Fixed => 2,
-            PaddingStrategy::Adaptive => 3,
-            PaddingStrategy::BrowserMimic => 4,
-            PaddingStrategy::PacketNormalize => 5,
+        // Apply stealth padding knobs to transport config so Connection::send() can pad before sealing.
+        // TODO-1052: the wire shape is the only strategy; 6 = persona trace,
+        // 7 = fixed cell. The BudgetLedger (installed on the connection)
+        // enforces the shared cap across repairs, padding, and cover.
+        let strategy_code = match self.config.wire_shape {
+            WireShape::PersonaTrace => 6,
+            WireShape::FixedCell => 7,
         };
         config.set_stealth_padding(
             self.config.enable_traffic_padding,
             strategy_code,
             self.config.max_padding_size,
         );
-        if self.config.padding_strategy == PaddingStrategy::PacketNormalize
-            && self.config.normalize_target_size > 0
-        {
-            config.set_stealth_normalize_target(self.config.normalize_target_size);
-        }
         // Set default adaptive granularity (bytes) - sensible default 64
         config.set_stealth_adaptive_granularity(64);
         let fingerprint = self.current_fingerprint();
@@ -579,19 +621,16 @@ impl StealthManager {
 
         // ENV overrides (optional):
         // - QUICFUSCATE_STEALTH_PADDING_MAX = <usize>
-        // - QUICFUSCATE_STEALTH_PADDING_STRATEGY = random|fixed|adaptive|browser|1..4
+        // - QUICFUSCATE_STEALTH_PADDING_STRATEGY = persona-trace|fixed-cell
+        //   (legacy spellings random|adaptive|browser|fixed|normalize collapse)
         // - QUICFUSCATE_STEALTH_JITTER_US = <u32>
         if let Some(v) = self.config.transport_padding_max_override(&self.env_snapshot) {
             config.set_stealth_padding(self.config.enable_traffic_padding, strategy_code, v);
         }
-        if let Some(strategy) = self.config.transport_padding_strategy_override(&self.env_snapshot)
-        {
-            let scode = match strategy {
-                PaddingStrategy::Random => 1,
-                PaddingStrategy::Fixed => 2,
-                PaddingStrategy::Adaptive => 3,
-                PaddingStrategy::BrowserMimic => 4,
-                PaddingStrategy::PacketNormalize => 5,
+        if let Some(shape) = self.config.transport_wire_shape_override(&self.env_snapshot) {
+            let scode = match shape {
+                WireShape::PersonaTrace => 6,
+                WireShape::FixedCell => 7,
             };
             config.set_stealth_padding(
                 self.config.enable_traffic_padding,
@@ -879,7 +918,7 @@ impl StealthManager {
             .config
             .transport_padding_max_override(&self.env_snapshot)
             .is_some()
-            || self.config.transport_padding_strategy_override(&self.env_snapshot).is_some()
+            || self.config.transport_wire_shape_override(&self.env_snapshot).is_some()
             || self.config.transport_adaptive_granularity_override(&self.env_snapshot).is_some()
             || self.config.transport_mimic_bias_override(&self.env_snapshot).is_some();
         let manual_transport_locked = ack_locked || timing_locked || padding_locked;

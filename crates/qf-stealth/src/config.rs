@@ -1,20 +1,5 @@
 //! Root-independent stealth configuration value contracts.
 
-/// Padding strategies for traffic obfuscation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum PaddingStrategy {
-    /// Random padding between 0 and max_padding_size.
-    Random,
-    /// Fixed padding to nearest power of 2.
-    Fixed,
-    /// Adaptive padding based on traffic patterns.
-    Adaptive,
-    /// Mimic browser-specific padding patterns.
-    BrowserMimic,
-    /// Normalize all outgoing 1-RTT packets to a fixed size.
-    PacketNormalize,
-}
-
 /// High-level stealth operating modes controlling which obfuscation features are active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum StealthMode {
@@ -67,14 +52,16 @@ pub enum RotationMode {
 
 #[cfg(test)]
 mod tests {
-    use super::{PaddingStrategy, RotationMode, StealthMode};
+    use super::{RotationMode, StealthMode};
 
     #[test]
-    fn padding_strategy_serialization_is_stable() {
-        let encoded = serde_json::to_string(&PaddingStrategy::PacketNormalize).expect("serialize");
-        assert_eq!(encoded, "\"PacketNormalize\"");
-        let decoded: PaddingStrategy = serde_json::from_str(&encoded).expect("deserialize");
-        assert_eq!(decoded, PaddingStrategy::PacketNormalize);
+    fn wire_shape_serialization_is_stable() {
+        let encoded =
+            serde_json::to_string(&crate::wire_budget::WireShape::FixedCell).expect("serialize");
+        assert_eq!(encoded, "\"fixed-cell\"");
+        let decoded: crate::wire_budget::WireShape =
+            serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, crate::wire_budget::WireShape::FixedCell);
     }
 
     #[test]

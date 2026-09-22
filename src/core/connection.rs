@@ -395,7 +395,7 @@ impl QuicFuscateConnection {
             config.set_initial_token(Some(token_bytes));
         }
 
-        let conn = crate::transport::packet::connect_with_clock(
+        let mut conn = crate::transport::packet::connect_with_clock(
             Some(&sni),
             scid.as_ref(),
             local_addr,
@@ -404,6 +404,10 @@ impl QuicFuscateConnection {
             clock.clone(),
         )
         .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
+
+        // TODO-1052: one shared wire budget for repairs, padding, and cover.
+        // Modes without stealth padding install no ledger at all.
+        conn.set_wire_ledger(stealth_manager.build_wire_ledger(clock.now()));
 
         Ok(Self::new(ConnectionParams {
             clock,
@@ -542,7 +546,7 @@ impl QuicFuscateConnection {
             clock.clone(),
         ));
 
-        let conn = crate::transport::packet::accept_with_clock_and_original(
+        let mut conn = crate::transport::packet::accept_with_clock_and_original(
             scid.as_ref(),
             initial_key_dcid.as_ref().map(|id| id.as_ref()),
             original_dcid.as_ref().map(|id| id.as_ref()),
@@ -552,6 +556,11 @@ impl QuicFuscateConnection {
             clock.clone(),
         )
         .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
+
+        // TODO-1052: the server side of a stealth connection shares the
+        // same wire budget discipline — its repairs, padding, and cover
+        // bytes come out of one account as well.
+        conn.set_wire_ledger(stealth_manager.build_wire_ledger(clock.now()));
 
         Ok(Self::new(ConnectionParams {
             clock,

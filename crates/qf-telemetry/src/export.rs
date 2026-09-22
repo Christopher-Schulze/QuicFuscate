@@ -371,6 +371,16 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_fec_symbol_epoch_rejects_total {}",
             FEC_SYMBOL_EPOCH_REJECTS.get()
         );
+        let _ = writeln!(
+            out,
+            "quicfuscate_fec_repairs_budget_dropped_total {}",
+            FEC_REPAIRS_BUDGET_DROPPED.get()
+        );
+        let _ = writeln!(
+            out,
+            "quicfuscate_cover_ping_budget_skipped_total {}",
+            COVER_PING_BUDGET_SKIPPED.get()
+        );
     } // end fec
 
     // MASQUE

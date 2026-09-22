@@ -4,8 +4,9 @@ title: One wire byte budget for padding, cover, and FEC
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
+completed: 2026-09-22
 depends_on: [TODO-1046, TODO-1054, TODO-1055]
 ---
 
@@ -53,11 +54,11 @@ Trace: a checked-in sequence of (direction, length class, gap) for the persona, 
 
 ## Sub-Tasks
 
-- [ ] Trace fixture for one persona, first 30 packets plus 10 s quiet.
-- [ ] Ledger and spend order.
-- [ ] Padder and cover PING call the ledger.
-- [ ] Delete `PaddingStrategy::Random` from the operator enum. Map old configs `random` to `PersonaTrace` in stealth modes and to off in `off` / `performance`.
-- [ ] Test: under zero loss, padding lengths are members of the trace set. Under loss, repair bytes plus padding bytes stay within the cap.
+- [x] Trace fixture for one persona, first 30 packets plus quiet — `crates/qf-stealth/fixtures/persona_trace.toml` carries a real bidirectional Chrome 154 capture (~290 datagrams: 74 client sends incl. handshake, request, and ACK stream, then ~5.2 s of measured quiet before the close). Chromium is wire-captured; Firefox is source-derived (neqo); Safari is honestly marked unverified.
+- [x] Ledger and spend order — `qf_stealth::wire_budget::{WireBudget, BudgetLedger, WireShape}`. One `try_spend` gate; repairs debit before `dgram_send_parts`/raw queueing, padding asks `padding_target`, cover PINGs/chaff/keepalives spend last. No second counter, no borrowing (`second_window_refills_without_borrowing`).
+- [x] Padder and cover PING call the ledger — `compute_stealth_padding` delegates to `BudgetLedger::padding_target` whenever a ledger is installed; the legacy RNG strategy dispatch is dead on ledgered connections. Cover PING (incl. operator heartbeat keepalive), chaff packets, and repair-image padding all pass `try_spend_wire_*` before emission.
+- [x] `PaddingStrategy` removed from the operator enum — `StealthConfig.wire_shape` is the axis; legacy `padding_strategy` spellings (`random`, `fixed`, `adaptive`, `browser_mimic`, `normalize`, `packet_normalize`) parse onto `persona-trace`/`fixed-cell`. `off`/`performance` install no ledger and emit zero stealth bytes; `dynamic` owns a ledger from connect so a later escalation keeps the same image.
+- [x] Tests — `zero_loss_padding_lengths_land_on_trace_classes`, `repairs_never_exceed_cap`, `exhausted_ledger_sends_natural_length`, `repair_spend_shrinks_padding_allowance`, `burst_cap_applies_within_the_second`, `fixed_cell_pads_to_cell_or_nothing`, `chromium_trace_is_wire_captured_and_covers_classifier_window`, `oversized_payloads_never_clamp_into_non_class_sizes` plus transport-level `ledger_is_the_only_padding_authority_when_installed`, `ledger_gates_deny_repairs_cover_and_pad_once_spent`, `ledgerless_connection_never_blocks_stealth_spenders`.
 
 ## Acceptance
 

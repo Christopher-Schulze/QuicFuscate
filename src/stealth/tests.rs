@@ -1,17 +1,17 @@
 use super::test_support::*;
-use super::{PaddingStrategy, StealthConfig, StealthManager, StealthMode};
+use super::{StealthConfig, StealthManager, StealthMode, WireShape};
 use crate::{crypto::CryptoManager, optimize::OptimizationManager};
 use std::sync::Arc;
 
 #[test]
 fn canonical_stealth_modes_keep_padding_ssot() {
     let stealth = StealthConfig::stealth();
-    assert_eq!(stealth.padding_strategy, PaddingStrategy::Adaptive);
+    assert_eq!(stealth.wire_shape, WireShape::PersonaTrace);
     assert!(stealth.enable_http3_masquerading);
     assert!(stealth.use_tls_cover);
 
     let anti_dpi = StealthConfig::stealth_max();
-    assert_eq!(anti_dpi.padding_strategy, PaddingStrategy::BrowserMimic);
+    assert_eq!(anti_dpi.wire_shape, WireShape::PersonaTrace);
     assert!(anti_dpi.enable_http3_masquerading);
     assert!(anti_dpi.use_tls_cover);
     assert!(!anti_dpi.enable_realtime_choke);
@@ -439,57 +439,52 @@ fn flow_shaper_flight_pacing_handshake_is_15ms() {
     assert_eq!(d2.as_micros(), 0);
 }
 
-// --- Padding Strategy Config Tests ---
+// --- Wire Shape Config Tests (TODO-1052) ---
 
 #[test]
-fn padding_strategy_defaults_per_mode() {
-    use super::{PaddingStrategy, StealthConfig};
-    assert_eq!(StealthConfig::stealth().padding_strategy, PaddingStrategy::Adaptive);
-    assert_eq!(StealthConfig::stealth_max().padding_strategy, PaddingStrategy::BrowserMimic);
-    assert_eq!(StealthConfig::performance().padding_strategy, PaddingStrategy::Random);
-    assert_eq!(StealthConfig::manual().padding_strategy, PaddingStrategy::Random);
-    assert_eq!(StealthConfig::dynamic().padding_strategy, PaddingStrategy::Random);
-}
-
-#[test]
-fn padding_strategy_serde_roundtrip() {
-    use super::PaddingStrategy;
-    for strategy in [
-        PaddingStrategy::Random,
-        PaddingStrategy::Fixed,
-        PaddingStrategy::Adaptive,
-        PaddingStrategy::BrowserMimic,
+fn wire_shape_defaults_per_mode() {
+    use super::{StealthConfig, WireShape};
+    for preset in [
+        StealthConfig::stealth(),
+        StealthConfig::stealth_max(),
+        StealthConfig::manual(),
+        StealthConfig::dynamic(),
     ] {
-        let json = serde_json::to_string(&strategy).expect("serialize");
-        let back: PaddingStrategy = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(strategy, back, "serde roundtrip failed for {:?}", strategy);
+        assert_eq!(preset.wire_shape, WireShape::PersonaTrace);
+    }
+    // off/performance install no ledger: zero cap, zero stealth bytes.
+    assert_eq!(StealthConfig::off().wire_cap_bytes_per_sec, 0);
+    assert_eq!(StealthConfig::performance().wire_cap_bytes_per_sec, 0);
+}
+
+#[test]
+fn wire_shape_serde_roundtrip() {
+    use super::WireShape;
+    for shape in [WireShape::PersonaTrace, WireShape::FixedCell] {
+        let json = serde_json::to_string(&shape).expect("serialize");
+        let back: WireShape = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(shape, back, "serde roundtrip failed for {:?}", shape);
     }
 }
 
 #[test]
-fn padding_strategy_parse_from_env_values() {
-    use super::PaddingStrategy;
-    // parse_padding_strategy is a private helper, test via StealthConfig
-    fn parse(raw: &str) -> Option<PaddingStrategy> {
-        match raw.to_ascii_lowercase().as_str() {
-            "random" | "1" => Some(PaddingStrategy::Random),
-            "fixed" | "constant" | "2" => Some(PaddingStrategy::Fixed),
-            "adaptive" | "3" => Some(PaddingStrategy::Adaptive),
-            "browser" | "browser_mimic" | "browsermimic" | "4" => {
-                Some(PaddingStrategy::BrowserMimic)
-            }
-            _ => None,
-        }
+fn legacy_padding_spellings_map_to_wire_shapes() {
+    // Legacy strategy names must keep parsing and collapse onto the two
+    // TODO-1052 shapes. The env override path exercises the same mapper.
+    use qf_common::env_utils::EnvSnapshot;
+    fn shape(env_value: &str) -> Option<super::WireShape> {
+        let env = EnvSnapshot::from_pairs([("QUICFUSCATE_STEALTH_PADDING_STRATEGY", env_value)]);
+        StealthConfig::off().transport_wire_shape_override(&env)
     }
-    assert_eq!(parse("random"), Some(PaddingStrategy::Random));
-    assert_eq!(parse("1"), Some(PaddingStrategy::Random));
-    assert_eq!(parse("fixed"), Some(PaddingStrategy::Fixed));
-    assert_eq!(parse("2"), Some(PaddingStrategy::Fixed));
-    assert_eq!(parse("adaptive"), Some(PaddingStrategy::Adaptive));
-    assert_eq!(parse("3"), Some(PaddingStrategy::Adaptive));
-    assert_eq!(parse("browser"), Some(PaddingStrategy::BrowserMimic));
-    assert_eq!(parse("4"), Some(PaddingStrategy::BrowserMimic));
-    assert_eq!(parse("unknown"), None);
+    use super::WireShape;
+    assert_eq!(shape("random"), Some(WireShape::PersonaTrace));
+    assert_eq!(shape("adaptive"), Some(WireShape::PersonaTrace));
+    assert_eq!(shape("browser-mimic"), Some(WireShape::PersonaTrace));
+    assert_eq!(shape("persona-trace"), Some(WireShape::PersonaTrace));
+    assert_eq!(shape("fixed"), Some(WireShape::FixedCell));
+    assert_eq!(shape("packet-normalize"), Some(WireShape::FixedCell));
+    assert_eq!(shape("fixed-cell"), Some(WireShape::FixedCell));
+    assert_eq!(shape("unknown"), None);
 }
 
 #[test]
@@ -526,19 +521,15 @@ fn cover_ping_disabled_when_config_off() {
 }
 
 #[test]
-fn packet_normalize_is_distinct_variant() {
-    // Verify PacketNormalize is a distinct PaddingStrategy variant and that
-    // it can be set and read back on StealthConfig without aliasing other variants.
+fn fixed_cell_is_distinct_wire_shape() {
+    // FixedCell is a distinct WireShape variant and can be set and read back on
+    // StealthConfig without aliasing PersonaTrace.
     let mut cfg = StealthConfig::performance();
-    cfg.padding_strategy = PaddingStrategy::PacketNormalize;
+    cfg.wire_shape = WireShape::FixedCell;
     cfg.normalize_target_size = 1400;
-    assert_eq!(cfg.padding_strategy, PaddingStrategy::PacketNormalize);
+    assert_eq!(cfg.wire_shape, WireShape::FixedCell);
     assert_eq!(cfg.normalize_target_size, 1400);
-    // Must not equal any other variant
-    assert_ne!(cfg.padding_strategy, PaddingStrategy::Fixed);
-    assert_ne!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
-    assert_ne!(cfg.padding_strategy, PaddingStrategy::Adaptive);
-    assert_ne!(cfg.padding_strategy, PaddingStrategy::Random);
+    assert_ne!(cfg.wire_shape, WireShape::PersonaTrace);
 }
 
 // --- RateChoker Tests ---

@@ -652,6 +652,13 @@ pub static FEC_WRAPPER_DROPS: Counter = Counter::new();
 /// In-QUIC repair symbols dropped because their wire epoch predates the
 /// newest epoch already admitted on the connection (TODO-1046).
 pub static FEC_SYMBOL_EPOCH_REJECTS: Counter = Counter::new();
+/// Repair datagrams dropped because the shared wire byte budget was
+/// exhausted at production time - repairs are never sent over the cap
+/// (TODO-1052). Losing mimicry under heavy loss is recorded, not hidden.
+pub static FEC_REPAIRS_BUDGET_DROPPED: Counter = Counter::new();
+/// Cover PING ticks skipped because the shared wire byte budget was
+/// exhausted (TODO-1052).
+pub static COVER_PING_BUDGET_SKIPPED: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

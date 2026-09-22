@@ -92,12 +92,14 @@ pub(crate) use qf_stealth::parse_fingerprint_profile_slot;
 pub(crate) use qf_stealth::CdnProvider;
 #[cfg(test)]
 pub(crate) use qf_stealth::IntelligentStealthInputs;
+pub use qf_stealth::WireShape;
 pub use qf_stealth::{
-    ActiveProbeDetector, ChaffGenerator, FecMode, Http3Masquerade, PaddingStrategy,
-    ProbeResponseMode, RotationMode, StealthConfig, StealthMode, TlsClientHelloProfileCatalog,
-    TlsCoverCipherSuite, TrafficAnalysisPhase, TrafficAnalysisScheduler, CHAFF_PADDING_FRAME_BYTE,
+    ActiveProbeDetector, ChaffGenerator, FecMode, Http3Masquerade, ProbeResponseMode, RotationMode,
+    StealthConfig, StealthMode, TlsClientHelloProfileCatalog, TlsCoverCipherSuite,
+    TrafficAnalysisPhase, TrafficAnalysisScheduler, CHAFF_PADDING_FRAME_BYTE,
 };
 pub use qf_stealth::{BrowserProfile, FingerprintProfile, OsProfile};
+pub(crate) use qf_stealth::{BudgetLedger, WireBudget};
 pub(crate) use qf_stealth::{
     CoverTargetRotator, CoverTrafficScheduler, EscalationState, FlowShaper, StealthPacketClass,
 };

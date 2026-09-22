@@ -1,7 +1,7 @@
 #![cfg(feature = "rust-tests")]
 
 use quicfuscate::compress;
-use quicfuscate::stealth::{BrowserProfile, OsProfile, PaddingStrategy, StealthConfig};
+use quicfuscate::stealth::{BrowserProfile, OsProfile, StealthConfig, WireShape};
 use std::sync::Mutex;
 
 // These tests mutate one process-global compression policy. Keep the capture,
@@ -70,7 +70,7 @@ deny = ["image/*"]
     assert!(cfg.enable_traffic_padding);
     assert!(cfg.enable_timing_obfuscation);
     assert!(!cfg.enable_protocol_mimicry);
-    assert_eq!(cfg.padding_strategy, PaddingStrategy::Fixed);
+    assert_eq!(cfg.wire_shape, WireShape::FixedCell);
     assert_eq!(cfg.max_padding_size, 512);
 
     let policy = compress::global_policy();
@@ -96,26 +96,26 @@ unknown_key = 123
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: PacketNormalize padding strategy
+// Phase 2: FixedCell wire shape (legacy PacketNormalize spelling)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn packet_normalize_variant_serializes_and_deserializes() {
+fn packet_normalize_spelling_maps_to_fixed_cell() {
     let toml = r#"
 [stealth]
 padding_strategy = "PacketNormalize"
 normalize_target_size = 1200
 "#;
     let cfg = StealthConfig::from_toml(toml).expect("parse PacketNormalize");
-    assert_eq!(cfg.padding_strategy, PaddingStrategy::PacketNormalize);
+    assert_eq!(cfg.wire_shape, WireShape::FixedCell);
     assert_eq!(cfg.normalize_target_size, 1200);
 }
 
 #[test]
-fn anti_dpi_preset_uses_packet_normalize_with_target() {
+fn anti_dpi_preset_uses_persona_trace_with_target() {
     let cfg = StealthConfig::stealth_max();
-    assert_eq!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
-    // Anti-DPI carries a normalize_target for operators who switch to PacketNormalize
+    assert_eq!(cfg.wire_shape, WireShape::PersonaTrace);
+    // Anti-DPI carries a normalize_target for operators who switch to FixedCell
     assert_eq!(cfg.normalize_target_size, 1200);
 }
 

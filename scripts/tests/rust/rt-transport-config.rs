@@ -113,10 +113,12 @@ fn early_data_with_strike_register() {
 #[test]
 fn stealth_padding_strategies_all_configurable() {
     let mut cfg = Config::new_with_version(PROTOCOL_VERSION).expect("config");
-    // Strategy codes: 1=Random, 2=Fixed, 3=Adaptive, 4=BrowserMimic, 5=PacketNormalize
-    for strategy in [1u8, 2, 3, 4, 5] {
+    // Strategy codes: 1=Random, 2=Fixed, 3=Adaptive, 4=BrowserMimic,
+    // 6=PersonaTrace, 7=FixedCell (TODO-1052: the wire ledger owns shape;
+    // legacy codes still parse for compatibility).
+    for strategy in [1u8, 2, 3, 4, 6, 7] {
         cfg.set_stealth_padding(true, strategy, 256);
-        if strategy == 5 {
+        if strategy == 7 {
             cfg.set_stealth_normalize_target(1200);
         }
     }

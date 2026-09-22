@@ -485,7 +485,7 @@
 - Detail: `docs/todo/todo-1051-datapath-speed-not-cipher.md`
 
 ### TODO-1052 - One wire byte budget for padding, cover, and FEC
-- OPEN. One cap. Repairs spend first under loss. `stealth` uses a persona trace. Random padding goes away. `off` and `performance` spend nothing.
+- DONE. One `BudgetLedger` per connection pays repairs, trace padding, and cover/chaff from the same counters; `stealth`/`stealth_max`/`dynamic` run `persona-trace` on a real Chrome-154 capture fixture, `manual` may pick `fixed-cell`, `off`/`performance` own no ledger and emit zero stealth bytes. Denied spends drop with telemetry, never over the cap.
 - Detail: `docs/todo/todo-1052-one-wire-byte-budget.md`
 
 ### TODO-1053 - One send clock under the PTO threshold

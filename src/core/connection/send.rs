@@ -218,10 +218,24 @@ impl QuicFuscateConnection {
         let len = wire::write_repair_ack(epoch, &entries[..count], &mut block)
             .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
         if self.fec_framing() == crate::engine::FecFraming::QuicFrame {
-            self.conn
-                .dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &block[..len])
-                .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+            // TODO-1052: repair-class spend gates before the datagram is
+            // queued. A denied report stays unsent - it is best-effort by
+            // design, and the next recovery burst covers the loss.
+            if self.conn.try_spend_wire_repair(len as u64) {
+                self.conn
+                    .dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &block[..len])
+                    .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+            } else {
+                crate::telemetry::FEC_REPAIRS_BUDGET_DROPPED.inc();
+                return Ok(());
+            }
             crate::telemetry::FEC_REPAIR_ACK_ENTRIES_SENT.inc_by(count as u64);
+            return Ok(());
+        }
+        // TODO-1052: same ledger gate on the raw-wire path — the report
+        // debits `len` wire bytes (its exact `to_raw` size) at production.
+        if !self.conn.try_spend_wire_repair(len as u64) {
+            crate::telemetry::FEC_REPAIRS_BUDGET_DROPPED.inc();
             return Ok(());
         }
         let send_pool = block.pool();
@@ -255,8 +269,19 @@ impl QuicFuscateConnection {
     }
 
     /// Queue one ack-eliciting transport keepalive for the next send poll.
+    ///
+    /// On the wire a keepalive PING is indistinguishable from a cover PING,
+    /// so a connection that owns a wire ledger pays for it out of the same
+    /// cover budget — an unbudgeted periodic 48-byte ping would be a
+    /// detectable beacon that defeats the whole point of the ledger
+    /// (TODO-1052). Ledgerless connections (`off`/`performance`) send it
+    /// unconditionally.
     pub fn queue_keepalive_ping(&mut self) {
-        self.conn.queue_cover_ping();
+        if self.conn.try_spend_wire_cover(48) {
+            self.conn.queue_cover_ping();
+        } else {
+            crate::telemetry::COVER_PING_BUDGET_SKIPPED.inc();
+        }
     }
 
     /// Atomically change the operator-owned FEC policy for this live connection.
@@ -561,11 +586,16 @@ impl QuicFuscateConnection {
             return Ok((len, send_info));
         }
 
-        // Cover PING: inject post-handshake keepalive if the interval has elapsed.
-        // The PING lands in pending_control and is flushed by flush_pending_control_frames()
-        // inside conn.send(), requiring no extra round-trip through this function.
+        // Cover PING: inject post-handshake keepalive if the interval has
+        // elapsed AND the shared wire ledger can pay for the datagram
+        // (~48 wire bytes: short header + PING + AEAD tag). Cover is the
+        // last spender: a denied tick is skipped, never sent over the cap.
         if established && !path_control_pending && self.stealth_manager.should_send_cover_ping() {
-            self.conn.queue_cover_ping();
+            if self.conn.try_spend_wire_cover(48) {
+                self.conn.queue_cover_ping();
+            } else {
+                crate::telemetry::COVER_PING_BUDGET_SKIPPED.inc();
+            }
         }
 
         let wire_profile = if fec_wire_ready { self.prepare_fec_wire_profile()? } else { None };
@@ -1080,6 +1110,15 @@ impl QuicFuscateConnection {
                         crate::error::ConnectionError::Transport(error.to_string())
                     })?;
                     body.truncate(written);
+                    // TODO-1052: the shared wire ledger pays for the repair
+                    // datagram before it is queued. A denied repair is
+                    // dropped here - fewer repairs inside the cap is the
+                    // specified behavior; the loss is recorded, not
+                    // papered over with unbudgeted bytes.
+                    if !self.conn.try_spend_wire_repair(body.len() as u64) {
+                        crate::telemetry::FEC_REPAIRS_BUDGET_DROPPED.inc();
+                        continue;
+                    }
                     self.conn.dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &body).map_err(
                         |error| crate::error::ConnectionError::Transport(error.to_string()),
                     )?;
@@ -1112,6 +1151,18 @@ impl QuicFuscateConnection {
                         sliding: !is_systematic && profile.codec == wire::WireCodec::StreamingGf8,
                     })
                 };
+                // TODO-1052: raw-mode repairs are repair-class spend too.
+                // The debit happens at production — before any later
+                // padding or cover question sees the ledger — using the
+                // exact serialized size (HEADER_LEN + payload).
+                if !is_systematic {
+                    let wire_len =
+                        wire::HEADER_LEN + packet.payload_slice().map(|s| s.len()).unwrap_or(0);
+                    if !self.conn.try_spend_wire_repair(wire_len as u64) {
+                        crate::telemetry::FEC_REPAIRS_BUDGET_DROPPED.inc();
+                        continue;
+                    }
+                }
                 self.outgoing_fec_packets.push_back(OutgoingFecPacket {
                     wire_meta,
                     packet,

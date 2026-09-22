@@ -309,6 +309,7 @@ impl Connection {
             admitted_batch_frames: Vec::new(),
             admitted_batch_held_streams: Vec::new(),
             pad_short_header_to: None,
+            wire_ledger: None,
             #[cfg(test)]
             admitted_seal_batch_calls: 0,
             #[cfg(test)]

@@ -2682,7 +2682,7 @@ The audit remains open. These reconciliations document current evidence and owne
 
 ## Stealth Persona Enum Contracts
 
-- `crates/qf-stealth/src/config.rs` is the canonical owner for the root-independent `PaddingStrategy`, `StealthMode`, and `RotationMode` enums, including serde aliases and existing configuration spellings. `src/stealth/parts/config.rs` removes the duplicate definitions, while `src/stealth/mod.rs` preserves the historical root re-export paths.
+- `crates/qf-stealth/src/config.rs` is the canonical owner for the root-independent `WireShape` (replacing `PaddingStrategy` — legacy strategy spellings map onto `persona-trace`/`fixed-cell`), `StealthMode`, and `RotationMode` enums, including serde aliases and existing configuration spellings. `src/stealth/parts/config.rs` removes the duplicate definitions, while `src/stealth/mod.rs` preserves the historical root re-export paths.
 - The child has no transport, connection, FEC, engine, implementation, frontend, or Tauri dependency. `FecMode` remains root-local because its adaptive FEC behavior is coupled to the root FEC controller.
 - qf-stealth all-target/all-feature checking, strict Clippy, and tests pass `22/22`; root all-target `rust-tests` checking, strict `rust-tests` Clippy, and the root Stealth test filter pass `230/230`. Seam evidence is `scripts/out/audits/workspace-seams-20260809T-stealth-enums/workspace-seams.json`: `35` packages, `306` Rust files, `205,385` source lines, `129` module edges, `94` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. Target usage is `7,538,108 KiB` with `11,221,844 KiB` free, below the cleanup threshold. Frontend/Tauri paths remain untouched and UI projection is deferred.
 

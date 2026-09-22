@@ -287,8 +287,14 @@ pub struct StealthSection {
     pub enable_doh: bool,
     /// DoH provider URL
     pub doh_provider: String,
-    /// Padding strategy
+    /// Padding strategy / wire shape (legacy spellings collapse onto the
+    /// TODO-1052 shapes: `persona-trace` or `fixed-cell`).
     pub padding_strategy: String,
+    /// Shared wire byte budget: stealth bytes (repairs + padding + cover)
+    /// per second. `None` keeps the mode default.
+    pub wire_cap_bytes_per_sec: Option<u64>,
+    /// Shared wire byte budget: stealth bytes in one drain burst.
+    pub wire_cap_bytes_per_burst: Option<u64>,
     /// Maximum padding size
     pub max_padding_size: usize,
     /// Deprecated alias for `reality_cover_targets` (TODO-1048): entries are
@@ -340,7 +346,9 @@ impl Default for StealthSection {
             enable_protocol_mimicry: true,
             enable_doh: true,
             doh_provider: "https://cloudflare-dns.com/dns-query".to_string(),
-            padding_strategy: "adaptive".to_string(),
+            padding_strategy: "persona-trace".to_string(),
+            wire_cap_bytes_per_sec: None,
+            wire_cap_bytes_per_burst: None,
             normalize_target_size: 0,
             max_padding_size: 256,
             fronting_domains: Vec::new(),
@@ -354,16 +362,20 @@ impl Default for StealthSection {
 }
 
 impl StealthSection {
-    fn parse_padding_strategy(value: &str) -> Option<qf_stealth::PaddingStrategy> {
+    /// Legacy and current padding-strategy spellings collapse onto the
+    /// TODO-1052 wire shapes. `random`/`adaptive`/`browser*` map to
+    /// `PersonaTrace`; `fixed`/`constant`/`*normalize*` map to `FixedCell`.
+    /// In `off`/`performance` modes no ledger is installed, so a mapped
+    /// shape there is inert.
+    fn parse_wire_shape(value: &str) -> Option<qf_stealth::WireShape> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "random" | "1" => Some(qf_stealth::PaddingStrategy::Random),
-            "fixed" | "constant" | "2" => Some(qf_stealth::PaddingStrategy::Fixed),
-            "adaptive" | "3" => Some(qf_stealth::PaddingStrategy::Adaptive),
-            "browser" | "browser_mimic" | "browser-mimic" | "browsermimic" | "mimic" | "4" => {
-                Some(qf_stealth::PaddingStrategy::BrowserMimic)
+            "random" | "1" | "adaptive" | "3" | "browser" | "browser_mimic" | "browser-mimic"
+            | "browsermimic" | "mimic" | "4" | "persona-trace" | "persona_trace" | "trace" => {
+                Some(qf_stealth::WireShape::PersonaTrace)
             }
-            "normalize" | "packet_normalize" | "packet-normalize" | "packetnormalize" | "5" => {
-                Some(qf_stealth::PaddingStrategy::PacketNormalize)
+            "fixed" | "constant" | "2" | "normalize" | "packet_normalize" | "packet-normalize"
+            | "packetnormalize" | "5" | "fixed-cell" | "fixed_cell" | "cell" => {
+                Some(qf_stealth::WireShape::FixedCell)
             }
             _ => None,
         }
@@ -431,18 +443,23 @@ impl StealthSection {
                     self.initial_browser, self.initial_os
                 ))
             })?;
-        runtime.padding_strategy = Self::parse_padding_strategy(&self.padding_strategy)
-            .ok_or_else(|| {
-                ConfigError::Validation(format!(
-                    "stealth.padding_strategy has unsupported value '{}'",
-                    self.padding_strategy
-                ))
-            })?;
+        runtime.wire_shape = Self::parse_wire_shape(&self.padding_strategy).ok_or_else(|| {
+            ConfigError::Validation(format!(
+                "stealth.padding_strategy has unsupported value '{}'",
+                self.padding_strategy
+            ))
+        })?;
+        if let Some(v) = self.wire_cap_bytes_per_sec {
+            runtime.wire_cap_bytes_per_sec = v;
+        }
+        if let Some(v) = self.wire_cap_bytes_per_burst {
+            runtime.wire_cap_bytes_per_burst = v;
+        }
         runtime.normalize_target_size = self.normalize_target_size;
-        if runtime.padding_strategy == qf_stealth::PaddingStrategy::PacketNormalize {
+        if runtime.wire_shape == qf_stealth::WireShape::FixedCell {
             if self.normalize_target_size == 0 {
                 return Err(ConfigError::Validation(
-                    "stealth.padding_strategy=normalize requires stealth.normalize_target_size"
+                    "stealth.padding_strategy=fixed-cell requires stealth.normalize_target_size"
                         .into(),
                 ));
             }
@@ -455,10 +472,10 @@ impl StealthSection {
                 )));
             }
         } else if self.normalize_target_size != 0 {
-            // A target with any other strategy is a contradiction: it would never be applied, and
+            // A target with any other shape is a contradiction: it would never be applied, and
             // silently ignoring it is how a configuration comes to claim stealth it does not have.
             return Err(ConfigError::Validation(format!(
-                "stealth.normalize_target_size is only valid with padding_strategy=normalize, but the strategy is '{}'",
+                "stealth.normalize_target_size is only valid with padding_strategy=fixed-cell, but the shape is '{}'",
                 self.padding_strategy
             )));
         }
@@ -713,9 +730,9 @@ suppress_icmp_unreachable = true
             .to_runtime_config(&FingerprintRotationConfig::default())
             .expect("runtime stealth config");
         assert_eq!(
-            runtime.padding_strategy,
-            qf_stealth::PaddingStrategy::PacketNormalize,
-            "the selected strategy must survive conversion"
+            runtime.wire_shape,
+            qf_stealth::WireShape::FixedCell,
+            "the legacy normalize spelling must map to the fixed-cell shape"
         );
         assert_eq!(
             runtime.normalize_target_size, 1350,
@@ -777,7 +794,7 @@ suppress_icmp_unreachable = true
         .err()
         .expect("a target without the normalize strategy must fail");
         assert!(
-            error.to_string().contains("only valid with padding_strategy=normalize"),
+            error.to_string().contains("only valid with padding_strategy=fixed-cell"),
             "silently ignoring the target is how a configuration claims stealth it lacks: {error}"
         );
 

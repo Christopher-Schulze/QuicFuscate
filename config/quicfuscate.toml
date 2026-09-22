@@ -217,9 +217,17 @@ enable_doh = true
 # - "https://dns.google/dns-query"
 doh_provider = "https://cloudflare-dns.com/dns-query"
 
-# Padding configuration
-# Strategy options: "random", "fixed", "adaptive", "browser_mimic"
-padding_strategy = "adaptive"
+# Wire shape configuration (TODO-1052): one shared byte budget pays for
+# padding, cover PINGs, chaff, and FEC repairs. Shape options:
+# "persona-trace" (replay the captured browser length classes) or
+# "fixed-cell" (pad to normalize_target_size). Legacy spellings
+# ("random", "fixed", "adaptive", "browser_mimic", "normalize",
+# "packet_normalize") still parse and map onto these two shapes.
+padding_strategy = "persona-trace"
+# Shared wire budget: per-second cap and per-burst cap in bytes.
+# 0 means "not configured" and inherits the stealth default (65536/16384).
+# wire_cap_bytes_per_sec = 65536
+# wire_cap_bytes_per_burst = 16384
 max_padding_size = 256  # bytes (256 for auto, 2048 for max)
 
 # Custom cover targets are configured via reality_cover_targets above.

@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_padding_random_bounds() {
-        let conn = make_conn_with_padding(true, 1, 64);
+        let mut conn = make_conn_with_padding(true, 1, 64);
         for _ in 0..16 {
             let v = conn.compute_stealth_padding(100, 1000);
             assert!(v <= 64);
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_padding_fixed_exact_max() {
-        let conn = make_conn_with_padding(true, 2, 128);
+        let mut conn = make_conn_with_padding(true, 2, 128);
         let v = conn.compute_stealth_padding(200, 1000);
         assert_eq!(v, 128);
         // Budget caps
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_padding_adaptive_to_next_64() {
-        let conn = make_conn_with_padding(true, 3, 64);
+        let mut conn = make_conn_with_padding(true, 3, 64);
         let v = conn.compute_stealth_padding(48, 1000);
         assert_eq!(v, 16); // 48 -> pad 16 to reach 64 boundary
                            // already aligned => 0
@@ -170,7 +170,7 @@ mod tests {
         let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let scid = [0u8; 8];
-        let conn = packet::connect(None, &scid, local, peer, &mut cfg).unwrap();
+        let mut conn = packet::connect(None, &scid, local, peer, &mut cfg).unwrap();
 
         assert_eq!(conn.compute_stealth_padding(44, 1000), 16);
         assert_eq!(conn.compute_stealth_padding(60, 1000), 0);
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_padding_browser_mimic_quarter_cap() {
-        let conn = make_conn_with_padding(true, 4, 100);
+        let mut conn = make_conn_with_padding(true, 4, 100);
         for _ in 0..16 {
             let v = conn.compute_stealth_padding(500, 1000);
             assert!(v <= 25);
@@ -193,7 +193,7 @@ mod tests {
         // FullPadding mode must pad every packet to the full budget, ignoring
         // stealth_padding_rate (set to 0 here, which would skip all padding in
         // the legacy Off path).
-        let conn = make_conn_with_defense(config::TrafficAnalysisDefense::FullPadding);
+        let mut conn = make_conn_with_defense(config::TrafficAnalysisDefense::FullPadding);
         for _ in 0..32 {
             // Various payload sizes - every call must return the full budget.
             let v = conn.compute_stealth_padding(1, 1000);
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_constant_rate_pads_all_packets_regardless_of_rate() {
-        let conn = make_conn_with_defense(config::TrafficAnalysisDefense::ConstantRate);
+        let mut conn = make_conn_with_defense(config::TrafficAnalysisDefense::ConstantRate);
         for _ in 0..16 {
             let v = conn.compute_stealth_padding(100, 512);
             assert_eq!(v, 512, "ConstantRate must pad to full budget at the compute layer");
@@ -217,10 +217,81 @@ mod tests {
     #[test]
     fn test_off_mode_preserves_probabilistic_padding() {
         // Off mode with rate 0 should never pad (legacy behavior preserved).
-        let conn = make_conn_with_defense(config::TrafficAnalysisDefense::Off);
+        let mut conn = make_conn_with_defense(config::TrafficAnalysisDefense::Off);
         for _ in 0..32 {
             let v = conn.compute_stealth_padding(100, 1000);
             assert_eq!(v, 0, "Off mode with rate 0 must not pad");
+        }
+    }
+
+    // --- Wire byte budget ledger (TODO-1052) ---
+
+    fn ledger_conn(shape: qf_stealth::WireShape, cap_sec: u64, cap_burst: u64) -> Connection {
+        let mut conn = make_conn_with_padding(true, 1, 64);
+        let budget = qf_stealth::WireBudget {
+            cap_bytes_per_sec: cap_sec,
+            cap_bytes_per_burst: cap_burst,
+            shape,
+        };
+        let trace = match shape {
+            qf_stealth::WireShape::PersonaTrace => Some(qf_stealth::wire_budget::persona_trace(
+                qf_stealth::transport_params::EngineFamily::Chromium,
+            )),
+            qf_stealth::WireShape::FixedCell => None,
+        };
+        conn.set_wire_ledger(Some(qf_stealth::BudgetLedger::new(
+            budget,
+            trace,
+            1200,
+            std::time::Instant::now(),
+        )));
+        conn
+    }
+
+    #[test]
+    fn ledger_is_the_only_padding_authority_when_installed() {
+        // With a ledger the legacy RNG strategy (code 1, max 64) is dead:
+        // the padder must follow the persona trace classes, which means
+        // pads can exceed the strategy's 64-byte ceiling.
+        let mut conn = ledger_conn(qf_stealth::WireShape::PersonaTrace, 1 << 20, 1 << 20);
+        // The smallest trace class above the payload is the pad target —
+        // for Chromium that is the request class, far past the dead
+        // strategy's 64-byte ceiling.
+        let next_class = qf_stealth::wire_budget::persona_trace(
+            qf_stealth::transport_params::EngineFamily::Chromium,
+        )
+        .length_classes()
+        .iter()
+        .copied()
+        .find(|class| *class as usize > 100)
+        .expect("fixture has a class above 100") as usize;
+        let v = conn.compute_stealth_padding(100, 1200);
+        assert!(v > 64, "trace-shaped pad must ignore the strategy cap: {v}");
+        assert_eq!(v, next_class - 100, "pad must land exactly on the next class");
+    }
+
+    #[test]
+    fn ledger_gates_deny_repairs_cover_and_pad_once_spent() {
+        // Tiny budget: 100/sec, 60 burst. Repairs are the first spender.
+        let mut conn = ledger_conn(qf_stealth::WireShape::FixedCell, 100, 60);
+        assert!(conn.try_spend_wire_repair(40));
+        // 60 burst left minus 40 spent = 20.
+        assert!(conn.try_spend_wire_cover(20));
+        // Burst is exhausted: every spender class is denied.
+        assert!(!conn.try_spend_wire_repair(1));
+        assert!(!conn.try_spend_wire_cover(1));
+        assert!(!conn.try_spend_wire_pad(1));
+    }
+
+    #[test]
+    fn ledgerless_connection_never_blocks_stealth_spenders() {
+        // `off`/`performance` own no ledger: the gates are pass-through so
+        // functional traffic is never gated by a budget that does not exist.
+        let mut conn = make_conn_with_padding(false, 0, 0);
+        for _ in 0..8 {
+            assert!(conn.try_spend_wire_repair(1 << 20));
+            assert!(conn.try_spend_wire_cover(1 << 20));
+            assert!(conn.try_spend_wire_pad(1 << 20));
         }
     }
 

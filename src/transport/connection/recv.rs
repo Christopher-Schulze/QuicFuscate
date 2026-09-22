@@ -1245,7 +1245,11 @@ impl Connection {
             let avail = out.len().saturating_sub(off + tag_reserve);
             if target > off + tag_reserve {
                 let pad_len = (target - off - tag_reserve).min(avail);
-                if pad_len > 0 {
+                // TODO-1052: the image-matching pad rides the shared wire
+                // ledger like every other stealth byte. Under an exhausted
+                // ledger the repair datagram goes out unpadded rather than
+                // spending bytes the budget never granted.
+                if pad_len > 0 && self.try_spend_wire_pad(pad_len as u64) {
                     off += frames::write_padding(pad_len, &mut out[off..])?;
                 }
             }
@@ -1276,20 +1280,6 @@ impl Connection {
         if self.config.stealth_padding_enabled {
             let tag_reserve = self.tag_reserve_1rtt();
             let avail = out.len().saturating_sub(off + tag_reserve);
-
-            // Strategy 5 = PacketNormalize: pad all 1-RTT packets to a fixed total size.
-            // target covers header + payload + tag; compute payload padding needed.
-            if self.config.stealth_padding_strategy == 5 {
-                let target = self.config.stealth_normalize_target_size;
-                if target > 0 && target > off + tag_reserve {
-                    let needed = target - off - tag_reserve;
-                    let pad_len = needed.min(avail);
-                    if pad_len > 0 {
-                        off += frames::write_padding(pad_len, &mut out[off..])?;
-                    }
-                }
-                return Ok(off);
-            }
 
             let ad_len = pn_off + pn_len;
             let pt_len_now = off.saturating_sub(ad_len);

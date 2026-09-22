@@ -93,7 +93,7 @@ memory_pool_alignment = 4096
         .expect("valid engine projection");
         assert_eq!(config.stealth.initial_browser, qf_stealth::BrowserProfile::Firefox);
         assert_eq!(config.stealth.initial_os, qf_stealth::OsProfile::Linux);
-        assert_eq!(config.stealth.padding_strategy, qf_stealth::PaddingStrategy::BrowserMimic);
+        assert_eq!(config.stealth.wire_shape, qf_stealth::WireShape::PersonaTrace);
         assert_eq!(config.optimize.block_size, 65_536);
         assert_eq!(config.optimize.pool_capacity, 16);
     }

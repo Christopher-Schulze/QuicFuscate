@@ -1,0 +1,280 @@
+# TODO-1052 persona wire trace fixture.
+#
+# One versioned source for the (direction, gap, length) send sequence the
+# PersonaTrace wire budget replays. `dir` is the datagram direction seen on
+# the wire (`c` = client -> server, `s` = server -> client), `gap_ms` is the
+# milliseconds since the previous datagram in either direction, and `len` is
+# the UDP payload length in bytes.
+#
+# Provenance:
+#   chromium.sequence — verified wire capture of Chrome 154.0.8037.44
+#     (2026-09-22): real bidirectional HTTP/3 exchange against aioquic
+#     1.3.0 on 127.0.0.1, bridged through a pcap relay
+#     (scripts/capture/quic_initial_listener.py-style). The capture holds
+#     290 datagrams; the first 40 below cover the classifier window
+#     (handshake + request + the start of the ACK-clocked bulk phase).
+#   chromium.quiet — the same capture shows the client going silent for
+#     ~5.2 s after the transfer completes, then sending one 59-byte
+#     CONNECTION_CLOSE. Browsers send no periodic PING; a stealth
+#     connection that emits interval keepalives is itself the fingerprint.
+#     Chrome's negotiated max_idle_timeout is 30 s, so quiet stretches to
+#     the idle horizon.
+#
+# The quiet phase is real: browsers send nothing while idle.
+
+snapshot = "2026-09-22"
+
+[chromium]
+provenance = "wire-capture"
+captured_at = "2026-09-22"
+
+# Verified first-40-datagram sequence (covers the ~30-packet classifier
+# window): three padded Initials with retransmit, server Initial flight,
+# client Handshake Finished, the 525-byte h3 request, then the ACK-clocked
+# bulk download where the client emits 39-42-byte ACKs.
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0
+len = 1258
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 2.3
+len = 1258
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 47.5
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 5.0
+len = 1258
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 29.3
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 2.4
+len = 296
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 1.6
+len = 1258
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 3.3
+len = 172
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 5.8
+len = 62
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.2
+len = 36
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.1
+len = 39
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 78.2
+len = 525
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 5.8
+len = 33
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 1.4
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.4
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.0
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.0
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.6
+len = 39
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 2.7
+len = 39
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.0
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.4
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.0
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.4
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.0
+len = 39
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.0
+len = 39
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.5
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 3.5
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.2
+len = 39
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.3
+len = 39
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.1
+len = 39
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+[[chromium.sequence]]
+dir = "c"
+gap_ms = 0.0
+len = 39
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.0
+len = 1208
+[[chromium.sequence]]
+dir = "s"
+gap_ms = 0.1
+len = 1208
+
+# Client length classes used when the budget has bytes to spend and real
+# traffic exists to shape. These classes are the observed client sizes in
+# the capture; padding never invents sizes outside this set.
+[chromium.length_classes]
+ack = 40
+request = 525
+initial = 1258
+
+# Quiet phase: no sends at all. The capture shows ~5.2 s of silence after
+# the last data ACK before the client CONNECTION_CLOSE; with the negotiated
+# 30 s idle timeout the quiet floor extends to 10 s before the connection
+# may legitimately be considered closing down.
+[chromium.quiet]
+quiet_ms = 10000
+
+[firefox]
+provenance = "source-constants"
+captured_at = "2026-09-22"
+# neqo pads Initial datagrams to the QUIC >=1200 minimum and ACK-clocks
+# inbound bulk exactly like every RFC-9000 stack; until a wire capture
+# exists the client classes mirror the verified Chromium classes, marked
+# as source-derived.
+[[firefox.sequence]]
+dir = "c"
+gap_ms = 0
+len = 1252
+[[firefox.sequence]]
+dir = "c"
+gap_ms = 300.0
+len = 1252
+[[firefox.sequence]]
+dir = "c"
+gap_ms = 600.0
+len = 1252
+[[firefox.sequence]]
+dir = "s"
+gap_ms = 1.0
+len = 1208
+[[firefox.sequence]]
+dir = "c"
+gap_ms = 1.0
+len = 40
+[firefox.length_classes]
+ack = 40
+request = 525
+initial = 1252
+[firefox.quiet]
+quiet_ms = 10000
+
+[safari]
+provenance = "unverified-catalog"
+captured_at = "2026-09-22"
+# No WebKit capture or documented source exists. Safari reuses the
+# verified Chromium classes until a real capture lands; the freshness
+# audit flags this section as unverified.
+[[safari.sequence]]
+dir = "c"
+gap_ms = 0
+len = 1258
+[[safari.sequence]]
+dir = "c"
+gap_ms = 2.3
+len = 1258
+[[safari.sequence]]
+dir = "s"
+gap_ms = 47.5
+len = 1208
+[[safari.sequence]]
+dir = "c"
+gap_ms = 5.0
+len = 1258
+[[safari.sequence]]
+dir = "s"
+gap_ms = 29.3
+len = 1208
+[[safari.sequence]]
+dir = "c"
+gap_ms = 1.0
+len = 40
+[safari.length_classes]
+ack = 40
+request = 525
+initial = 1258
+[safari.quiet]
+quiet_ms = 10000

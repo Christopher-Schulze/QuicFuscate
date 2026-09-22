@@ -1069,7 +1069,7 @@ mod tests {
         assert_eq!(sc.initial_os, crate::stealth::OsProfile::Linux);
         assert!(!sc.enable_network_fingerprint_normalization);
         assert!(sc.suppress_icmp_unreachable);
-        assert_eq!(sc.padding_strategy, crate::stealth::PaddingStrategy::BrowserMimic);
+        assert_eq!(sc.wire_shape, qf_stealth::WireShape::PersonaTrace);
         assert!(sc.enable_http3_masquerading);
         assert!(sc.use_qpack_headers);
         assert!(sc.use_tls_cover);

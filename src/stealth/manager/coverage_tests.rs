@@ -277,7 +277,7 @@ mod stealth_coverage_tests {
         assert!(cfg.enable_http3_masquerading);
         assert!(cfg.use_tls_cover);
         assert!(cfg.enable_cover_ping);
-        assert_eq!(cfg.padding_strategy, PaddingStrategy::Adaptive);
+        assert_eq!(cfg.wire_shape, WireShape::PersonaTrace);
         assert_eq!(cfg.cover_ping_interval_ms, 30_000);
     }
 
@@ -473,7 +473,7 @@ mod stealth_coverage_tests {
 
         config.apply_env_overrides_with_snapshot(&environment);
 
-        assert_eq!(config.padding_strategy, PaddingStrategy::BrowserMimic);
+        assert_eq!(config.wire_shape, WireShape::PersonaTrace);
         assert!(config.enable_traffic_padding);
         assert_eq!(config.server_push_intensity, default_intensity);
     }
@@ -1055,40 +1055,34 @@ mod stealth_coverage_tests {
     }
 
     // =========================================================================
-    // 17. PaddingStrategy coverage
+    // 17. WireShape coverage (TODO-1052)
     // =========================================================================
 
     #[test]
-    fn padding_strategy_env_parsing() {
+    fn wire_shape_env_parsing_collapses_legacy_spellings() {
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_STEALTH_PADDING_STRATEGY",
+            "browser-mimic",
+        )]);
         let cfg = StealthConfig::stealth();
-        // Test the internal transport_padding_strategy_override path by checking the parser
-        let parse = |s: &str| -> Option<PaddingStrategy> {
-            match s.trim().to_ascii_lowercase().as_str() {
-                "1" | "random" => Some(PaddingStrategy::Random),
-                "2" | "fixed" => Some(PaddingStrategy::Fixed),
-                "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
-                "4" | "browser" | "browser-mimic" | "browsermimic" => {
-                    Some(PaddingStrategy::BrowserMimic)
-                }
-                "5" | "normalize" | "packet-normalize" | "packetnormalize" => {
-                    Some(PaddingStrategy::PacketNormalize)
-                }
-                _ => None,
-            }
-        };
-        assert_eq!(parse("random"), Some(PaddingStrategy::Random));
-        assert_eq!(parse("2"), Some(PaddingStrategy::Fixed));
-        assert_eq!(parse("adaptive"), Some(PaddingStrategy::Adaptive));
-        assert_eq!(parse("browser-mimic"), Some(PaddingStrategy::BrowserMimic));
-        assert_eq!(parse("normalize"), Some(PaddingStrategy::PacketNormalize));
-        assert_eq!(parse("unknown"), None);
-        let _ = cfg; // prevent unused warning
+        assert_eq!(cfg.transport_wire_shape_override(&environment), Some(WireShape::PersonaTrace));
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_STEALTH_PADDING_STRATEGY",
+            "normalize",
+        )]);
+        assert_eq!(cfg.transport_wire_shape_override(&environment), Some(WireShape::FixedCell));
+        let environment = crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_STEALTH_PADDING_STRATEGY",
+            "bogus",
+        )]);
+        assert_eq!(cfg.transport_wire_shape_override(&environment), None);
     }
 
     #[test]
-    fn anti_dpi_uses_packet_normalize() {
+    fn anti_dpi_keeps_normalize_target_as_fixed_cell_size() {
         let cfg = StealthConfig::stealth_max();
         assert_eq!(cfg.normalize_target_size, 1200);
-        assert_eq!(cfg.padding_strategy, PaddingStrategy::BrowserMimic);
+        assert_eq!(cfg.wire_shape, WireShape::PersonaTrace);
+        assert!(cfg.wire_cap_bytes_per_sec > 0);
     }
 }

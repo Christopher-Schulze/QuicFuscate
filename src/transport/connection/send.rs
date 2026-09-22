@@ -524,17 +524,26 @@ impl Connection {
                 .map(|scheduler| scheduler.chaff_size_bytes())
                 .unwrap_or(0);
             if chaff_size > 0 {
-                use crate::transport::Frame;
-                let ping = Frame::Ping { mtu_probe: None };
-                off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
-                wrote_ack_eliciting = true;
-                emitted_chaff = true;
-                packet_contents.control = true;
-                let avail = out.len().saturating_sub(off + tag_reserve);
-                let needed = (chaff_size as usize).saturating_sub(off + tag_reserve);
+                // The PING byte lands before the pad: `needed` must leave
+                // room for it or the sealed packet outgrows chaff_size.
+                let avail = out.len().saturating_sub(off + 1 + tag_reserve);
+                let needed = (chaff_size as usize).saturating_sub(off + 1 + tag_reserve);
                 let pad_len = needed.min(avail);
-                if pad_len > 0 {
-                    off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
+                // TODO-1052: a chaff packet is cover-class spend — the
+                // ledger pays the whole wire image (header + PING + pad +
+                // tag) before it is emitted. A denied chaff stays pending
+                // for the next slot; it is never sent over the cap.
+                let wire_len = (off + 1 + pad_len + tag_reserve) as u64;
+                if self.try_spend_wire_cover(wire_len) {
+                    use crate::transport::Frame;
+                    let ping = Frame::Ping { mtu_probe: None };
+                    off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
+                    wrote_ack_eliciting = true;
+                    emitted_chaff = true;
+                    packet_contents.control = true;
+                    if pad_len > 0 {
+                        off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
+                    }
                 }
             }
         }
@@ -760,20 +769,53 @@ impl Connection {
         Ok(info)
     }
 
+    /// Install or replace the shared wire byte ledger (TODO-1052).
+    pub fn set_wire_ledger(&mut self, ledger: Option<qf_stealth::BudgetLedger>) {
+        self.wire_ledger = ledger;
+    }
+
+    /// Atomically ask the ledger to pay `bytes` for a repair datagram.
+    /// `true` = paid, the caller may emit; `false` = denied, the caller
+    /// must drop or delay the repair — repairs are never sent over the
+    /// cap. Without an installed ledger the spend always succeeds
+    /// (off/performance carry no stealth budget).
+    pub(crate) fn try_spend_wire_repair(&mut self, bytes: u64) -> bool {
+        match self.wire_ledger.as_mut() {
+            Some(ledger) => ledger.try_spend(bytes, self.clock.now()),
+            None => true,
+        }
+    }
+
+    /// Atomically ask the ledger to pay `bytes` for cover traffic
+    /// (cover PING datagram etc.). Same contract as
+    /// [`Self::try_spend_wire_repair`].
+    pub(crate) fn try_spend_wire_cover(&mut self, bytes: u64) -> bool {
+        match self.wire_ledger.as_mut() {
+            Some(ledger) => ledger.try_spend(bytes, self.clock.now()),
+            None => true,
+        }
+    }
+
+    /// Atomically ask the ledger to pay `bytes` of image-matching padding
+    /// (`pad_short_header_to` for repair datagrams). Same contract.
+    pub(crate) fn try_spend_wire_pad(&mut self, bytes: u64) -> bool {
+        match self.wire_ledger.as_mut() {
+            Some(ledger) => ledger.try_spend(bytes, self.clock.now()),
+            None => true,
+        }
+    }
+
     /// Compute stealth padding length given current plaintext payload length and budget.
     ///
-    /// Dispatches on the configured [`TrafficAnalysisDefense`] mode (TODO-455):
-    /// - `Off`: existing probabilistic padding (gated by `stealth_padding_rate`).
-    /// - `FullPadding`: always pad to the full available budget (no rate gating,
-    ///   no random roll). The precise total-packet-size targeting to
-    ///   `max_udp_payload_size` is performed in `maybe_apply_stealth_padding`,
-    ///   which calls this after computing the budget; here we return `budget`
-    ///   so every packet is maximally padded regardless of `stealth_padding_rate`.
-    /// - `ConstantRate`: same maximal-padding behavior as `FullPadding` at this
-    ///   layer; the consistent target size and chaff injection are orchestrated
-    ///   by `maybe_apply_stealth_padding` and the `TrafficAnalysisScheduler`.
+    /// - With a `BudgetLedger` installed (TODO-1052): the ledger is the only
+    ///   padding authority — persona-trace classes or fixed cell, capped by
+    ///   the remaining shared allowance.
+    /// - `TrafficAnalysisDefense::FullPadding`/`ConstantRate`: always pad to
+    ///   the full available budget (no rate gating).
+    /// - Otherwise: legacy probabilistic strategy dispatch gated by
+    ///   `stealth_padding_rate`.
     #[inline(always)]
-    pub(crate) fn compute_stealth_padding(&self, cur_pt_len: usize, budget: usize) -> usize {
+    pub(crate) fn compute_stealth_padding(&mut self, cur_pt_len: usize, budget: usize) -> usize {
         // Traffic analysis defense modes take precedence over the legacy
         // probabilistic path. They never skip padding based on rate.
         match self.config.traffic_analysis_defense {
@@ -781,6 +823,24 @@ impl Connection {
                 return budget;
             }
             TrafficAnalysisDefense::Off => {}
+        }
+
+        // TODO-1052: when a wire ledger is installed it is the only padding
+        // authority. It replays the persona's captured length classes (or
+        // the fixed cell), enforces the shared per-second/burst cap, and
+        // returns 0 when exhausted or when no class fits — the packet
+        // then goes out at its natural length. The `stealth_padding_rate`
+        // RNG gate is dead under the ledger: the cap is the only throttle.
+        if self.wire_ledger.is_some() {
+            // `stealth_padding_max_size` belongs to the dead strategy
+            // model — under the ledger the allowance and the physical
+            // space left in the datagram are the only bounds.
+            let max = budget;
+            if max == 0 || !self.config.stealth_padding_enabled {
+                return 0;
+            }
+            let ledger = self.wire_ledger.as_mut().expect("checked above");
+            return ledger.padding_target(cur_pt_len, max, self.clock.now());
         }
 
         if !self.config.stealth_padding_enabled {

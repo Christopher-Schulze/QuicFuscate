@@ -4,7 +4,7 @@
 //! types while this crate owns cover-target rotation and flow-shaping state.
 
 #[doc(hidden)]
-pub use config::{PaddingStrategy, RotationMode, StealthMode};
+pub use config::{RotationMode, StealthMode};
 #[doc(hidden)]
 pub use cover_targets::{CdnProvider, CoverTargetRotator};
 #[doc(hidden)]
@@ -43,6 +43,7 @@ pub use tls_cover::{
 pub use tls_profile::{profile_from_fingerprint, TlsProfile};
 #[doc(hidden)]
 pub use traffic::{RateChoker, ServerPushState, ServerPushTriggerReason};
+pub use wire_budget::{BudgetLedger, PersonaTrace, WireBudget, WireShape};
 
 #[doc(hidden)]
 pub use chaff::{
@@ -85,6 +86,8 @@ pub mod tls_profile;
 pub mod traffic;
 
 pub mod transport_params;
+
+pub mod wire_budget;
 
 mod cover_targets {
     use std::sync::atomic::{AtomicUsize, Ordering};

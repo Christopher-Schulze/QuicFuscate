@@ -1,10 +1,27 @@
 // --- 7. Stealth Manager and Configuration ---
 
 use crate::{
-    BrowserProfile, CoverTargetRotator, FingerprintProfile, OsProfile, PaddingStrategy,
-    RotationMode, StealthMode, TlsClientHelloProfileCatalog,
+    BrowserProfile, CoverTargetRotator, FingerprintProfile, OsProfile, RotationMode, StealthMode,
+    TlsClientHelloProfileCatalog, WireShape,
 };
 use qf_common::env_utils::EnvSnapshot;
+
+/// Maps a legacy or current padding-strategy spelling onto the TODO-1052
+/// wire shape. `random`, `adaptive`, and `browser*` collapse onto
+/// `PersonaTrace`; `fixed`/`constant`/`*normalize*` collapse onto
+/// `FixedCell`. `off`/`performance` modes never install a ledger, so a
+/// mapped shape there is inert.
+fn parse_wire_shape_value(value: &str) -> Option<WireShape> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "random" | "1" | "adaptive" | "3" | "browser" | "browser_mimic" | "browser-mimic"
+        | "browsermimic" | "mimic" | "4" | "persona-trace" | "persona_trace" | "trace" => {
+            Some(WireShape::PersonaTrace)
+        }
+        "fixed" | "constant" | "2" | "5" | "normalize" | "packet-normalize" | "packetnormalize"
+        | "packet_normalize" | "fixed-cell" | "fixed_cell" | "cell" => Some(WireShape::FixedCell),
+        _ => None,
+    }
+}
 
 /// Ultra-sophisticated configuration for the main StealthManager.
 #[derive(Clone)]
@@ -36,8 +53,16 @@ pub struct StealthConfig {
     pub enable_fingerprint_rotation: bool,
     /// Fingerprint rotation mode: Fixed (no rotation), Slots (configured slots), All (all profiles).
     pub fingerprint_rotation_mode: RotationMode,
-    /// Padding strategy: 'random', 'fixed', 'adaptive'.
-    pub padding_strategy: PaddingStrategy,
+    /// Wire-image shape for stealth padding (TODO-1052): `PersonaTrace`
+    /// replays captured persona length classes, `FixedCell` normalizes to
+    /// `normalize_target_size`. Only reachable through stealth modes; `off`
+    /// and `performance` install no ledger and add zero stealth bytes.
+    pub wire_shape: WireShape,
+    /// Shared wire byte budget: maximum stealth bytes (repairs + padding +
+    /// cover) spent per second. Zero disables the ledger entirely.
+    pub wire_cap_bytes_per_sec: u64,
+    /// Shared wire byte budget: maximum stealth bytes in one drain burst.
+    pub wire_cap_bytes_per_burst: u64,
     /// Maximum padding size in bytes.
     pub max_padding_size: usize,
     /// Fingerprint rotation interval in seconds.
@@ -176,24 +201,10 @@ impl StealthConfig {
     }
 
     #[doc(hidden)]
-    pub fn transport_padding_strategy_override(
-        &self,
-        environment: &EnvSnapshot,
-    ) -> Option<PaddingStrategy> {
+    pub fn transport_wire_shape_override(&self, environment: &EnvSnapshot) -> Option<WireShape> {
         environment.first_with(
             ["QUICFUSCATE_STEALTH_PADDING_STRATEGY", "QUICFUSCATE_PADDING_STRATEGY"],
-            |value| match value.to_ascii_lowercase().as_str() {
-                "1" | "random" => Some(PaddingStrategy::Random),
-                "2" | "fixed" => Some(PaddingStrategy::Fixed),
-                "3" | "adaptive" => Some(PaddingStrategy::Adaptive),
-                "4" | "browser" | "browser-mimic" | "browsermimic" => {
-                    Some(PaddingStrategy::BrowserMimic)
-                }
-                "5" | "normalize" | "packet-normalize" | "packetnormalize" => {
-                    Some(PaddingStrategy::PacketNormalize)
-                }
-                _ => None,
-            },
+            parse_wire_shape_value,
         )
     }
 
@@ -241,7 +252,9 @@ impl StealthConfig {
             enable_protocol_mimicry: true,
             enable_fingerprint_rotation: false, // Simple Chrome profile
             fingerprint_rotation_mode: RotationMode::Fixed,
-            padding_strategy: PaddingStrategy::Adaptive,
+            wire_shape: WireShape::PersonaTrace,
+            wire_cap_bytes_per_sec: 65536,
+            wire_cap_bytes_per_burst: 16384,
             max_padding_size: 86, // Slightly higher for better smoothing
             fingerprint_rotation_interval: 0,
             fingerprint_rotation_profiles: Vec::new(),
@@ -299,7 +312,9 @@ impl StealthConfig {
             enable_protocol_mimicry: true,
             enable_fingerprint_rotation: true,
             fingerprint_rotation_mode: RotationMode::All,
-            padding_strategy: PaddingStrategy::BrowserMimic,
+            wire_shape: WireShape::PersonaTrace,
+            wire_cap_bytes_per_sec: 65536,
+            wire_cap_bytes_per_burst: 16384,
             max_padding_size: 256,
             fingerprint_rotation_interval: 120, // 2 minutes - aggressive enough to break persistent DPI correlations
             fingerprint_rotation_profiles: Vec::new(),
@@ -383,7 +398,9 @@ impl StealthConfig {
             enable_protocol_mimicry: false,
             enable_fingerprint_rotation: false,
             fingerprint_rotation_mode: RotationMode::Fixed,
-            padding_strategy: PaddingStrategy::Random,
+            wire_shape: WireShape::PersonaTrace,
+            wire_cap_bytes_per_sec: 0,
+            wire_cap_bytes_per_burst: 0,
             max_padding_size: 0,
             fingerprint_rotation_interval: 0,
             fingerprint_rotation_profiles: Vec::new(),
@@ -426,7 +443,9 @@ impl StealthConfig {
             enable_protocol_mimicry: false,
             enable_fingerprint_rotation: false,
             fingerprint_rotation_mode: RotationMode::Fixed,
-            padding_strategy: PaddingStrategy::Random,
+            wire_shape: WireShape::PersonaTrace,
+            wire_cap_bytes_per_sec: 0,
+            wire_cap_bytes_per_burst: 0,
             max_padding_size: 0,
             fingerprint_rotation_interval: 0,
             fingerprint_rotation_profiles: Vec::new(),
@@ -481,7 +500,9 @@ impl StealthConfig {
             enable_fingerprint_rotation: false,
             fingerprint_rotation_mode: RotationMode::Fixed,
             // Strategy is ignored when padding disabled
-            padding_strategy: PaddingStrategy::Random,
+            wire_shape: WireShape::PersonaTrace,
+            wire_cap_bytes_per_sec: 0,
+            wire_cap_bytes_per_burst: 0,
             max_padding_size: 0,
             fingerprint_rotation_interval: 0,
             fingerprint_rotation_profiles: Vec::new(),
@@ -580,6 +601,9 @@ impl StealthConfig {
             enable_timing_obfuscation: Option<bool>,
             enable_protocol_mimicry: Option<bool>,
             padding_strategy: Option<String>,
+            wire_shape: Option<String>,
+            wire_cap_bytes_per_sec: Option<u64>,
+            wire_cap_bytes_per_burst: Option<u64>,
             max_padding_size: Option<usize>,
             enable_fingerprint_rotation: Option<bool>,
             fingerprint_rotation_interval: Option<u64>,
@@ -604,20 +628,8 @@ impl StealthConfig {
             deny: Option<Vec<String>>,
         }
 
-        fn parse_padding_strategy(value: &str) -> Option<PaddingStrategy> {
-            let v = value.trim().to_ascii_lowercase();
-            match v.as_str() {
-                "random" | "1" => Some(PaddingStrategy::Random),
-                "fixed" | "constant" | "2" => Some(PaddingStrategy::Fixed),
-                "adaptive" | "3" => Some(PaddingStrategy::Adaptive),
-                "browser" | "browser_mimic" | "browser-mimic" | "browsermimic" | "mimic" | "4" => {
-                    Some(PaddingStrategy::BrowserMimic)
-                }
-                "5" | "normalize" | "packet-normalize" | "packetnormalize" | "packet_normalize" => {
-                    Some(PaddingStrategy::PacketNormalize)
-                }
-                _ => None,
-            }
+        fn parse_padding_strategy(value: &str) -> Option<WireShape> {
+            parse_wire_shape_value(value)
         }
 
         let root: Root = toml::from_str(s)?;
@@ -677,7 +689,16 @@ impl StealthConfig {
                 cfg.enable_protocol_mimicry = v;
             }
             if let Some(v) = sec.padding_strategy.as_deref().and_then(parse_padding_strategy) {
-                cfg.padding_strategy = v;
+                cfg.wire_shape = v;
+            }
+            if let Some(v) = sec.wire_shape.as_deref().and_then(parse_padding_strategy) {
+                cfg.wire_shape = v;
+            }
+            if let Some(v) = sec.wire_cap_bytes_per_sec {
+                cfg.wire_cap_bytes_per_sec = v;
+            }
+            if let Some(v) = sec.wire_cap_bytes_per_burst {
+                cfg.wire_cap_bytes_per_burst = v;
             }
             if let Some(v) = sec.max_padding_size {
                 cfg.max_padding_size = v;
@@ -927,8 +948,8 @@ impl StealthConfig {
         ) {
             self.max_padding_size = n;
         }
-        if let Some(strategy) = self.transport_padding_strategy_override(environment) {
-            self.padding_strategy = strategy;
+        if let Some(shape) = self.transport_wire_shape_override(environment) {
+            self.wire_shape = shape;
         }
         if let Some(b) = Self::env_bool_first(environment, ["QUICFUSCATE_FINGERPRINT_ROTATION"]) {
             self.enable_fingerprint_rotation = b;
@@ -1005,7 +1026,7 @@ impl StealthConfig {
 #[cfg(test)]
 mod tests {
     use super::StealthConfig;
-    use crate::{BrowserProfile, OsProfile, PaddingStrategy, StealthMode};
+    use crate::{BrowserProfile, OsProfile, StealthMode, WireShape};
     use qf_common::env_utils::EnvSnapshot;
 
     #[test]
@@ -1017,7 +1038,8 @@ mod tests {
 
         let stealth = StealthConfig::stealth();
         assert_eq!(stealth.mode, StealthMode::Stealth);
-        assert_eq!(stealth.padding_strategy, PaddingStrategy::Adaptive);
+        assert_eq!(stealth.wire_shape, WireShape::PersonaTrace);
+        assert_eq!(stealth.wire_cap_bytes_per_sec, 65536);
         assert!(stealth.use_tls_cover);
 
         let intelligent = StealthConfig::dynamic();
@@ -1061,7 +1083,8 @@ mod tests {
         assert_eq!(config.mode, StealthMode::Manual);
         assert_eq!(config.initial_browser, BrowserProfile::Safari);
         assert_eq!(config.initial_os, OsProfile::MacOS);
-        assert_eq!(config.padding_strategy, PaddingStrategy::BrowserMimic);
+        // Legacy "browser-mimic" maps onto the persona trace shape.
+        assert_eq!(config.wire_shape, WireShape::PersonaTrace);
         assert_eq!(config.max_padding_size, 192);
         assert!(!config.enable_http3_masquerading);
         assert!(!config.use_qpack_headers);
