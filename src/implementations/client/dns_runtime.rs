@@ -31,21 +31,49 @@ pub struct ClientDnsRuntime {
 
 impl ClientDnsRuntime {
     /// Resolve and pin the configured DoH endpoint before firewall or resolver changes.
+    ///
+    /// Derives the cleartext policy and DoH TLS persona from the validated
+    /// stealth configuration (TODO-1058): stealth modes forbid UDP/53
+    /// fallback entirely and carry the tunnel persona's cipher list into the
+    /// DoH ClientHello; `off`/`performance` keep plain rustls DoH and may
+    /// fall back to cleartext DNS.
     pub fn prepare(config: &EngineConfig) -> Result<DnsProxyConfig, EngineError> {
-        Self::prepare_endpoint(&config.stealth.doh_provider)
+        let (allow_udp_fallback, persona_ciphers) = stealth_dns_policy(&config.stealth)?;
+        Self::prepare_endpoint_with_policy(
+            &config.stealth.doh_provider,
+            allow_udp_fallback,
+            persona_ciphers,
+        )
     }
 
     /// Resolve and pin one DoH endpoint before firewall or resolver changes.
+    ///
+    /// Compatibility entry point: permits cleartext fallback and applies no
+    /// TLS persona. Stealth-aware callers use
+    /// [`Self::prepare_endpoint_with_policy`].
     pub fn prepare_endpoint(endpoint: &str) -> Result<DnsProxyConfig, EngineError> {
+        Self::prepare_endpoint_with_policy(endpoint, true, None)
+    }
+
+    /// Resolve and pin one DoH endpoint under an explicit cleartext policy
+    /// and optional persona cipher list (TODO-1058).
+    pub fn prepare_endpoint_with_policy(
+        endpoint: &str,
+        allow_udp_fallback: bool,
+        persona_ciphers: Option<Vec<u16>>,
+    ) -> Result<DnsProxyConfig, EngineError> {
         let endpoint = endpoint.trim();
         if endpoint.is_empty() {
             return Err(EngineError::Config(
                 "DoH is enabled but stealth.doh_provider is empty".to_string(),
             ));
         }
-        DnsProxyConfig::for_client_endpoints(vec![endpoint.to_string()]).map_err(|error| {
-            EngineError::Config(format!("client DNS proxy configuration: {error}"))
-        })
+        DnsProxyConfig::for_client_endpoints_with_policy(
+            vec![endpoint.to_string()],
+            allow_udp_fallback,
+            persona_ciphers,
+        )
+        .map_err(|error| EngineError::Config(format!("client DNS proxy configuration: {error}")))
     }
 
     /// Start the client DNS proxy and redirect the active system resolver to it.
@@ -247,6 +275,42 @@ impl Drop for ClientDnsRuntime {
             }
         }
     }
+}
+
+/// Derive the cleartext-DNS policy and DoH TLS persona cipher list from the
+/// validated stealth configuration (TODO-1058).
+///
+/// - `off`/`performance`: cleartext UDP fallback stays permitted and no
+///   persona is claimed — a plain rustls DoH client is the honest shape.
+/// - all stealth modes: UDP/53 is forbidden outright, and the DoH ClientHello
+///   carries the same cipher list the frozen tunnel persona fixture emits
+///   (`profile_from_fingerprint(..).cipher_suites`).
+fn stealth_dns_policy(
+    stealth: &qf_engine_types::StealthSection,
+) -> Result<(bool, Option<Vec<u16>>), EngineError> {
+    use qf_engine_types::StealthMode;
+    if matches!(stealth.mode, StealthMode::Off | StealthMode::Performance) {
+        return Ok((true, None));
+    }
+    let fingerprint = crate::stealth::FingerprintProfile::try_new(
+        stealth.initial_browser.parse().map_err(|_| {
+            EngineError::Config(format!(
+                "stealth.initial_browser unsupported for DoH persona: {}",
+                stealth.initial_browser
+            ))
+        })?,
+        stealth.initial_os.parse().map_err(|_| {
+            EngineError::Config(format!(
+                "stealth.initial_os unsupported for DoH persona: {}",
+                stealth.initial_os
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        EngineError::Config(format!("stealth persona unsupported for DoH: {error}"))
+    })?;
+    let profile = qf_stealth::profile_from_fingerprint(&fingerprint);
+    Ok((false, Some(profile.cipher_suites)))
 }
 
 fn bind_local_socket(runtime: &Handle, address: SocketAddr) -> Result<UdpSocket, EngineError> {

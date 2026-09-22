@@ -15,6 +15,8 @@ log = "0.4"
 parking_lot = "0.12"
 qf-common = { path = "../qf-common" }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+rustls-native-certs = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 url = "2.5.0"
 

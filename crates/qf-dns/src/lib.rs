@@ -834,6 +834,17 @@ pub struct DnsProxyConfig {
     /// Admission policy owned by the active listener caller. The forwarding
     /// helper does not consume this policy because it has no caller identity.
     pub admission: DnsAdmissionConfig,
+    /// Whether plain UDP/53 upstream resolution is permitted (TODO-1058).
+    ///
+    /// Stealth personas (`stealth`, `stealth_max`, `dynamic`, `manual`) set
+    /// this to `false`: a DoH failure must surface as an error, never as a
+    /// silent cleartext query leaving the host. `off` and `performance`
+    /// clients and server-side forwarding keep it `true`.
+    pub allow_udp_fallback: bool,
+    /// Persona TLS cipher list (TLS suite IDs in preference order) applied to
+    /// the DoH client's rustls config so the DoH ClientHello matches the
+    /// tunnel persona fixture. `None` keeps the reqwest rustls default.
+    pub doh_persona_ciphers: Option<Vec<u16>>,
     /// Cached shared DoH HTTP client (lazily initialized). Cloning the
     /// config clones the `Arc`, sharing the underlying connection pool.
     doh_client: Arc<parking_lot::Mutex<Option<reqwest::Client>>>,
@@ -842,7 +853,26 @@ pub struct DnsProxyConfig {
 impl DnsProxyConfig {
     /// Build a client-side DoH configuration with endpoint resolution pinned
     /// before the system resolver is redirected to the local proxy.
+    ///
+    /// Compatibility constructor: permits cleartext UDP fallback and applies
+    /// no TLS persona. Stealth-aware callers use
+    /// [`Self::for_client_endpoints_with_policy`].
     pub fn for_client_endpoints(doh_endpoints: Vec<String>) -> Result<Self, DnsProxyError> {
+        Self::for_client_endpoints_with_policy(doh_endpoints, true, None)
+    }
+
+    /// Build a client-side DoH configuration under an explicit cleartext
+    /// policy (TODO-1058).
+    ///
+    /// `allow_udp_fallback=false` forbids any UDP/53 upstream exchange — a
+    /// DoH failure surfaces as SERVFAIL, not a cleartext query.
+    /// `persona_ciphers` carries the tunnel persona's TLS cipher list
+    /// (`TlsProfile::cipher_suites`) so the DoH ClientHello matches it.
+    pub fn for_client_endpoints_with_policy(
+        doh_endpoints: Vec<String>,
+        allow_udp_fallback: bool,
+        persona_ciphers: Option<Vec<u16>>,
+    ) -> Result<Self, DnsProxyError> {
         if doh_endpoints.is_empty() {
             return Err(DnsProxyError::ConfigError(
                 "at least one DoH endpoint is required".to_string(),
@@ -854,6 +884,8 @@ impl DnsProxyConfig {
             use_doh: true,
             listen_port: 53,
             admission: DnsAdmissionConfig::client_default(),
+            allow_udp_fallback,
+            doh_persona_ciphers: persona_ciphers,
             doh_client: Arc::new(parking_lot::Mutex::new(None)),
         };
         config.prepare_doh_client()?;
@@ -866,7 +898,10 @@ impl DnsProxyConfig {
     /// Pinning the endpoint addresses here keeps subsequent requests on the
     /// VPN path without re-entering the local DNS listener.
     pub fn prepare_doh_client(&self) -> Result<(), DnsProxyError> {
-        let client = build_doh_client_for_endpoints(&self.doh_endpoints)?;
+        let client = build_doh_client_for_endpoints(
+            &self.doh_endpoints,
+            self.doh_persona_ciphers.as_deref(),
+        )?;
         *self.doh_client.lock() = Some(client);
         Ok(())
     }
@@ -883,7 +918,10 @@ impl DnsProxyConfig {
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
-        let client = build_doh_client_for_endpoints(&self.doh_endpoints)?;
+        let client = build_doh_client_for_endpoints(
+            &self.doh_endpoints,
+            self.doh_persona_ciphers.as_deref(),
+        )?;
         *guard = Some(client.clone());
         Ok(client)
     }
@@ -903,6 +941,8 @@ impl Default for DnsProxyConfig {
             use_doh: true,
             listen_port: 53,
             admission: DnsAdmissionConfig::server_default(),
+            allow_udp_fallback: true,
+            doh_persona_ciphers: None,
             doh_client: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
@@ -986,6 +1026,15 @@ pub async fn process_dns_query(
             }
         }
     } else {
+        // TODO-1058: stealth personas forbid any cleartext upstream exchange.
+        // A DoH failure or a missing DoH configuration must surface as
+        // SERVFAIL — never as a UDP/53 query leaving the host.
+        if !config.allow_udp_fallback {
+            log::warn!(
+                "cleartext DNS forbidden by stealth policy; returning SERVFAIL without sending UDP"
+            );
+            return Ok(build_dns_servfail(&query));
+        }
         match resolve_via_dns_upstreams_async(pkt, &config.upstream_resolvers).await {
             Ok(response) => Ok(response),
             Err(error) => {

@@ -509,7 +509,7 @@
 - Detail: `docs/todo/todo-1057-outer-ip-udp-persona.md`
 
 ### TODO-1058 - DoH uses the same persona and is the only DNS
-- OPEN. Stealth modes disable UDP/53 fallback. DoH TLS uses the TODO-1047 persona. `off` and `performance` may keep UDP DNS.
+- DONE. `DnsProxyConfig.allow_udp_fallback` gates the cleartext upstream path — stealth modes return SERVFAIL with zero UDP sends (real-send counter proof); `off`/`performance` and the server TUN forwarder keep it. `doh_persona_ciphers` installs the frozen persona's `TlsProfile::cipher_suites` onto a preconfigured rustls client (`use_preconfigured_tls`, persona order, `h2` ALPN). Derived from `EngineConfig.stealth` in `ClientDnsRuntime::prepare` and from the resolved `stealth_config` in the standalone client.
 - Detail: `docs/todo/todo-1058-doh-matches-persona.md`
 
 ### TODO-1059 - dynamic keeps one wire image for the whole connection

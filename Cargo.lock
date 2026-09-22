@@ -1593,6 +1593,8 @@ dependencies = [
  "parking_lot",
  "qf-common",
  "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "tokio",
  "url",
 ]

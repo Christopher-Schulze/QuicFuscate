@@ -32,12 +32,20 @@ pub(super) fn remaining_until(deadline: Instant) -> std::io::Result<Duration> {
     }
 }
 
+/// Test-only counter of real cleartext-UDP upstream send attempts. Lets the
+/// stealth-policy tests prove "zero UDP/53 left the host" without sniffing.
+#[cfg(test)]
+pub(super) static UDP_FALLBACK_ATTEMPTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub(super) fn forward_dns_query_until(
     query: &[u8],
     upstream: Ipv4Addr,
     deadline: Instant,
 ) -> std::io::Result<Vec<u8>> {
     use std::net::UdpSocket;
+    #[cfg(test)]
+    UDP_FALLBACK_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_write_timeout(Some(remaining_until(deadline)?))?;
     let upstream_addr = SocketAddr::new(std::net::IpAddr::V4(upstream), 53);
@@ -125,8 +133,15 @@ pub fn build_doh_client() -> Result<reqwest::Client, DnsProxyError> {
 /// DNS proxy changes the host resolver. The URL hostname remains the TLS SNI
 /// and HTTP authority, while the connection destination remains stable after
 /// the local resolver becomes active.
+///
+/// `persona_ciphers` carries the tunnel persona's TLS cipher list (TODO-1058):
+/// the same `cipher_suites` IDs the frozen `TlsProfile` fixture emits, mapped
+/// onto a rustls `ClientConfig` via `use_preconfigured_tls`. `None` keeps the
+/// plain reqwest rustls default. ALPN stays `h2` — the tunnel persona's `h3`
+/// is a QUIC advertisement that no honest TCP-TLS client sends.
 pub fn build_doh_client_for_endpoints(
     endpoints: &[String],
+    persona_ciphers: Option<&[u16]>,
 ) -> Result<reqwest::Client, DnsProxyError> {
     if endpoints.is_empty() {
         return Err(DnsProxyError::ConfigError(
@@ -145,6 +160,10 @@ pub fn build_doh_client_for_endpoints(
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("quicfuscate-doh/1.0");
+
+    if let Some(ciphers) = persona_ciphers {
+        builder = builder.use_preconfigured_tls(persona_rustls_config(ciphers)?);
+    }
 
     for endpoint in endpoints {
         let url = url::Url::parse(endpoint).map_err(|error| {
@@ -188,6 +207,65 @@ pub fn build_doh_client_for_endpoints(
     builder
         .build()
         .map_err(|error| DnsProxyError::DohError(format!("HTTP client build failed: {error}")))
+}
+
+/// Build the rustls `ClientConfig` that mirrors the tunnel persona's cipher
+/// list (TODO-1058). The persona fixture only carries TLS 1.3 suites
+/// (0x1301/0x1302/0x1303 in preference order); those are installed in persona
+/// order while TLS 1.2 suites keep the rustls provider defaults — the fixture
+/// does not claim a 1.2 list and we do not invent one. Unknown suite IDs are
+/// skipped; a persona that maps to nothing is a configuration error.
+pub(super) fn persona_rustls_config(
+    ciphers: &[u16],
+) -> Result<rustls::ClientConfig, DnsProxyError> {
+    use rustls::crypto::ring as ring_provider;
+
+    let mut provider = ring_provider::default_provider();
+    let mapped: Vec<rustls::SupportedCipherSuite> = ciphers
+        .iter()
+        .filter_map(|id| match *id {
+            0x1301 => Some(rustls::CipherSuite::TLS13_AES_128_GCM_SHA256),
+            0x1302 => Some(rustls::CipherSuite::TLS13_AES_256_GCM_SHA384),
+            0x1303 => Some(rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256),
+            _ => None,
+        })
+        .filter_map(|suite| {
+            provider.cipher_suites.iter().find(|supported| supported.suite() == suite).copied()
+        })
+        .collect();
+    if mapped.is_empty() {
+        return Err(DnsProxyError::ConfigError(
+            "DoH persona cipher list maps to no rustls-supported suite".to_string(),
+        ));
+    }
+    provider.cipher_suites = mapped;
+
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for error in &native.errors {
+        log::debug!("DoH native root load warning: {error}");
+    }
+    for cert in native.certs {
+        let _ = roots.add(cert);
+    }
+    if roots.is_empty() {
+        return Err(DnsProxyError::ConfigError(
+            "DoH persona TLS has no usable root certificates".to_string(),
+        ));
+    }
+
+    let mut config = rustls::ClientConfig::builder_with_provider(provider.into())
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            DnsProxyError::ConfigError(format!("DoH persona TLS versions rejected: {error}"))
+        })?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    // DoH rides HTTP/2 on TCP-TLS. The tunnel persona's `h3` ALPN is a QUIC
+    // advertisement that no honest TCP client sends — `h2` is the functional
+    // and fingerprint-correct choice here.
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(config)
 }
 
 /// Handle a DNS query by resolving via DoH (client-side) using a caller-

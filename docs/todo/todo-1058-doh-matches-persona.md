@@ -4,7 +4,7 @@ title: DoH uses the same persona and is the only DNS
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1047]
 ---
@@ -41,16 +41,29 @@ DoH hides the destination name. It does not hide the VPN IP. It fails if a clear
 
 ## Sub-Tasks
 
-- [ ] Mode flag wired into `qf-dns`.
-- [ ] Persona shared with the tunnel hello builder.
-- [ ] Test: stealth plus DoH failure sends zero UDP/53.
-- [ ] Test: `off` still falls back.
+- [x] Mode flag wired into `qf-dns` — `DnsProxyConfig.allow_udp_fallback`;
+      `process_dns_query` gates the upstream path before any socket work.
+- [x] Persona shared with the tunnel hello builder — `doh_persona_ciphers`
+      carries `profile_from_fingerprint(..).cipher_suites` into a
+      preconfigured rustls `ClientConfig` on the pooled reqwest client.
+- [x] Test: stealth plus DoH failure sends zero UDP/53 — real-send counter
+      `UDP_FALLBACK_ATTEMPTS` stays flat under `allow_udp_fallback = false`.
+- [x] Test: `off` still falls back — counter increments on the permitted path.
 
 ## Acceptance
 
-- Stealth modes cannot emit a cleartext DNS query for the tunnel destination.
-- DoH TLS cipher list matches the persona fixture.
+- Stealth modes cannot emit a cleartext DNS query for the tunnel destination. —
+  gate sits before `resolve_via_dns_upstreams_async`; SERVFAIL is returned.
+- DoH TLS cipher list matches the persona fixture. —
+  `test_persona_cipher_list_maps_onto_rustls_provider_order` asserts persona
+  order on `crypto_provider().cipher_suites`; ALPN stays `h2` (the persona's
+  `h3` is a QUIC advertisement no TCP client sends). TLS 1.2 suites keep
+  rustls defaults — the fixture claims no 1.2 list.
 
 ## Risks
 
-- Networks that block DoH fail closed in stealth modes. That is intended. `performance` remains the mode that may use UDP DNS.
+- Networks that block DoH fail closed in stealth modes. That is intended.
+  `performance` remains the mode that may use UDP DNS.
+- `use_preconfigured_tls` requires qf-dns's rustls to unify with reqwest's —
+  Cargo.lock resolves a single `rustls 0.23.45`; verified by a successful
+  persona client build in the policy-constructor test.

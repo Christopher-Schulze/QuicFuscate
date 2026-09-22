@@ -670,6 +670,8 @@ async fn test_doh_client_is_cached_and_shared() {
         use_doh: true,
         listen_port: 53,
         admission: DnsAdmissionConfig::client_default(),
+        allow_udp_fallback: true,
+        doh_persona_ciphers: None,
         doh_client: Arc::new(parking_lot::Mutex::new(None)),
     };
     // Before first call: cache is empty.
@@ -732,4 +734,85 @@ fn dns_admission_prunes_idle_identity_with_explicit_clock() {
     source.advance(Duration::from_secs(3));
     assert_eq!(admission.prune_idle(), 1);
     assert_eq!(admission.snapshot().tracked_identities, 0);
+}
+
+// TODO-1058: DoH must be the only DNS for stealth personas — a DoH failure
+// surfaces as SERVFAIL, never as a silent cleartext UDP/53 query.
+
+#[tokio::test]
+async fn test_stealth_policy_sends_zero_udp_on_upstream_path() {
+    // With `allow_udp_fallback = false` the proxy must never reach the
+    // cleartext upstream path — even when resolvers are configured.
+    let pkt = make_dns_query_packet("example.com", 1);
+    let before = forwarding::UDP_FALLBACK_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
+    let config = DnsProxyConfig {
+        doh_endpoints: vec![],
+        upstream_resolvers: vec![std::net::Ipv4Addr::LOCALHOST],
+        use_doh: false,
+        allow_udp_fallback: false,
+        ..Default::default()
+    };
+    let result = process_dns_query(&pkt, &config).await.expect("SERVFAIL response");
+    assert_eq!(result[3] & 0x0F, DNS_RCODE_SERVFAIL);
+    let after = forwarding::UDP_FALLBACK_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(after, before, "stealth policy must not attempt any UDP/53 send");
+}
+
+#[tokio::test]
+async fn test_off_policy_still_attempts_udp_fallback() {
+    // `off`/`performance` keep the cleartext path: the upstream send is
+    // attempted against the configured resolver (localhost:53 will refuse —
+    // the attempt counter is the proof the UDP path ran).
+    let pkt = make_dns_query_packet("example.com", 1);
+    let before = forwarding::UDP_FALLBACK_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
+    let config = DnsProxyConfig {
+        doh_endpoints: vec![],
+        upstream_resolvers: vec![std::net::Ipv4Addr::LOCALHOST],
+        use_doh: false,
+        allow_udp_fallback: true,
+        ..Default::default()
+    };
+    let result = process_dns_query(&pkt, &config).await.expect("SERVFAIL response");
+    assert_eq!(result[3] & 0x0F, DNS_RCODE_SERVFAIL);
+    let after = forwarding::UDP_FALLBACK_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(after > before, "permitted fallback must attempt a real UDP send");
+}
+
+#[test]
+fn test_persona_cipher_list_maps_onto_rustls_provider_order() {
+    // The DoH TLS config must install the persona fixture's cipher list in
+    // preference order (TODO-1058 acceptance: "DoH TLS cipher list matches
+    // the persona fixture"). Firefox order 0x1303-first must survive.
+    let config = forwarding::persona_rustls_config(&[0x1303, 0x1301, 0x1302])
+        .expect("valid persona cipher list");
+    let suites: Vec<rustls::CipherSuite> =
+        config.crypto_provider().cipher_suites.iter().map(|suite| suite.suite()).collect();
+    assert_eq!(
+        suites,
+        vec![
+            rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+            rustls::CipherSuite::TLS13_AES_128_GCM_SHA256,
+            rustls::CipherSuite::TLS13_AES_256_GCM_SHA384,
+        ]
+    );
+    assert_eq!(config.alpn_protocols, vec![b"h2".to_vec()]);
+}
+
+#[test]
+fn test_persona_cipher_list_rejects_unmappable_suites() {
+    let result = forwarding::persona_rustls_config(&[0xFFFF, 0x0000]);
+    assert!(matches!(result, Err(DnsProxyError::ConfigError(_))));
+}
+
+#[test]
+fn test_client_policy_constructor_carries_stealth_flags() {
+    let config = DnsProxyConfig::for_client_endpoints_with_policy(
+        vec!["https://127.0.0.1/dns-query".to_string()],
+        false,
+        Some(vec![0x1301, 0x1302, 0x1303]),
+    )
+    .expect("stealth client config");
+    assert!(!config.allow_udp_fallback);
+    assert_eq!(config.doh_persona_ciphers, Some(vec![0x1301, 0x1302, 0x1303]));
+    assert!(config.doh_client_inner(), "persona client must build at prepare time");
 }

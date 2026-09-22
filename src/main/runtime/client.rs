@@ -250,20 +250,7 @@ pub(super) async fn run_client(
         vpn_dns.iter().copied(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
-    let mut prepared_dns = if tun_enable && !disable_doh {
-        Some(
-            tokio::task::block_in_place(|| {
-                quicfuscate::implementations::client::ClientDnsRuntime::prepare_endpoint(
-                    doh_provider,
-                )
-            })
-            .map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-            })?,
-        )
-    } else {
-        None
-    };
+    let mut prepared_dns = None;
     let stealth_runtime = Arc::new(
         StealthRuntimeOwner::from_env()
             .map_err(|error| std::io::Error::other(format!("invalid Reality config: {error}")))?,
@@ -385,6 +372,38 @@ pub(super) async fn run_client(
         stealth_config.initial_os,
         local_addr.is_ipv6(),
     );
+
+    // TODO-1058: stealth modes forbid cleartext UDP/53 entirely and carry
+    // the frozen persona's cipher list into the DoH ClientHello. Speed modes
+    // keep plain rustls DoH and may fall back to cleartext DNS.
+    if tun_enable && !disable_doh {
+        let dns_allow_udp_fallback = matches!(
+            stealth_config.mode,
+            quicfuscate::stealth::StealthMode::Off | quicfuscate::stealth::StealthMode::Performance
+        );
+        let doh_persona_ciphers = if dns_allow_udp_fallback {
+            None
+        } else {
+            quicfuscate::stealth::FingerprintProfile::try_new(
+                stealth_config.initial_browser,
+                stealth_config.initial_os,
+            )
+            .ok()
+            .map(|fingerprint| qf_stealth::profile_from_fingerprint(&fingerprint).cipher_suites)
+        };
+        prepared_dns = Some(
+            tokio::task::block_in_place(|| {
+                quicfuscate::implementations::client::ClientDnsRuntime::prepare_endpoint_with_policy(
+                    doh_provider,
+                    dns_allow_udp_fallback,
+                    doh_persona_ciphers.clone(),
+                )
+            })
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+            })?,
+        );
+    }
 
     let shared_stealth_config = Arc::new(std::sync::Mutex::new(stealth_config.clone()));
 
