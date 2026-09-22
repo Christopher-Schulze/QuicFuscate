@@ -432,6 +432,7 @@ fn parse_private_dump(path: &str) -> PrivateInstall {
 struct DirectionKeys {
     open: RingAesGcm128,
     hp: RingAesHp,
+    hp_key: [u8; 16],
 }
 
 impl DirectionKeys {
@@ -443,7 +444,7 @@ impl DirectionKeys {
         let mut hp_arr = [0u8; 16];
         hp_arr.copy_from_slice(&hp_bytes);
         let hp = RingAesHp::from_key(&hp_arr).ok()?;
-        Some(Self { open, hp })
+        Some(Self { open, hp, hp_key: hp_arr })
     }
 }
 
@@ -910,10 +911,12 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
     let key_phase = (b0 & 0x04) != 0;
     let sample = packet.get(pn_offset + 4..pn_offset + 20).unwrap_or(&[]);
     println!(
-        "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={} sample={} trunc={})",
+        "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={} sample={} trunc={} hp={} ver={:08x})",
         packet.len(),
         hex::encode(sample),
         truncated_to_u64(&pn_bytes, pn_len),
+        hex::encode(std_keys.hp_key),
+        version,
     );
 }
 
