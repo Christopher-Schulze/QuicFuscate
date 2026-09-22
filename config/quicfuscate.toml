@@ -124,9 +124,10 @@ outer_hop = "none"
 # invented or greased when the record lacks ECH — the hop then sends a normal
 # ClientHello. ECH applies exclusively to this shared outer hop: the direct
 # UDP dial and the dedicated inner listener never carry ECH state, because a
-# dedicated IP cannot be concealed by an encrypted SNI anyway. ECH requires a
-# build with the rustls-aws-lc feature (HPKE suites); without it the client
-# logs once and connects without ECH.
+# dedicated IP cannot be concealed by an encrypted SNI anyway. ECH uses the
+# HPKE suites from the rustls-aws-lc feature, which is part of the default
+# build; a --no-default-features build without it logs once and connects
+# without ECH.
 
 # ==============================================================================
 # NAT TRAVERSAL / PATH DISCOVERY

@@ -3061,7 +3061,7 @@ When `outer_hop = "masque"` (or a configured `[[circuit.hops]]` topology is used
 Boundaries, deliberately:
 
 - ECH applies **only** to the shared outer hop / circuit entry hop — the one TLS handshake an observer on the client uplink can see. The direct UDP dial and the dedicated inner listener always carry no ECH state: an encrypted SNI cannot conceal an IP that is already unique to the customer.
-- ECH requires a build with the `rustls-aws-lc` cargo feature (HPKE suites from `rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES`; the ring provider ships no HPKE). Without the feature the hop logs once and dials without ECH.
+- ECH uses the HPKE suites from `rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES` via the `rustls-aws-lc` cargo feature, which is part of the default feature set (the ring provider ships no HPKE). A `--no-default-features` build without it logs once and dials without ECH. `aws-lc-sys` requires a C toolchain (Windows MSVC: CMake + NASM).
 - A persona whose captured fingerprint never sends ECH (e.g. Brave) stays faithful: the persona `enable_ech` gate suppresses the extension even when a record exists.
 - `EchConfig::new` validates the list; a corrupt or invented configuration is a dial error, never a silent downgrade. Server-side ECH is not implemented (rustls lacks it) — the listener does not pretend to speak ECH.
 

@@ -584,8 +584,15 @@ impl CoverHandshakeCache {
                 let _ = roots.add(cert);
             }
         }
-        let config =
-            rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        // Explicit ring provider: with the workspace's optional aws-lc feature
+        // enabled, rustls can no longer pick a process-level default itself.
+        let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| format!("TLS protocol versions failed: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         let connector = TlsConnector::from(std::sync::Arc::new(config));
 
         // Connect TCP and wrap with a capturing layer that records raw inbound bytes.

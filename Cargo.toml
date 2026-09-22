@@ -181,7 +181,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # other platforms), every runtime entry probes the kernel and falls back to
 # sendmmsg/per-packet, and QUICFUSCATE_IO_URING=0|off is the operator
 # kill-switch for environments where ring setup must not be attempted.
-default = ["client", "server", "rate_limiter", "io_uring"]
+# rustls-aws-lc is in the default set: it supplies the HPKE suites real ECH
+# needs on the shared outer hop (TODO-1064); without it the hop dials without
+# ECH. aws-lc-sys requires a C toolchain (Windows MSVC: CMake + NASM).
+default = ["client", "server", "rate_limiter", "io_uring", "rustls-aws-lc"]
 
 # --- Role features ---
 client = []

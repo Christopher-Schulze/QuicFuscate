@@ -533,7 +533,7 @@
 - Detail: `docs/todo/todo-1063-udp-blocked-fallback.md`
 
 ### TODO-1064 - ECH only on a shared outer hop
-- DONE. rustls 0.23.45 `EchConfig`/`with_ech` (no bump, no fork). `qf_dns::https_record` parses the `ech` SvcParam from the DoH HTTPS answer; `resolve_outer_hop_ech` injects it into the shared outer hop / circuit entry hop only, before the engine dials. Direct UDP and the inner listener carry no ECH state; no GREASE when the record is absent. Gated on the `rustls-aws-lc` feature for HPKE suites. Wire-verified: the real rustls ClientHello carries extension `0xfe0d` with the ECH public_name as outer SNI for ECH personas, nothing for Brave or absent records.
+- DONE. rustls 0.23.45 `EchConfig`/`with_ech` (no bump, no fork). `qf_dns::https_record` parses the `ech` SvcParam from the DoH HTTPS answer; `resolve_outer_hop_ech` injects it into the shared outer hop / circuit entry hop only, before the engine dials. Direct UDP and the inner listener carry no ECH state; no GREASE when the record is absent. HPKE suites via `rustls-aws-lc`, on in the default feature set. Wire-verified: the real rustls ClientHello carries extension `0xfe0d` with the ECH public_name as outer SNI for ECH personas, nothing for Brave or absent records.
 - Detail: `docs/todo/todo-1064-ech-on-shared-outer-hop.md`
 
 ### TODO-1065 - Retry integrity tag must match the RFC vector and must not panic

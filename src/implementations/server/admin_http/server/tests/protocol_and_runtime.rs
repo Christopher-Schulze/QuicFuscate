@@ -98,7 +98,13 @@ fn oversized_chunked_payload_returns_413_without_content_length() {
     }
     req.push_str("0\r\n\r\n");
 
-    let resp = send_req(addr, &req);
+    // The server may answer 413 and close while the oversized body is still
+    // being written — that early reject is the behaviour under test, so a
+    // mid-body BrokenPipe on the write side is a pass condition, not a flake.
+    let mut s = StdTcpStream::connect(addr).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    let _ = s.write_all(req.as_bytes());
+    let resp = read_all(s);
     assert_eq!(
         parse_status(&resp),
         413,

@@ -130,7 +130,7 @@ Rule of thumb:
 - **Outer-Hop Fallback**: When the direct UDP dial is unreachable, stealth-family modes retry the connection exactly once through a configured MASQUE relay hop — never a per-packet transport flap<br>
 - **TLS Profile Metadata**: Deterministic compatibility ClientHello metadata remains available in memory for audit and compatibility inspection; rustls owns the wire handshake<br>
 - **DNS-over-HTTPS (DoH)**: Resolves DNS via HTTPS to hide queries from on-path resolvers<br>
-- **Encrypted Client Hello (ECH)**: On the shared outer hop, the client reads the ECHConfigList from the hop's DNS HTTPS record over the same DoH path and lets rustls encrypt the inner ClientHello; absent a record, nothing is emitted (requires the `rustls-aws-lc` build feature)<br>
+- **Encrypted Client Hello (ECH)**: On the shared outer hop, the client reads the ECHConfigList from the hop's DNS HTTPS record over the same DoH path and lets rustls encrypt the inner ClientHello; absent a record, nothing is emitted (HPKE via `rustls-aws-lc`, on by default)<br>
 - **QPACK Header Shaping**: Encodes realistic HTTP/3 headers with QPACK for indistinguishable request patterns<br>
 - **Active Probe Detection + Reality Fallback**: Detects probe-like traffic patterns and relays suspicious flows through a legitimate upstream path to preserve realistic network behavior under active scanning<br>
 - **Server Push Cover Traffic**: Emits realistic HTTP/3 PUSH_PROMISE/DATA cover bursts with configurable intensity, base path, and burst interval for traffic-shaping realism<br>
