@@ -908,9 +908,12 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
     }
     report.rtt_failed += 1;
     let key_phase = (b0 & 0x04) != 0;
+    let sample = packet.get(pn_offset + 4..pn_offset + 20).unwrap_or(&[]);
     println!(
-        "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={})",
-        packet.len()
+        "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={} sample={} trunc={})",
+        packet.len(),
+        hex::encode(sample),
+        truncated_to_u64(&pn_bytes, pn_len),
     );
 }
 
