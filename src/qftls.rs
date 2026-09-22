@@ -1097,6 +1097,25 @@ impl RustlsProvider {
     }
 }
 
+impl RustlsProvider {
+    /// Build one real rustls ClientHello for a persona.
+    ///
+    /// Startup validation uses this length. A synthetic hello is not a substitute.
+    pub fn client_hello_len_for_persona(profile: &TlsProfile) -> Result<usize, ConnectionError> {
+        let mut profile = profile.clone();
+        profile.timing_jitter = None;
+        let mut provider = Self::new(false, false, PROTOCOL_VERSION, &[])?;
+        QuicTlsProvider::configure(&mut provider, &profile)?;
+        let (_offset, frame) = QuicTlsProvider::next_crypto_frame(
+            &mut provider,
+            Level::Initial,
+            usize::MAX,
+        )?
+        .ok_or_else(|| ConnectionError::CryptoError("rustls produced no ClientHello".into()))?;
+        Ok(frame.len())
+    }
+}
+
 impl QuicTlsProvider for RustlsProvider {
     fn configure(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError> {
         self.0.configure(profile)

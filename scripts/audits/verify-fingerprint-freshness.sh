@@ -80,12 +80,11 @@ for idx in zero_rand_lines:
             f"zero hello_random placeholder at tls_cover.rs:{idx + 1} outside cfg(test) code"
         )
 
-# 4. Per-connection entropy must be present in the production builder.
+# 4. Cover planning still draws per-call entropy, and the synthetic hello builder is gone.
 if "rand::rng()" not in cover_src:
-    failures.append(
-        "generate_client_hello does not draw per-call entropy (rand::rng missing); "
-        "persona-seeded determinism regression"
-    )
+    failures.append("plan_tls_cover_record does not draw per-call entropy (rand::rng missing)")
+if "key_share_ext" in cover_src or "generate_client_hello" in cover_src or "xorshift" in cover_src:
+    failures.append("synthetic ClientHello builder is still present in tls_cover.rs")
 
 if failures:
     for failure in failures:

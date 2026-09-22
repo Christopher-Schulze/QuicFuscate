@@ -37,7 +37,7 @@ pub use tls_client_hello::TlsClientHelloProfileCatalog;
 #[doc(hidden)]
 pub use tls_cover::{
     derive_tls_cover_material, derive_tls_cover_material_from_entropy, plan_tls_cover_record,
-    TlsCover, TlsCoverCipherSuite, TlsCoverRecordPlan, TlsCoverRecordPlanError,
+    TlsCoverCipherSuite, TlsCoverRecordPlan, TlsCoverRecordPlanError,
 };
 #[doc(hidden)]
 pub use tls_profile::{profile_from_fingerprint, TlsProfile};

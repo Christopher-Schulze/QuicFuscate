@@ -130,26 +130,29 @@ async fn async_main(
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let _logging_flush_guard = quicfuscate::logging::FlushGuard::new();
 
-    // One-time validation of consolidated in-memory profiles.
-    // Logs warnings for any profile that doesn't pass the sanity checks.
+    // One-time validation that rustls can build a ClientHello for every persona.
     {
-        // Validate profiles using the deterministic ClientHello profile catalog.
-        let results = quicfuscate::stealth::TlsClientHelloProfileCatalog::available_profiles()
-            .into_iter()
-            .map(|(b, o)| {
-                // Simple validation - check if we can generate a ClientHello
-                let ch =
-                    quicfuscate::stealth::tls_cover::TlsCover::generate_client_hello(b, o, None);
-                let res: Result<(), String> =
-                    if ch.len() > 100 { Ok(()) } else { Err("ClientHello too short".into()) };
-                (b, o, res)
-            })
-            .collect::<Vec<_>>();
+        let personas = [
+            quicfuscate::qftls::TlsProfile::chrome_130(),
+            quicfuscate::qftls::TlsProfile::firefox_133(),
+            quicfuscate::qftls::TlsProfile::safari_18(),
+            quicfuscate::qftls::TlsProfile::edge_130(),
+            quicfuscate::qftls::TlsProfile::opera_115(),
+            quicfuscate::qftls::TlsProfile::brave_1_73(),
+        ];
         let mut failures = 0usize;
-        for (b, o, res) in results {
-            if let Err(e) = res {
-                failures += 1;
-                warn!("profile validation failed for {:?}/{:?}: {}", b, o, e);
+        for profile in personas {
+            let name = profile.name.clone();
+            match quicfuscate::qftls::RustlsProvider::client_hello_len_for_persona(&profile) {
+                Ok(len) if len > 100 => {}
+                Ok(len) => {
+                    failures += 1;
+                    warn!("profile validation failed for {name}: ClientHello length {len}");
+                }
+                Err(error) => {
+                    failures += 1;
+                    warn!("profile validation failed for {name}: {error}");
+                }
             }
         }
         if failures > 0 {

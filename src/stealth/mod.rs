@@ -72,7 +72,7 @@ pub use qf_stealth::{RateChoker, ServerPushState, ServerPushTriggerReason};
 #[cfg(test)]
 pub(crate) use crate::qftls::TlsCoverProvider;
 
-/// TLS Cover record generation for DPI evasion (synthetic ClientHello/ServerHello).
+/// TLS Cover record planning. The plaintext is opaque padding, not a ClientHello.
 pub mod tls_cover;
 
 /// TCP/ICMP fingerprint obfuscation (TODO-462).

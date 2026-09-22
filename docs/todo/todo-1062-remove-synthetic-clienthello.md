@@ -4,7 +4,7 @@ title: Stop emitting the synthetic ClientHello
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1047]
 ---
@@ -44,11 +44,26 @@ depends_on: [TODO-1047]
 
 ## Sub-Tasks
 
-- [ ] Call-site classification in Notes.
-- [ ] Remove emission of synthetic hellos on any socket or crypto frame.
-- [ ] Point startup validation at rustls.
-- [ ] Delete `key_share_ext` and unused builder functions.
-- [ ] `rg` finds no `key_share_ext`.
+- [x] Call-site classification in Notes.
+- [x] Remove emission of synthetic hellos on any socket or crypto frame.
+- [x] Point startup validation at rustls.
+- [x] Delete `key_share_ext` and unused builder functions.
+- [x] `rg` finds no `key_share_ext`.
+
+## Notes
+
+Call sites before the deletion:
+
+- `src/main/runtime.rs` startup check called `generate_client_hello` and accepted `len > 100`. Not a socket write. Now `RustlsProvider::client_hello_len_for_persona`.
+- `FingerprintProfile::new_with_snapshot` stored the builder output in `client_hello`. Nothing read those bytes onto a socket. The field is gone.
+- `plan_tls_cover_record` stamped plaintext with handshake type `0x01` and version `0x0303` before encryption. That stamp is gone. The record header stays a TLS record; the plaintext is random.
+- `src/qftls/tests.rs` parses rustls Initial frames. Those tests stay.
+- `crates/qf-reality` `client_hello` is captured cover-site bytes, not this builder.
+- Layout tests in `src/stealth/tests.rs` and `crates/qf-stealth/src/tls_cover.rs` asserted the xorshift hello. Deleted with the builder. ServerHello cipher-id tests stay.
+
+## Result
+
+No production or test function fills a key share from an xorshift seed. `rg key_share_ext` and `rg generate_client_hello` are empty in Rust. Cover records do not embed a ClientHello. Persona hellos come from rustls. TODO-1047 still owns making those hellos match a capture.
 
 ## Acceptance
 

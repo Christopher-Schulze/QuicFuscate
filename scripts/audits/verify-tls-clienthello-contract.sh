@@ -71,7 +71,8 @@ def main() -> int:
         catalog = read("crates/qf-stealth/src/tls_client_hello.rs")
         manager = read("src/stealth/manager.rs")
         connection = read("src/core/connection.rs")
-        stealth_tests = read("src/stealth/tests.rs")
+        qftls_tests = read("src/qftls/tests.rs")
+        cover = read("crates/qf-stealth/src/tls_cover.rs")
         qftls = read("src/qftls.rs")
     except (OSError, RuntimeError) as error:
         print(json.dumps({"schema": SCHEMA, "result": "FAIL", "error": str(error)}, indent=2))
@@ -127,9 +128,11 @@ def main() -> int:
     )
     require(
         "metadata_regression_coverage",
-        "deterministic_client_hello_metadata_excludes_chacha_for_chrome_and_firefox" in stealth_tests
-        and "profile.client_hello" in stealth_tests,
-        "deterministic compatibility metadata lacks the focused regression coverage",
+        "every_supported_persona_controls_the_real_rustls_client_hello_order" in qftls_tests
+        and "rustls_startup_validation_builds_every_persona_hello" in qftls_tests
+        and "key_share_ext" not in cover
+        and "generate_client_hello" not in cover,
+        "rustls persona ClientHello coverage is missing or the synthetic builder remains",
     )
     require(
         "canonical_docs_match",

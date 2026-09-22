@@ -525,7 +525,7 @@
 - Detail: `docs/todo/todo-1061-maybenot-wire-defense.md`
 
 ### TODO-1062 - Stop emitting the synthetic ClientHello
-- OPEN. Delete xorshift key shares and any path that would send `generate_client_hello`. Persona means rustls plus TODO-1047.
+- DONE. `key_share_ext`, `generate_client_hello`, and `FingerprintProfile.client_hello` are gone. Cover plaintext is random, not a stamped handshake. Startup validation builds a rustls ClientHello for each persona (`rustls_startup_validation_builds_every_persona_hello`). `every_supported_persona_controls_the_real_rustls_client_hello_order` still passes.
 - Detail: `docs/todo/todo-1062-remove-synthetic-clienthello.md`
 
 ### TODO-1063 - When UDP is blocked, fall back to MASQUE or real TLS

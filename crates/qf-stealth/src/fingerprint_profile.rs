@@ -1,6 +1,6 @@
 //! Complete browser/OS fingerprint profiles and TLS Cover cipher policy.
 
-use crate::tls_cover::{ServerHelloParamsOwned, TlsCover, TlsCoverCipherSuite};
+use crate::tls_cover::{ServerHelloParamsOwned, TlsCoverCipherSuite};
 use crate::{parse_profile_slot, BrowserProfile, OsProfile};
 use qf_common::env_utils::EnvSnapshot;
 use qf_cpu::{CpuFeature, FeatureDetector};
@@ -111,8 +111,6 @@ pub struct FingerprintProfile {
     pub initial_max_streams_bidi: u64,
     /// QUIC max_idle_timeout transport parameter (milliseconds).
     pub max_idle_timeout: u64,
-    /// Pre-built deterministic ClientHello bytes for compatibility and audit metadata.
-    pub client_hello: Option<Vec<u8>>,
     /// Synthetic ServerHello parameters for TLS Cover parity.
     pub server_hello: Option<ServerHelloParamsOwned>,
     /// Optional synthetic certificate chain for TLS Cover.
@@ -156,7 +154,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -169,7 +166,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_048_576,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 60_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -182,7 +178,6 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
            },
@@ -195,7 +190,6 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
            },
@@ -208,7 +202,6 @@ impl FingerprintProfile {
                initial_max_stream_data_bidi_remote: 1_000_000,
                initial_max_streams_bidi: 100,
                max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
            },
@@ -222,7 +215,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 2_097_152,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 45_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -235,7 +227,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -248,7 +239,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_048_576,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 60_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -261,7 +251,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_000_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -274,7 +263,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 1_048_576,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 60_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -287,7 +275,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -300,7 +287,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -313,7 +299,6 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
@@ -326,21 +311,12 @@ impl FingerprintProfile {
                 initial_max_stream_data_bidi_remote: 500_000,
                 initial_max_streams_bidi: 100,
                 max_idle_timeout: 30_000,
-                client_hello: None,
                 server_hello: None,
                 certificate: None,
             },
             // --- Fallback Profile ---
             _ => Self::new_with_snapshot(BrowserProfile::Chrome, OsProfile::Windows, environment),
         };
-
-        // Generate sophisticated ClientHello using browser-specific fingerprinting
-        profile.client_hello = Some(TlsCover::generate_client_hello_with_snapshot(
-            profile.browser,
-            profile.os,
-            None, // SNI will be added dynamically
-            environment,
-        ));
 
         // Generate matching ServerHello using the same cipher resolution as TLS Cover encryption.
         // This ensures the advertised cipher in ServerHello matches the actual cover cipher,
@@ -387,7 +363,6 @@ mod tests {
         assert_eq!(profile.os, OsProfile::Linux);
         assert_eq!(profile.user_agent, UA_FIREFOX_LINUX);
         assert_eq!(profile.accept_language, LANG_EN_US_05);
-        assert!(profile.client_hello.as_ref().is_some_and(|hello| hello.len() > 50));
         assert!(profile.server_hello.is_some());
     }
 

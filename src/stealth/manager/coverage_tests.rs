@@ -556,11 +556,10 @@ mod stealth_coverage_tests {
     }
 
     #[test]
-    fn fingerprint_profile_generates_client_hello() {
+    fn fingerprint_profile_does_not_store_a_synthetic_client_hello() {
         let fp = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
-        assert!(fp.client_hello.is_some());
-        let ch = fp.client_hello.as_ref().expect("client_hello");
-        assert!(ch.len() > 50, "ClientHello too short");
+        assert!(fp.server_hello.is_some());
+        assert!(fp.user_agent.contains("Chrome/"));
     }
 
     #[test]

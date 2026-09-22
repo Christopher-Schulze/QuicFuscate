@@ -432,6 +432,22 @@ fn every_supported_persona_controls_the_real_rustls_client_hello_order() {
 }
 
 #[test]
+fn rustls_startup_validation_builds_every_persona_hello() {
+    for profile in [
+        TlsProfile::chrome_130(),
+        TlsProfile::firefox_133(),
+        TlsProfile::safari_18(),
+        TlsProfile::edge_130(),
+        TlsProfile::opera_115(),
+        TlsProfile::brave_1_73(),
+    ] {
+        let len = RustlsProvider::client_hello_len_for_persona(&profile)
+            .unwrap_or_else(|error| panic!("{}: {error}", profile.name));
+        assert!(len > 100, "{} ClientHello length {len}", profile.name);
+    }
+}
+
+#[test]
 fn real_provider_rejects_every_0rtt_activation_path() {
     set_max_early_data_size(u32::MAX);
     let mut client =
