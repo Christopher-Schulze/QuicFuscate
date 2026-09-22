@@ -341,19 +341,37 @@ Terminal with `PrivateProtocolError::NegotiationTimeout` (fail-closed). Active, 
 and terminal states never expire. Unit coverage: expired-pending, fresh-pending,
 standard-immunity, active/terminal-immunity.
 
-Remaining open gates (unchanged): packet-capture wire evidence, x86_64 second-witness
-benchmarks, side-channel review, and the TODO-884 winner freeze that maps
-`aead_preference="auto"` to a concrete family so the shipped default actually negotiates.
+Remaining open gates: x86_64 second-witness benchmarks, side-channel review,
+and the TODO-884 winner freeze that maps `aead_preference="auto"` to a concrete
+family so the shipped default actually negotiates. ~~packet-capture wire
+evidence~~ closed 2026-09-22 by TODO-1029.
+
+## Wire proof (TODO-1029, 2026-09-22, Omega aarch64, QUIC v2)
+
+DONE — `src/bin/qf-aead-wire-proof.rs` against live netns pcaps with
+`SSLKEYLOGFILE` keylog + `QUICFUSCATE_PRIVATE_KEY_DUMP` install dump
+(schedule root + context hash for offline epoch derivation):
+
+- Private run (`mode=off` both peers): initial=3 / handshake=5 open rustls
+  AES-GCM; 9 pre-boundary 1-RTT standard; 50 post-boundary 1-RTT fail rustls
+  and open AEGIS-128L; zero unopened; zero standard above boundary; dump
+  boundaries mirrored (client w5/r4, server w4/r5) with identical directional
+  key bytes.
+- Control run (client `off`, server `stealth`): 69/69 packets rustls-only,
+  zero private, no dump emitted — mixed-policy negotiation never installs.
+- Analyzer handles QUIC v2, the fork's no-length-field long headers, private
+  epoch derivation (HKDF schedule), and coalesced GSO/GRO datagrams via
+  trial-open splitting.
+- Artifacts (operator-local, not committed): `/tmp/qf1029/runA4/` and
+  `/tmp/qf1029/runB/` on Omega.
 
 ## Split remaining work (2026-09-21, no implementation)
 
 - TODO-1044 owns the family freeze. TODO-1028 is blocked and must not freeze
   from the old ARM cells.
-- TODO-1029 owns Omega pcap/wire proof for this upgrade path.
 - Ship default is rustls AES-GCM (TODO-1033). This task stays the opt-in
   private upgrade machine and must not override that default.
 - TODO-1044 picked opt-in S-AEGIS. `aead_preference="auto"` still installs no
   family. The sentence above that says `auto` becomes the product default is
   superseded: the shipped default is `standard`.
-- TODO-1029 pcap is still required before any production private enable.
-  Live telemetry proof (`activated_total=1`) is not a substitute.
+- TODO-1029 pcap wire proof is DONE (see above).

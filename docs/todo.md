@@ -242,7 +242,7 @@
 - Detail: `docs/todo/todo-904-ci-lane-consolidation.md`
 
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
-- DONE for the bakeoff decision. No advanced family is the ship default. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refuses the old ARM freeze. Ship default stays TODO-1033 rustls AES-GCM. TODO-1029 pcap remains open before any production private enable.
+- DONE for the bakeoff decision. No advanced family is the ship default. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refuses the old ARM freeze. Ship default stays TODO-1033 rustls AES-GCM. TODO-1029 wire proof is done on Omega.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
@@ -384,7 +384,7 @@
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
 ### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
-- IN_PROGRESS. Core implemented. TODO-1044 recorded the family as opt-in S-AEGIS, not the ship default, and `auto` still installs no family. Remaining gate: TODO-1029 pcap before any production private enable.
+- IN_PROGRESS. Core implemented. TODO-1044 recorded the family as opt-in S-AEGIS, not the ship default, and `auto` still installs no family. TODO-1029 wire proof is DONE on Omega: boundary-exact private activation, standard-only control, zero unopened packets.
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
 
 ### TODO-1028 - Freeze TODO-884 advanced-family winner from existing ARM evidence
@@ -392,7 +392,7 @@
 - Detail: `docs/todo/todo-1028-freeze-884-arm-winner.md`
 
 ### TODO-1029 - Omega pcap/wire proof for private AEAD upgrade (TODO-885)
-- UNAVAILABLE. No packet capture this session. Telemetry is not wire proof. Production private enable stays blocked.
+- DONE. Both peers `mode=off`: initial/handshake open rustls AES-GCM, 9 standard 1-RTT below boundary, 50 private AEGIS 1-RTT above boundary, zero unopened, zero standard above boundary. Control run (client off + server stealth): 69/69 rustls-only, no private install. Coalesced GSO datagrams split by trial open in `src/bin/qf-aead-wire-proof.rs`.
 - Detail: `docs/todo/todo-1029-omega-pcap-private-aead.md`
 
 ### TODO-1030 - Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
