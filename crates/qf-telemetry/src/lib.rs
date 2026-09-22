@@ -659,6 +659,9 @@ pub static FEC_REPAIRS_BUDGET_DROPPED: Counter = Counter::new();
 /// Cover PING ticks skipped because the shared wire byte budget was
 /// exhausted (TODO-1052).
 pub static COVER_PING_BUDGET_SKIPPED: Counter = Counter::new();
+/// Idle-timeout keepalive PINGs emitted past `max_idle_timeout/2` of
+/// silence (TODO-1054): counted as a keepalive, not as persona mimicry.
+pub static COVER_PING_IDLE_KEEPALIVE: Counter = Counter::new();
 
 fn atomic_saturating_sub(value: &AtomicU64, decrement: u64) {
     let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

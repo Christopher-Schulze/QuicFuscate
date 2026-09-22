@@ -488,27 +488,20 @@ fn legacy_padding_spellings_map_to_wire_shapes() {
 }
 
 #[test]
-fn cover_ping_should_send_respects_interval() {
+fn cover_ping_policy_gate_has_no_interval_grid() {
     let optimization = Arc::new(OptimizationManager::new());
     let crypto = Arc::new(CryptoManager::new());
     let mut cfg = StealthConfig::stealth();
-    // Very short interval so the test doesn't have to sleep long
+    // TODO-1054: the interval value is deprecated — only the enable flag
+    // matters. The persona trace inside the wire ledger owns the cadence.
     cfg.cover_ping_interval_ms = 20;
     let manager = StealthManager::new(cfg, optimization, crypto);
 
-    // First call: interval elapsed (next_cover_ping initialized to Instant::now())
-    assert!(
-        manager.should_send_cover_ping(),
-        "first call must return true - interval elapsed at init"
-    );
-    // Immediate second call: interval not elapsed yet
-    assert!(
-        !manager.should_send_cover_ping(),
-        "immediate second call must return false - interval not elapsed"
-    );
-    // After sleeping past the interval it should fire again
+    assert!(manager.cover_ping_enabled(), "stealth preset keeps the cover policy on");
+    // Repeated calls never toggle: there is no countdown left to consult.
+    assert!(manager.cover_ping_enabled());
     std::thread::sleep(std::time::Duration::from_millis(25));
-    assert!(manager.should_send_cover_ping(), "call after interval elapsed must return true again");
+    assert!(manager.cover_ping_enabled());
 }
 
 #[test]
@@ -517,7 +510,7 @@ fn cover_ping_disabled_when_config_off() {
     let crypto = Arc::new(CryptoManager::new());
     let manager = StealthManager::new(StealthConfig::off(), optimization, crypto);
     // off() preset has enable_cover_ping = false
-    assert!(!manager.should_send_cover_ping(), "off preset must never fire cover ping");
+    assert!(!manager.cover_ping_enabled(), "off preset must never fire cover ping");
 }
 
 #[test]

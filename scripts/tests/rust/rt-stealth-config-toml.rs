@@ -136,18 +136,21 @@ fn off_preset_has_normalize_target_zero() {
 fn stealth_preset_enables_cover_ping() {
     let cfg = StealthConfig::stealth();
     assert!(cfg.enable_cover_ping);
-    assert_eq!(cfg.cover_ping_interval_ms, 30_000);
+    // TODO-1054: no fixed interval — the persona trace owns the cadence.
+    assert_eq!(cfg.cover_ping_interval_ms, 0);
 }
 
 #[test]
 fn anti_dpi_preset_has_aggressive_cover_ping() {
     let cfg = StealthConfig::stealth_max();
     assert!(cfg.enable_cover_ping);
-    assert_eq!(cfg.cover_ping_interval_ms, 15_000);
+    assert_eq!(cfg.cover_ping_interval_ms, 0);
 }
 
 #[test]
 fn cover_ping_config_roundtrips_toml() {
+    // The deprecated interval key still parses but is ignored — only the
+    // enable flag decides whether the persona trace may emit cover PINGs.
     let toml = r#"
 [stealth]
 enable_cover_ping = true
@@ -155,7 +158,6 @@ cover_ping_interval_ms = 5000
 "#;
     let cfg = StealthConfig::from_toml(toml).expect("parse cover ping config");
     assert!(cfg.enable_cover_ping);
-    assert_eq!(cfg.cover_ping_interval_ms, 5000);
 }
 
 #[test]

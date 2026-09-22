@@ -3939,7 +3939,7 @@ TLS Cover is optional and does not replace native TLS security semantics.
 
 **Post-handshake cover mechanisms (three layers):**
 
-1. **Cover PINGs** (`StealthConfig.enable_cover_ping`, `cover_ping_interval_ms`): ack-eliciting QUIC `PING` frames injected at the configured interval (default 30 s for Stealth, 15 s for Anti-DPI). Wired in `core.rs` via `StealthManager::should_send_cover_ping()` -> `Connection::queue_cover_ping()`. Mimics idle browser/HTTP3 keepalive patterns.
+1. **Cover PINGs** (`StealthConfig.enable_cover_ping`): ack-eliciting QUIC `PING` frames emitted only when the persona trace would send (TODO-1054). The wire ledger replays `PersonaTrace.client_schedule()` — when the connection has been quiet for the next captured delta, the PING datagram is padded to the captured wire length via `set_short_header_pad_target` and paid from the shared budget; a denied slot is consumed, never replayed as a burst. The fixed 15 s/30 s interval grid is gone (`cover_ping_interval_ms` still parses but is ignored). A quiet browser is quiet: after the trace ends, the schedule ends. Wired in `core.rs` via `Connection::cover_ping_due()` -> `queue_cover_ping()`. Separately, `idle_keepalive_due()` emits one budgeted PING past `max_idle_timeout/2` of peer silence so a trace quieter than the idle horizon cannot kill the connection — counted via `COVER_PING_IDLE_KEEPALIVE` as a keepalive, not mimicry.
 
 2. **Fixed-cell padding** (`WireShape::FixedCell`, legacy `packet_normalize`/`normalize` spellings): all 1-RTT packets are padded to `normalize_target_size` bytes so wire-visible packet sizes are uniform — paid from the shared wire budget like every other stealth byte. Prevents length-based traffic analysis.
 

@@ -107,9 +107,13 @@ pub struct StealthConfig {
     pub compress_deny: Vec<String>,
     /// Target packet size in bytes for PacketNormalize padding strategy (0 = disabled).
     pub normalize_target_size: usize,
-    /// Emit periodic QUIC PING frames post-handshake to maintain realistic activity patterns.
+    /// Emit cover PING frames post-handshake (TODO-1054). When set, the
+    /// persona trace inside the wire ledger decides when a PING is due and
+    /// how long its datagram is — this is a policy switch, not a cadence.
     pub enable_cover_ping: bool,
-    /// Interval between cover PINGs in milliseconds (0 = disabled).
+    /// Deprecated: the fixed interval grid was removed in TODO-1054. The
+    /// key still parses for config compatibility but its value is ignored —
+    /// `enable_cover_ping` alone selects trace-driven emission vs. none.
     pub cover_ping_interval_ms: u64,
 }
 
@@ -286,9 +290,10 @@ impl StealthConfig {
                 "application/zip".into(),
             ],
             normalize_target_size: 0,
-            // Cover PING: enabled in Stealth mode - keepalive every 30 s looks like an idle browser
+            // Cover PING: enabled in Stealth mode — the persona trace
+            // decides when a ping is due (TODO-1054), no fixed interval.
             enable_cover_ping: true,
-            cover_ping_interval_ms: 30_000,
+            cover_ping_interval_ms: 0,
         }
     }
 
@@ -342,9 +347,10 @@ impl StealthConfig {
             ],
             // PacketNormalize: normalize to 1200 bytes in Anti-DPI (maximum size uniformity)
             normalize_target_size: 1200,
-            // Cover PING: aggressive interval in Anti-DPI (every 15 s)
+            // Cover PING: enabled — the persona trace decides when a ping
+            // is due (TODO-1054), no fixed interval.
             enable_cover_ping: true,
-            cover_ping_interval_ms: 15_000,
+            cover_ping_interval_ms: 0,
         }
     }
 

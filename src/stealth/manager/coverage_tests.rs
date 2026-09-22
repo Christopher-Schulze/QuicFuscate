@@ -278,7 +278,9 @@ mod stealth_coverage_tests {
         assert!(cfg.use_tls_cover);
         assert!(cfg.enable_cover_ping);
         assert_eq!(cfg.wire_shape, WireShape::PersonaTrace);
-        assert_eq!(cfg.cover_ping_interval_ms, 30_000);
+        // TODO-1054: the fixed interval grid is gone — the persona trace
+        // inside the wire ledger decides when a cover PING is due.
+        assert_eq!(cfg.cover_ping_interval_ms, 0);
     }
 
     #[test]
@@ -396,16 +398,17 @@ mod stealth_coverage_tests {
     #[test]
     fn cover_ping_disabled_when_off() {
         let m = make_manager(StealthConfig::off());
-        assert!(!m.should_send_cover_ping());
+        assert!(!m.cover_ping_enabled());
     }
 
     #[test]
     fn cover_ping_enabled_in_stealth() {
         let m = make_manager(StealthConfig::stealth());
-        // First call should return true (now >= initial deadline)
-        assert!(m.should_send_cover_ping());
-        // Immediately after, it should return false (interval not elapsed)
-        assert!(!m.should_send_cover_ping());
+        // Policy gate only: the wire ledger's persona trace owns the
+        // schedule — this flag just says cover PINGs may be considered.
+        assert!(m.cover_ping_enabled());
+        let m = make_manager(StealthConfig::performance());
+        assert!(!m.cover_ping_enabled());
     }
 
     // =========================================================================

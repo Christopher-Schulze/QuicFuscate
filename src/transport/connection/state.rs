@@ -191,6 +191,10 @@ pub struct Connection {
     /// adds zero stealth bytes. Installed by the owning runtime from
     /// `StealthManager::build_wire_ledger`.
     pub(super) wire_ledger: Option<qf_stealth::BudgetLedger>,
+    /// Inbound-activity marker the idle keepalive already fired for
+    /// (TODO-1054). One PING per silent stretch — re-armed only when the
+    /// peer speaks again and `last_activity` moves past the mark.
+    pub(super) idle_keepalive_mark: Option<std::time::Instant>,
     #[cfg(test)]
     pub(crate) admitted_seal_batch_calls: u64,
     #[cfg(test)]

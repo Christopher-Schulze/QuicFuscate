@@ -493,7 +493,7 @@
 - Detail: `docs/todo/todo-1053-single-clock-under-pto.md`
 
 ### TODO-1054 - Cover PING only when the persona trace would send
-- OPEN. Delete the 15 s / 30 s grid. PING follows TODO-1052 or stays silent. Idle timeout may send one counted keepalive.
+- DONE. The 15 s/30 s grid is gone: `BudgetLedger::cover_ping_due` replays the persona's captured client-send deltas against the last wire emission, pads the PING to the trace length, and pays the shared budget — suppressed slots are consumed, never replayed. One budgeted keepalive past `idle/2` survives traces quieter than the idle horizon (`COVER_PING_IDLE_KEEPALIVE`).
 - Detail: `docs/todo/todo-1054-cover-ping-follows-persona-trace.md`
 
 ### TODO-1055 - QPACK, User-Agent, and server push only on the outer hop

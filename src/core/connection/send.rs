@@ -586,13 +586,25 @@ impl QuicFuscateConnection {
             return Ok((len, send_info));
         }
 
-        // Cover PING: inject post-handshake keepalive if the interval has
-        // elapsed AND the shared wire ledger can pay for the datagram
-        // (~48 wire bytes: short header + PING + AEAD tag). Cover is the
-        // last spender: a denied tick is skipped, never sent over the cap.
-        if established && !path_control_pending && self.stealth_manager.should_send_cover_ping() {
+        // Cover PING (TODO-1054): no fixed grid. The persona trace inside
+        // the wire ledger decides *when* a client packet is due and how
+        // long its datagram is; the same padder pads the PING packet to
+        // the captured length. A denied slot is consumed — never a burst.
+        if established && !path_control_pending && self.stealth_manager.cover_ping_enabled() {
+            if let Some(trace_len) = self.conn.cover_ping_due() {
+                self.conn.queue_cover_ping();
+                self.conn.set_short_header_pad_target(trace_len as usize);
+            }
+        }
+
+        // Idle keepalive (TODO-1054 risk): when the trace stays silent
+        // past max_idle_timeout/2, one PING keeps the connection alive.
+        // It spends the same cover budget and is recorded as a keepalive,
+        // not as mimicry — there is no second grid.
+        if established && !path_control_pending && self.conn.idle_keepalive_due() {
             if self.conn.try_spend_wire_cover(48) {
                 self.conn.queue_cover_ping();
+                crate::telemetry::COVER_PING_IDLE_KEEPALIVE.inc();
             } else {
                 crate::telemetry::COVER_PING_BUDGET_SKIPPED.inc();
             }

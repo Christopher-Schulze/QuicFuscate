@@ -325,6 +325,9 @@ impl Connection {
                 if !self.is_established && self.stats.recv > 0 && self.stats.sent > 0 {
                     self.is_established = true;
                 }
+                if let Some(ledger) = self.wire_ledger.as_mut() {
+                    ledger.note_wire_send(now);
+                }
                 return Ok((
                     used,
                     SendInfo {
@@ -582,6 +585,9 @@ impl Connection {
             let mut deferred = frame;
             deferred.plaintext_end = off;
             self.admitted_batch_frames.push(deferred);
+            if let Some(ledger) = self.wire_ledger.as_mut() {
+                ledger.note_wire_send(now);
+            }
             return Ok((
                 off,
                 SendInfo {
@@ -596,6 +602,9 @@ impl Connection {
         }
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
         let info = self.account_admitted_short_header(off, &frame)?;
+        if let Some(ledger) = self.wire_ledger.as_mut() {
+            ledger.note_wire_send(now);
+        }
         Ok((off, info))
     }
 
@@ -803,6 +812,34 @@ impl Connection {
             Some(ledger) => ledger.try_spend(bytes, self.clock.now()),
             None => true,
         }
+    }
+
+    /// Ask the persona trace whether a client packet is due now and the
+    /// shared budget can pay for it (TODO-1054). Returns the captured wire
+    /// length the PING datagram must be padded to — the caller pads via
+    /// `set_short_header_pad_target` — or `None` to stay silent. Ledgerless
+    /// connections (`off`/`performance`) have no trace and never answer
+    /// `Some`.
+    pub(crate) fn cover_ping_due(&mut self) -> Option<u64> {
+        self.wire_ledger.as_mut()?.cover_ping_due(self.clock.now())
+    }
+
+    /// Whether an idle-timeout keepalive PING is due (TODO-1054 risk):
+    /// when the peer has been silent past `max_idle_timeout/2`, emit one
+    /// PING so the connection survives a trace that is quieter than the
+    /// idle horizon. Fires once per silent stretch — the mark re-arms only
+    /// when inbound activity resumes. This is a keepalive, not mimicry;
+    /// the caller still has to pay it from the wire budget.
+    pub(crate) fn idle_keepalive_due(&mut self) -> bool {
+        let Some(window) = self.timeout() else { return false };
+        if self.clock.elapsed_since(self.last_activity) < window / 2 {
+            return false;
+        }
+        if self.idle_keepalive_mark == Some(self.last_activity) {
+            return false;
+        }
+        self.idle_keepalive_mark = Some(self.last_activity);
+        true
     }
 
     /// Compute stealth padding length given current plaintext payload length and budget.

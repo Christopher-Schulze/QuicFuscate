@@ -295,6 +295,40 @@ mod tests {
         }
     }
 
+    // --- Trace-driven cover PING + idle keepalive (TODO-1054) ---
+
+    #[test]
+    fn idle_keepalive_fires_once_per_silent_stretch() {
+        use qf_common::time_source::test_support::ManualTimeSource;
+        let clock = ManualTimeSource::new(std::time::Instant::now(), std::time::SystemTime::now());
+        let _guard = crate::time_source::install_for_test(clock.clone());
+        let mut conn = make_conn_with_padding(false, 0, 0);
+        // Default max_idle_timeout is 30 s: past 15 s of peer silence one
+        // keepalive is due — it is a keepalive, not mimicry, and it does
+        // not form a grid.
+        assert!(!conn.idle_keepalive_due());
+        clock.advance(std::time::Duration::from_secs(16));
+        assert!(conn.idle_keepalive_due(), "past idle/2 a keepalive is due");
+        assert!(!conn.idle_keepalive_due(), "one per silent stretch, not per poll");
+        clock.advance(std::time::Duration::from_secs(60));
+        assert!(!conn.idle_keepalive_due(), "still no second keepalive without inbound");
+    }
+
+    #[test]
+    fn cover_ping_due_requires_a_ledger_and_trace() {
+        // Ledgerless connection: never due.
+        let mut conn = make_conn_with_padding(false, 0, 0);
+        assert_eq!(conn.cover_ping_due(), None);
+        // FixedCell ledger: no trace, never due.
+        let mut conn = ledger_conn(qf_stealth::WireShape::FixedCell, 1 << 20, 1 << 20);
+        assert_eq!(conn.cover_ping_due(), None);
+        // PersonaTrace ledger: the first captured send is due once the
+        // connection has been quiet for its delta.
+        let mut conn = ledger_conn(qf_stealth::WireShape::PersonaTrace, 1 << 20, 1 << 20);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(conn.cover_ping_due().is_some(), "first trace send is nearly immediate");
+    }
+
     // --- QUIC version negotiation (TODO-453) ---
 
     #[test]

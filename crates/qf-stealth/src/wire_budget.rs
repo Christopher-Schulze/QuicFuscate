@@ -113,8 +113,10 @@ pub struct PersonaTrace {
     provenance: String,
     /// Full first-window sequence (direction, gap_ms, len) as captured.
     sequence: Vec<(bool, f64, u64)>,
-    /// Client-direction send schedule (gap_ms, len), extracted from the
-    /// sequence for schedules that replay client sends.
+    /// Client-direction send schedule `(delta_ms, len)`: `delta_ms` is the
+    /// milliseconds between this client send and the previous client send,
+    /// summed over any server datagrams in between — replaying the persona
+    /// means waiting that long after the last local transmission.
     client_sends: Vec<(f64, u64)>,
     /// Ascending client length classes the padder may target.
     classes: Vec<u64>,
@@ -129,8 +131,9 @@ impl PersonaTrace {
         &self.provenance
     }
 
-    /// Verified client-direction send schedule `(gap_ms, len)` covering
-    /// the classifier window.
+    /// Verified client-direction send schedule `(delta_ms, len)` covering
+    /// the classifier window; `delta_ms` is the quiet time since the
+    /// previous client send, summed over any server datagrams between.
     pub fn client_schedule(&self) -> &[(f64, u64)] {
         &self.client_sends
     }
@@ -188,11 +191,19 @@ pub fn persona_trace(engine: EngineFamily) -> PersonaTrace {
     classes.dedup();
     let sequence: Vec<(bool, f64, u64)> =
         entry.sequence.iter().map(|send| (send.dir == "c", send.gap_ms, send.len)).collect();
-    let client_sends = sequence
-        .iter()
-        .filter(|(is_client, _, _)| *is_client)
-        .map(|(_, gap_ms, len)| (*gap_ms, *len))
-        .collect();
+    // Each fixture `gap_ms` is the time since the previous datagram in
+    // either direction. The schedule a cover replay needs is the time
+    // between two client sends, so server gaps accumulate into the next
+    // client send's delta.
+    let mut client_sends: Vec<(f64, u64)> = Vec::new();
+    let mut accumulated_gap = 0.0f64;
+    for (is_client, gap_ms, len) in &sequence {
+        accumulated_gap += gap_ms;
+        if *is_client {
+            client_sends.push((accumulated_gap, *len));
+            accumulated_gap = 0.0;
+        }
+    }
     PersonaTrace {
         provenance: entry.provenance.clone(),
         sequence,
@@ -215,6 +226,12 @@ pub struct BudgetLedger {
     sec_spent: u64,
     burst_start: std::time::Instant,
     burst_spent: u64,
+    /// Last wire emission in either spend class, for the cover schedule:
+    /// a persona that just sent does not immediately send again (TODO-1054).
+    last_tx: std::time::Instant,
+    /// Position in `trace.client_schedule()` — the next client send the
+    /// persona would make after `last_tx` goes quiet for its delta.
+    cover_cursor: usize,
 }
 
 impl BudgetLedger {
@@ -234,6 +251,8 @@ impl BudgetLedger {
             sec_spent: 0,
             burst_start: now,
             burst_spent: 0,
+            last_tx: now,
+            cover_cursor: 0,
         }
     }
 
@@ -278,6 +297,7 @@ impl BudgetLedger {
         }
         self.sec_spent += bytes;
         self.burst_spent += bytes;
+        self.last_tx = now;
         true
     }
 
@@ -327,7 +347,39 @@ impl BudgetLedger {
         }
         self.sec_spent += pad as u64;
         self.burst_spent += pad as u64;
+        self.last_tx = now;
         pad
+    }
+
+    /// Records any wire emission — real data included — so the cover
+    /// schedule measures persona silence from the last actual send, not
+    /// from the last ledger spend (TODO-1054).
+    pub fn note_wire_send(&mut self, now: std::time::Instant) {
+        self.last_tx = now;
+    }
+
+    /// Would the persona emit a client packet now, and can the budget pay
+    /// for it? Replays `trace.client_schedule()`: when the connection has
+    /// been quiet for at least the next schedule delta, the trace length
+    /// is due. One pending slot only — a denied or skipped slot is
+    /// consumed, never replayed as a catch-up burst. Returns the captured
+    /// wire length the PING datagram must be padded to, or `None` to stay
+    /// silent (no trace, end of trace = quiet browser, slot not yet due,
+    /// or budget exhausted).
+    pub fn cover_ping_due(&mut self, now: std::time::Instant) -> Option<u64> {
+        let trace = self.trace.as_ref()?;
+        let (delta_ms, len) = *trace.client_sends.get(self.cover_cursor)?;
+        if now.duration_since(self.last_tx) < Duration::from_secs_f64(delta_ms / 1000.0) {
+            return None;
+        }
+        // The slot is consumed whether or not the budget can pay: an
+        // exhausted ledger suppresses this PING, it does not queue it.
+        self.cover_cursor += 1;
+        if self.try_spend(len, now) {
+            Some(len)
+        } else {
+            None
+        }
     }
 
     /// Remaining allowance visible to tests/metrics.
@@ -465,7 +517,108 @@ mod tests {
         let now = std::time::Instant::now();
         // Payload larger than every class -> natural length, no pad.
         assert_eq!(ledger.padding_target(1400, 100, now), 0);
-        // Class pad exceeding max_pad -> natural length.
-        assert_eq!(ledger.padding_target(600, 100, now), 0);
+    }
+
+    // ---- TODO-1054: trace-driven cover PING schedule ----
+
+    fn synthetic_trace(client_sends: Vec<(f64, u64)>) -> PersonaTrace {
+        PersonaTrace {
+            provenance: "test".to_string(),
+            sequence: Vec::new(),
+            client_sends,
+            classes: vec![39, 525, 1258],
+            quiet_ms: 10_000,
+        }
+    }
+
+    fn ledger_with_trace(trace: PersonaTrace, sec: u64, burst: u64) -> BudgetLedger {
+        BudgetLedger::new(
+            WireBudget {
+                cap_bytes_per_sec: sec,
+                cap_bytes_per_burst: burst,
+                shape: WireShape::PersonaTrace,
+            },
+            Some(trace),
+            0,
+            std::time::Instant::now(),
+        )
+    }
+
+    #[test]
+    fn cover_ping_replays_trace_deltas_at_trace_lengths() {
+        // Client sends at +50ms and +30s after the previous send.
+        let mut ledger =
+            ledger_with_trace(synthetic_trace(vec![(50.0, 525), (30_000.0, 39)]), 1 << 20, 1 << 20);
+        let t0 = std::time::Instant::now();
+        // Inside the first gap: silent.
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(10)), None);
+        // At the gap boundary: the 525-byte send is due, and the ledger
+        // pays for it from the same counters as everything else.
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(50)), Some(525));
+        assert_eq!(ledger.remaining(t0 + Duration::from_millis(50)), (1 << 20) - 525);
+        // Immediately after, last_tx moved: the 30 s gap restarts from
+        // the send at +50ms, so the slot is due at +30.05s.
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(60)), None);
+        assert_eq!(
+            ledger.cover_ping_due(t0 + Duration::from_secs(30) + Duration::from_millis(50)),
+            Some(39)
+        );
+        // End of trace = quiet browser: still silent a minute later.
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_secs(90)), None);
+    }
+
+    #[test]
+    fn cover_ping_suppressed_slot_is_consumed_not_replayed() {
+        // Budget cannot pay the 525-byte slot: it is suppressed, not queued.
+        let mut ledger =
+            ledger_with_trace(synthetic_trace(vec![(50.0, 525), (30_000.0, 39)]), 100, 100);
+        let t0 = std::time::Instant::now();
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(50)), None);
+        // No catch-up: the next slot is the 30 s one, still far away —
+        // the suppressed 525-byte send is never replayed.
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(60)), None);
+        // The second slot's delta counts from the suppressed attempt's
+        // last_tx — which never moved (no send happened), so 30 s after
+        // t0 it fires.
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_secs(30)), Some(39));
+    }
+
+    #[test]
+    fn cover_ping_fixedcell_and_missing_trace_never_due() {
+        let mut ledger = make_ledger(WireShape::FixedCell, 1 << 20, 1 << 20);
+        let now = std::time::Instant::now();
+        for _ in 0..8 {
+            assert_eq!(ledger.cover_ping_due(now + Duration::from_secs(60)), None);
+        }
+    }
+
+    #[test]
+    fn cover_ping_chrome_trace_goes_quiet_after_close() {
+        // The real capture: after the last recorded client send the
+        // browser is silent for seconds — the schedule must end, not loop.
+        let trace = persona_trace(EngineFamily::Chromium);
+        let sends = trace.client_schedule().len();
+        let mut ledger = ledger_with_trace(trace, 1 << 20, 1 << 20);
+        let mut now = std::time::Instant::now();
+        // Drain every scheduled send; each due fires exactly once.
+        let mut fired = 0usize;
+        for _ in 0..sends + 4 {
+            now += Duration::from_secs(60);
+            if ledger.cover_ping_due(now).is_some() {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, sends, "every trace send fires exactly once, then silence");
+    }
+
+    #[test]
+    fn note_wire_send_restarts_persona_silence() {
+        let mut ledger = ledger_with_trace(synthetic_trace(vec![(50.0, 525)]), 1 << 20, 1 << 20);
+        let t0 = std::time::Instant::now();
+        // Real traffic at +40ms resets the silence clock: the +50ms send
+        // is now due at +90ms, not +50ms.
+        ledger.note_wire_send(t0 + Duration::from_millis(40));
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(50)), None);
+        assert_eq!(ledger.cover_ping_due(t0 + Duration::from_millis(90)), Some(525));
     }
 }

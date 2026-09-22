@@ -65,8 +65,6 @@ pub struct StealthManager {
     pub(crate) cover_cache: Option<Arc<crate::reality::CoverHandshakeCache>>,
     /// Shared runtime owner for background Reality and profile workers.
     _background_owner: Option<Arc<StealthRuntimeOwner>>,
-    /// Next scheduled cover PING emission time
-    next_cover_ping: parking_lot::Mutex<std::time::Instant>,
 }
 
 #[cfg(test)]
@@ -255,7 +253,6 @@ impl StealthManager {
             fallback_rx: Arc::new(Mutex::new(rx)),
             cover_cache,
             _background_owner: runtime_owner,
-            next_cover_ping: parking_lot::Mutex::new(clock.now()),
         }
     }
 
@@ -1465,23 +1462,14 @@ impl StealthManager {
         self.cover_cache.as_ref()?.get()
     }
 
-    /// Returns true if a cover PING should be sent now, and advances the internal timer.
-    ///
-    /// Cover PINGs are ack-eliciting QUIC PING frames injected post-handshake to maintain
-    /// realistic keepalive traffic patterns matching idle browser/HTTP3 sessions.
-    pub(crate) fn should_send_cover_ping(&self) -> bool {
-        if !self.config.enable_cover_ping || self.config.cover_ping_interval_ms == 0 {
-            return false;
-        }
-        let interval = std::time::Duration::from_millis(self.config.cover_ping_interval_ms);
-        let mut guard = self.next_cover_ping.lock();
-        let now = self.clock.now();
-        if now >= *guard {
-            *guard = now.checked_add(interval).unwrap_or(now);
-            true
-        } else {
-            false
-        }
+    /// Whether this connection may emit cover PINGs at all (TODO-1054).
+    /// This is only a policy gate: the fixed interval grid is gone — the
+    /// persona trace inside the wire ledger decides *when* a PING is due
+    /// and how long its datagram is. `off`/`performance` and FixedCell
+    /// (no trace) never emit.
+    pub(crate) fn cover_ping_enabled(&self) -> bool {
+        self.config.enable_cover_ping
+            && !matches!(self.config.mode, StealthMode::Off | StealthMode::Performance)
     }
 
     /// Polls for upstream responses to route back to the scanner.

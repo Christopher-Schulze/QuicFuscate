@@ -381,6 +381,11 @@ pub fn export_telemetry_text() -> String {
             "quicfuscate_cover_ping_budget_skipped_total {}",
             COVER_PING_BUDGET_SKIPPED.get()
         );
+        let _ = writeln!(
+            out,
+            "quicfuscate_cover_ping_idle_keepalive_total {}",
+            COVER_PING_IDLE_KEEPALIVE.get()
+        );
     } // end fec
 
     // MASQUE
