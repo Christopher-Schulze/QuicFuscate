@@ -184,6 +184,8 @@ pub struct Connection {
     pub(super) admitted_batch_dgram_skip: usize,
     pub(super) admitted_batch_frames: Vec<AdmittedShortHeader>,
     pub(super) admitted_batch_held_streams: Vec<u64>,
+    /// When set, the next short-header packet is padded so its sealed length matches.
+    pub(super) pad_short_header_to: Option<usize>,
     #[cfg(test)]
     pub(crate) admitted_seal_batch_calls: u64,
     #[cfg(test)]

@@ -1,10 +1,14 @@
 use super::*;
 
 fn test_connection() -> QuicFuscateConnection {
+    test_connection_with(StealthConfig::default())
+}
+
+fn test_connection_with(stealth: StealthConfig) -> QuicFuscateConnection {
     let pair = crate::transport::connection::bench_paired_1rtt_connections();
     let optimization_manager = Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
     let stealth_manager = Arc::new(StealthManager::new(
-        StealthConfig::default(),
+        stealth,
         Arc::clone(&optimization_manager),
         Arc::new(CryptoManager::new()),
     ));
@@ -617,8 +621,8 @@ fn pending_path_control_preempts_buffered_fec_datagram() {
 /// adaptive-FEC callback counters.
 #[test]
 fn repair_ack_round_trip_reports_masked_wire_loss_to_cc() {
-    let mut reporter = test_connection();
-    let mut sender = test_connection();
+    let mut reporter = test_connection_with(StealthConfig::performance());
+    let mut sender = test_connection_with(StealthConfig::performance());
     let profile = WireProfile {
         epoch: 11,
         codec: wire::WireCodec::Gf8,
@@ -718,7 +722,7 @@ fn repair_ack_round_trip_reports_masked_wire_loss_to_cc() {
 /// must be dropped without touching loss accounting (TODO-1006).
 #[test]
 fn repair_ack_stale_epoch_is_dropped() {
-    let mut sender = test_connection();
+    let mut sender = test_connection_with(StealthConfig::performance());
     sender.fec_tx_profile = Some(WireProfile {
         epoch: 12,
         codec: wire::WireCodec::Gf8,
@@ -1629,4 +1633,48 @@ fn open_window_aborts_when_dgram_queue_hits_abort_depth() {
     assert!(connection.bulk_window_release.get().is_none());
     assert!(connection.burst_draining.get());
     assert!(connection.drain_budget.get() > 0);
+}
+
+#[test]
+fn stealth_drops_cleartext_fec_wrapper() {
+    let mut conn = test_connection();
+    assert_eq!(conn.fec_framing(), crate::engine::FecFraming::QuicFrame);
+    let packet = [0xF1u8, 0xEC, 0x01, 0x00];
+    conn.recv_on_path(&packet, conn.peer_addr, conn.local_addr).expect("drop wrapper");
+    assert_eq!(conn.fec_wrapper_drops(), 1);
+    let mut performance = test_connection_with(StealthConfig::performance());
+    assert_eq!(performance.fec_framing(), crate::engine::FecFraming::Wrapper);
+    performance
+        .recv_on_path(&packet, performance.peer_addr, performance.local_addr)
+        .expect("wrapper mode still accepts the prefix");
+    assert_eq!(performance.fec_wrapper_drops(), 0);
+}
+
+#[test]
+fn quic_repair_from_previous_epoch_is_rejected() {
+    let mut conn = test_connection();
+    conn.fence_fec_symbol_epoch(8);
+    let meta = wire::WirePacketMeta {
+        profile: wire::WireProfile {
+            epoch: 4,
+            codec: wire::WireCodec::Gf8,
+            source_count: 4,
+            total_count: 6,
+            interleave_depth: 1,
+        },
+        window: 0,
+        sequence: 1,
+        repair_index: wire::SYSTEMATIC_REPAIR_INDEX,
+        block_index: 0,
+        systematic: true,
+        sliding: false,
+    };
+    let mut symbol = vec![0u8; wire::SYMBOL_HEADER_LEN + 4];
+    let written = wire::write_symbol(meta, &[1, 2, 3, 4], &mut symbol).expect("symbol");
+    let mut blob = vec![wire::QUIC_REPAIR_DISCRIMINATOR];
+    blob.extend_from_slice(&symbol[..written]);
+    conn.conn.enqueue_received_datagram(std::borrow::Cow::Borrowed(&blob));
+    conn.absorb_quic_fec_datagrams();
+    assert_eq!(conn.fec_epoch_rejects(), 1);
+    assert_eq!(conn.conn.dgram_recv_queue_len(), 0);
 }

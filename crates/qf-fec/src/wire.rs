@@ -8,6 +8,10 @@ use std::fmt;
 pub const MAGIC: [u8; 2] = [0xF1, 0xEC];
 pub const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 32;
+/// Symbol header inside a QUIC repair frame: the wire header without `MAGIC`.
+pub const SYMBOL_HEADER_LEN: usize = HEADER_LEN - 2;
+/// First byte of a DATAGRAM payload that carries an in-QUIC FEC symbol.
+pub const QUIC_REPAIR_DISCRIMINATOR: u8 = 0xFE;
 pub const SOURCE_LENGTH_LEN: usize = 2;
 pub const MAX_DATAGRAM_OVERHEAD: usize = HEADER_LEN + (2 * SOURCE_LENGTH_LEN);
 pub const SYSTEMATIC_REPAIR_INDEX: u16 = u16::MAX;
@@ -423,35 +427,89 @@ pub fn is_repair_ack(datagram: &[u8]) -> bool {
         && datagram[3] & FLAG_REPAIR_ACK != 0
 }
 
-pub fn write_packet(
+pub fn write_symbol(
     meta: WirePacketMeta,
     payload: &[u8],
     output: &mut [u8],
 ) -> Result<usize, WireError> {
     meta.validate()?;
     let payload_len = u16::try_from(payload.len()).map_err(|_| WireError::PayloadTooLarge)?;
-    let wire_len = HEADER_LEN.checked_add(payload.len()).ok_or(WireError::PayloadTooLarge)?;
+    let wire_len = SYMBOL_HEADER_LEN.checked_add(payload.len()).ok_or(WireError::PayloadTooLarge)?;
     if output.len() < wire_len {
         return Err(WireError::BufferTooShort);
     }
-
-    output[..HEADER_LEN].fill(0);
-    output[0..2].copy_from_slice(&MAGIC);
-    output[2] = VERSION;
-    output[3] = if meta.systematic { FLAG_SYSTEMATIC } else { 0 }
+    output[..SYMBOL_HEADER_LEN].fill(0);
+    output[0] = VERSION;
+    output[1] = if meta.systematic { FLAG_SYSTEMATIC } else { 0 }
         | if meta.sliding { FLAG_SLIDING } else { 0 };
-    output[4] = meta.profile.codec as u8;
-    output[5] = meta.profile.interleave_depth;
-    output[6] = meta.block_index;
-    output[8..12].copy_from_slice(&meta.profile.epoch.to_be_bytes());
-    output[12..16].copy_from_slice(&meta.window.to_be_bytes());
-    output[16..24].copy_from_slice(&meta.sequence.to_be_bytes());
-    output[24..26].copy_from_slice(&meta.profile.source_count.to_be_bytes());
-    output[26..28].copy_from_slice(&meta.profile.total_count.to_be_bytes());
-    output[28..30].copy_from_slice(&meta.repair_index.to_be_bytes());
-    output[30..32].copy_from_slice(&payload_len.to_be_bytes());
-    output[HEADER_LEN..wire_len].copy_from_slice(payload);
+    output[2] = meta.profile.codec as u8;
+    output[3] = meta.profile.interleave_depth;
+    output[4] = meta.block_index;
+    output[6..10].copy_from_slice(&meta.profile.epoch.to_be_bytes());
+    output[10..14].copy_from_slice(&meta.window.to_be_bytes());
+    output[14..22].copy_from_slice(&meta.sequence.to_be_bytes());
+    output[22..24].copy_from_slice(&meta.profile.source_count.to_be_bytes());
+    output[24..26].copy_from_slice(&meta.profile.total_count.to_be_bytes());
+    output[26..28].copy_from_slice(&meta.repair_index.to_be_bytes());
+    output[28..30].copy_from_slice(&payload_len.to_be_bytes());
+    output[SYMBOL_HEADER_LEN..wire_len].copy_from_slice(payload);
     Ok(wire_len)
+}
+
+pub fn write_packet(
+    meta: WirePacketMeta,
+    payload: &[u8],
+    output: &mut [u8],
+) -> Result<usize, WireError> {
+    if output.len() < MAGIC.len() {
+        return Err(WireError::BufferTooShort);
+    }
+    let symbol_len = write_symbol(meta, payload, &mut output[MAGIC.len()..])?;
+    output[..MAGIC.len()].copy_from_slice(&MAGIC);
+    Ok(MAGIC.len() + symbol_len)
+}
+
+pub fn parse_symbol(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> {
+    if datagram.len() < SYMBOL_HEADER_LEN {
+        return Err(WireError::BufferTooShort);
+    }
+    if datagram[0] != VERSION {
+        return Err(WireError::UnsupportedVersion(datagram[0]));
+    }
+    if datagram[1] & !KNOWN_FLAGS != 0 {
+        return Err(WireError::UnsupportedFlags(datagram[1]));
+    }
+    if datagram[5] != 0 {
+        return Err(WireError::UnsupportedFlags(datagram[5]));
+    }
+    if datagram[1] & FLAG_REPAIR_ACK != 0 {
+        return Err(WireError::RepairAckFrame);
+    }
+    let systematic = datagram[1] & FLAG_SYSTEMATIC != 0;
+    let payload_len = u16::from_be_bytes([datagram[28], datagram[29]]) as usize;
+    if datagram.len() != SYMBOL_HEADER_LEN + payload_len {
+        return Err(WireError::LengthMismatch);
+    }
+    let profile = WireProfile {
+        epoch: u32::from_be_bytes(datagram[6..10].try_into().map_err(|_| WireError::BufferTooShort)?),
+        codec: WireCodec::from_byte(datagram[2])?,
+        source_count: u16::from_be_bytes([datagram[22], datagram[23]]),
+        total_count: u16::from_be_bytes([datagram[24], datagram[25]]),
+        interleave_depth: datagram[3],
+    };
+    let meta = WirePacketMeta {
+        profile,
+        window: u32::from_be_bytes(datagram[10..14].try_into().map_err(|_| WireError::BufferTooShort)?),
+        sequence: u64::from_be_bytes(
+            datagram[14..22].try_into().map_err(|_| WireError::BufferTooShort)?,
+        ),
+        repair_index: u16::from_be_bytes([datagram[26], datagram[27]]),
+        block_index: datagram[4],
+        systematic,
+        sliding: datagram[1] & FLAG_SLIDING != 0,
+    }
+    .validate()?;
+    Ok(ParsedWirePacket { meta, payload: &datagram[SYMBOL_HEADER_LEN..] })
 }
 
 pub fn parse_packet(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> {
@@ -461,49 +519,7 @@ pub fn parse_packet(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> 
     if datagram[0..2] != MAGIC {
         return Err(WireError::BadMagic);
     }
-    if datagram[2] != VERSION {
-        return Err(WireError::UnsupportedVersion(datagram[2]));
-    }
-    if datagram[3] & !KNOWN_FLAGS != 0 {
-        return Err(WireError::UnsupportedFlags(datagram[3]));
-    }
-    if datagram[7] != 0 {
-        return Err(WireError::UnsupportedFlags(datagram[7]));
-    }
-    if datagram[3] & FLAG_REPAIR_ACK != 0 {
-        return Err(WireError::RepairAckFrame);
-    }
-
-    let systematic = datagram[3] & FLAG_SYSTEMATIC != 0;
-    let payload_len = u16::from_be_bytes([datagram[30], datagram[31]]) as usize;
-    if datagram.len() != HEADER_LEN + payload_len {
-        return Err(WireError::LengthMismatch);
-    }
-    let profile = WireProfile {
-        epoch: u32::from_be_bytes(
-            datagram[8..12].try_into().map_err(|_| WireError::BufferTooShort)?,
-        ),
-        codec: WireCodec::from_byte(datagram[4])?,
-        source_count: u16::from_be_bytes([datagram[24], datagram[25]]),
-        total_count: u16::from_be_bytes([datagram[26], datagram[27]]),
-        interleave_depth: datagram[5],
-    };
-    let meta = WirePacketMeta {
-        profile,
-        window: u32::from_be_bytes(
-            datagram[12..16].try_into().map_err(|_| WireError::BufferTooShort)?,
-        ),
-        sequence: u64::from_be_bytes(
-            datagram[16..24].try_into().map_err(|_| WireError::BufferTooShort)?,
-        ),
-        repair_index: u16::from_be_bytes([datagram[28], datagram[29]]),
-        block_index: datagram[6],
-        systematic,
-        sliding: datagram[3] & FLAG_SLIDING != 0,
-    }
-    .validate()?;
-
-    Ok(ParsedWirePacket { meta, payload: &datagram[HEADER_LEN..] })
+    parse_symbol(&datagram[MAGIC.len()..])
 }
 
 /// A parsed repair-ACK datagram (TODO-1006). The payload is decoded
@@ -754,5 +770,29 @@ mod tests {
         let mut trailing = [0u8; SOURCE_LENGTH_LEN + 4];
         trailing[..written].copy_from_slice(&symbol[..written]);
         assert_eq!(source_datagram_payload(&trailing), Err(WireError::InvalidSourceDatagramLength));
+    }
+
+    #[test]
+    fn symbol_round_trip_matches_wrapped_packet_without_magic() {
+        let meta = WirePacketMeta {
+            profile: profile(WireCodec::Gf8),
+            window: 0,
+            sequence: 3,
+            repair_index: SYSTEMATIC_REPAIR_INDEX,
+            block_index: 3,
+            systematic: true,
+            sliding: false,
+        };
+        let payload = [9u8, 8, 7, 6];
+        let mut wrapped = [0u8; HEADER_LEN + 4];
+        let mut symbol = [0u8; SYMBOL_HEADER_LEN + 4];
+        let wrapped_len = write_packet(meta, &payload, &mut wrapped).expect("wrapped");
+        let symbol_len = write_symbol(meta, &payload, &mut symbol).expect("symbol");
+        assert_eq!(&wrapped[..MAGIC.len()], &MAGIC);
+        assert_eq!(&wrapped[MAGIC.len()..wrapped_len], &symbol[..symbol_len]);
+        assert!(!symbol.starts_with(&MAGIC));
+        let parsed = parse_symbol(&symbol[..symbol_len]).expect("parse symbol");
+        assert_eq!(parsed.meta, meta);
+        assert_eq!(parsed.payload, &payload);
     }
 }

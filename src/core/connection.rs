@@ -108,6 +108,9 @@ pub struct QuicFuscateConnection {
     fec_tx_epoch: u32,
     fec_tx_sequence: u64,
     fec_tx_active: bool,
+    fec_symbol_epoch_floor: u32,
+    fec_wrapper_drops: u64,
+    fec_epoch_rejects: u64,
     h3_conn: Option<crate::transport::h3::Connection>,
     /// Reusable pooled buffer for HTTP/3 body reads. The default pool block is 64 KiB.
     h3_body_buffer: Option<AlignedBox<[u8]>>,
@@ -607,6 +610,9 @@ impl QuicFuscateConnection {
             fec_tx_epoch: 0,
             fec_tx_sequence: 0,
             fec_tx_active: false,
+            fec_symbol_epoch_floor: 0,
+            fec_wrapper_drops: 0,
+            fec_epoch_rejects: 0,
             h3_conn: None,
             h3_body_buffer: Some(h3_body_buffer),
             h3_tunnel_rx: HashMap::new(),
@@ -986,6 +992,9 @@ impl QuicFuscateConnection {
         // Framed wire datagrams only need a slice read - skip the pool block
         // checkout + copy + free round-trip entirely for the common FEC path.
         if wire::is_framed(data) {
+            if self.reject_cleartext_fec_wrapper() {
+                return Ok(data.len());
+            }
             // TODO-1006: a repair-ACK report is sender feedback, not a
             // coded packet - consume it before the decoder sees it.
             if wire::is_repair_ack(data) {
@@ -1031,6 +1040,9 @@ impl QuicFuscateConnection {
     ) -> Result<usize, crate::error::ConnectionError> {
         let len = data.len();
         if wire::is_framed(data) {
+            if self.reject_cleartext_fec_wrapper() {
+                return Ok(len);
+            }
             if wire::is_repair_ack(data) {
                 self.consume_repair_ack(data);
                 return Ok(len);
@@ -1173,6 +1185,10 @@ impl QuicFuscateConnection {
         }
 
         if wire::is_framed(&block[..len]) {
+            if self.reject_cleartext_fec_wrapper() {
+                self.optimization_manager.free_block(block);
+                return Ok(len);
+            }
             if wire::is_repair_ack(&block[..len]) {
                 self.consume_repair_ack(&block[..len]);
                 self.optimization_manager.free_block(block);
@@ -1228,7 +1244,10 @@ impl QuicFuscateConnection {
         self.stealth_manager.process_incoming_packet(data, from);
         let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
         match self.conn.recv(data, &recv_info) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.absorb_quic_fec_datagrams();
+                Ok(())
+            }
             Err(
                 error @ (crate::error::ConnectionError::TlsError(_)
                 | crate::error::ConnectionError::TlsAlert(_)
@@ -1594,6 +1613,67 @@ impl QuicFuscateConnection {
     /// Returns current stealth mode for this connection.
     pub fn stealth_mode(&self) -> StealthMode {
         self.stealth_manager.mode()
+    }
+
+    pub(crate) fn fec_framing(&self) -> crate::engine::FecFraming {
+        crate::engine::runtime_mode_fec_framing(self.stealth_mode())
+    }
+
+    pub(crate) fn fec_wrapper_drops(&self) -> u64 {
+        self.fec_wrapper_drops
+    }
+
+    pub(crate) fn fec_epoch_rejects(&self) -> u64 {
+        self.fec_epoch_rejects
+    }
+
+    /// Reject in-QUIC FEC symbols whose epoch is older than `floor`.
+    pub(crate) fn fence_fec_symbol_epoch(&mut self, floor: u32) {
+        self.fec_symbol_epoch_floor = floor;
+    }
+
+    fn reject_cleartext_fec_wrapper(&mut self) -> bool {
+        if self.fec_framing() == crate::engine::FecFraming::QuicFrame {
+            self.fec_wrapper_drops = self.fec_wrapper_drops.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn absorb_quic_fec_datagrams(&mut self) {
+        if self.fec_framing() != crate::engine::FecFraming::QuicFrame {
+            return;
+        }
+        let blobs = self.conn.drain_prefixed_datagrams(wire::QUIC_REPAIR_DISCRIMINATOR);
+        for blob in blobs {
+            if blob.len() < 2 {
+                continue;
+            }
+            let mut framed = Vec::with_capacity(wire::MAGIC.len() + blob.len() - 1);
+            framed.extend_from_slice(&wire::MAGIC);
+            framed.extend_from_slice(&blob[1..]);
+            if wire::is_repair_ack(&framed) {
+                self.consume_repair_ack(&framed);
+                continue;
+            }
+            let Ok(parsed) = wire::parse_packet(&framed) else {
+                continue;
+            };
+            if parsed.meta.profile.epoch < self.fec_symbol_epoch_floor {
+                self.fec_epoch_rejects = self.fec_epoch_rejects.saturating_add(1);
+                continue;
+            }
+            let mut recovered = std::mem::take(&mut self.fec_receive_scratch);
+            if self.fec_wire_receiver.receive(&framed, &mut recovered).is_ok() {
+                for mut packet in recovered.drain(..) {
+                    if let Some(data) = packet.payload_mut_unique() {
+                        let _ = self.deliver_wire_payload(data, self.peer_addr, self.local_addr);
+                    }
+                }
+            }
+            self.fec_receive_scratch = recovered;
+        }
     }
 
     /// Returns the effective TLS SNI currently configured on the live transport connection.

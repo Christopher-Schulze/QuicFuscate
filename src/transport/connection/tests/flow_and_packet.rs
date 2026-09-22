@@ -965,3 +965,17 @@ fn admitted_uniform_run_seals_once_and_opens_on_the_peer() {
     }
     assert_eq!(pair.client.dgram_send_queue_len(), 0);
 }
+
+#[test]
+fn short_header_pad_target_sets_sealed_length() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.enable_datagrams(4, 4);
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    pair.client.dgram_send(&[0x11u8; 20]).expect("datagram");
+    pair.client.set_short_header_pad_target(900);
+    let mut buf = [0u8; 2048];
+    let (len, _) = pair.client.send(&mut buf).expect("padded send");
+    assert_eq!(len, 900);
+    assert!(!buf.starts_with(&[0xF1, 0xEC]));
+}

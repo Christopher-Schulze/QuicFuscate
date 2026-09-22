@@ -20,6 +20,33 @@ pub fn requires_private_packet_protection(config: &CryptoConfig) -> bool {
     config.packet_protection_mode == qf_crypto::PacketProtectionMode::AdvancedRequired
 }
 
+/// `off` and `performance` keep the cleartext FEC wrapper. Every other mode
+/// carries repairs inside a sealed QUIC packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FecFraming {
+    Wrapper,
+    QuicFrame,
+}
+
+pub fn engine_mode_fec_framing(mode: StealthMode) -> FecFraming {
+    match mode {
+        StealthMode::Off | StealthMode::Performance => FecFraming::Wrapper,
+        StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Manual | StealthMode::Dynamic => {
+            FecFraming::QuicFrame
+        }
+    }
+}
+
+pub fn runtime_mode_fec_framing(mode: qf_stealth::StealthMode) -> FecFraming {
+    match mode {
+        qf_stealth::StealthMode::Off | qf_stealth::StealthMode::Performance => FecFraming::Wrapper,
+        qf_stealth::StealthMode::Stealth
+        | qf_stealth::StealthMode::StealthMax
+        | qf_stealth::StealthMode::Manual
+        | qf_stealth::StealthMode::Dynamic => FecFraming::QuicFrame,
+    }
+}
+
 /// `off` and `performance` pin libaegis. `manual` uses it only when selected.
 /// `stealth`, `Stealth MAX`, and `dynamic` stay on AES-GCM.
 pub fn engine_mode_uses_libaegis(mode: StealthMode, manual_selected_aegis: bool) -> bool {
@@ -88,5 +115,27 @@ mod tests {
         assert!(!runtime_mode_uses_libaegis(qf_stealth::StealthMode::Manual, false));
         assert!(runtime_mode_uses_libaegis(qf_stealth::StealthMode::Manual, true));
         assert!(!runtime_mode_uses_libaegis(qf_stealth::StealthMode::Dynamic, true));
+    }
+
+    #[test]
+    fn fec_framing_follows_stealth_mode() {
+        assert_eq!(engine_mode_fec_framing(StealthMode::Off), FecFraming::Wrapper);
+        assert_eq!(engine_mode_fec_framing(StealthMode::Performance), FecFraming::Wrapper);
+        assert_eq!(engine_mode_fec_framing(StealthMode::Stealth), FecFraming::QuicFrame);
+        assert_eq!(engine_mode_fec_framing(StealthMode::StealthMax), FecFraming::QuicFrame);
+        assert_eq!(engine_mode_fec_framing(StealthMode::Dynamic), FecFraming::QuicFrame);
+        assert_eq!(engine_mode_fec_framing(StealthMode::Manual), FecFraming::QuicFrame);
+        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Off), FecFraming::Wrapper);
+        assert_eq!(
+            runtime_mode_fec_framing(qf_stealth::StealthMode::Performance),
+            FecFraming::Wrapper
+        );
+        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Stealth), FecFraming::QuicFrame);
+        assert_eq!(
+            runtime_mode_fec_framing(qf_stealth::StealthMode::StealthMax),
+            FecFraming::QuicFrame
+        );
+        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Dynamic), FecFraming::QuicFrame);
+        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Manual), FecFraming::QuicFrame);
     }
 }

@@ -461,7 +461,7 @@
 - Detail: `docs/todo/todo-1045-drop-homemade-aead-keep-libaegis.md`
 
 ### TODO-1046 - FEC repairs as normal QUIC packets in stealth modes
-- OPEN. `stealth`, `Stealth MAX`, `dynamic`, and `manual` must not prepend `0xF1 0xEC`. Repairs are normal QUIC packets. `off` and `performance` keep the wrapper. Solver stays.
+- DONE. `stealth`, `Stealth MAX`, `dynamic`, and `manual` use `FecFraming::QuicFrame`: repairs ride a sealed DATAGRAM (`0xFE` + symbol, no UDP `0xF1 0xEC`). Those modes drop a cleartext wrapper. `off` and `performance` keep `write_packet`. A symbol from an older epoch is rejected. Repair packets can be padded to the source sealed length. qf-fec 110/110.
 - Detail: `docs/todo/todo-1046-in-quic-fec-framing.md`
 
 ### TODO-1047 - Real ClientHello and transport parameters from one browser capture

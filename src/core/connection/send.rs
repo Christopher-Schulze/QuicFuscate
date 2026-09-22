@@ -217,6 +217,13 @@ impl QuicFuscateConnection {
         let mut block = PooledBlock::new(self.optimization_manager.memory_pool());
         let len = wire::write_repair_ack(epoch, &entries[..count], &mut block)
             .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+        if self.fec_framing() == crate::engine::FecFraming::QuicFrame {
+            self.conn
+                .dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &block[..len])
+                .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+            crate::telemetry::FEC_REPAIR_ACK_ENTRIES_SENT.inc_by(count as u64);
+            return Ok(());
+        }
         let send_pool = block.pool();
         let packet = FecPacket::from_pooled_blocks(
             self.packet_id_counter,
@@ -972,6 +979,9 @@ impl QuicFuscateConnection {
             )
         };
 
+        let quic_frame = self.fec_framing() == crate::engine::FecFraming::QuicFrame;
+        let raw_quic = if quic_frame { Some(send_buffer[quic_range.clone()].to_vec()) } else { None };
+
         let (packet_id, fec_data_len) = if wire_profile.is_some() {
             let quic_len =
                 u16::try_from(write).map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
@@ -1049,8 +1059,47 @@ impl QuicFuscateConnection {
                 } else {
                     crate::transport::SendInfo { bulk_only: false, ..send_info }
                 };
-                self.outgoing_fec_packets.push_back(OutgoingFecPacket {
-                    wire_meta: Some(WirePacketMeta {
+                if quic_frame && !is_systematic {
+                    let meta = WirePacketMeta {
+                        profile,
+                        window: repair_window,
+                        sequence,
+                        repair_index,
+                        block_index,
+                        systematic: false,
+                        sliding: profile.codec == wire::WireCodec::StreamingGf8,
+                    };
+                    let Some(symbol) = packet.payload_slice() else {
+                        return Err(crate::error::ConnectionError::Transport(
+                            "repair symbol missing".to_string(),
+                        ));
+                    };
+                    let mut body = vec![0u8; wire::SYMBOL_HEADER_LEN + symbol.len()];
+                    let written = wire::write_symbol(meta, symbol, &mut body).map_err(|error| {
+                        crate::error::ConnectionError::Transport(error.to_string())
+                    })?;
+                    body.truncate(written);
+                    self.conn
+                        .dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &body)
+                        .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+                    if let Some(raw) = raw_quic.as_ref() {
+                        self.conn.set_short_header_pad_target(raw.len());
+                    }
+                    continue;
+                }
+                let packet = if quic_frame && is_systematic {
+                    let raw = raw_quic.as_ref().ok_or_else(|| {
+                        crate::error::ConnectionError::Transport("systematic quic image missing".into())
+                    })?;
+                    FecPacket::from_block(sequence, raw, self.optimization_manager.memory_pool())
+                        .map_err(crate::error::ConnectionError::Transport)?
+                } else {
+                    packet
+                };
+                let wire_meta = if quic_frame && is_systematic {
+                    None
+                } else {
+                    Some(WirePacketMeta {
                         profile,
                         window: repair_window,
                         sequence,
@@ -1058,7 +1107,10 @@ impl QuicFuscateConnection {
                         block_index,
                         systematic: is_systematic,
                         sliding: !is_systematic && profile.codec == wire::WireCodec::StreamingGf8,
-                    }),
+                    })
+                };
+                self.outgoing_fec_packets.push_back(OutgoingFecPacket {
+                    wire_meta,
                     packet,
                     send_info: packet_send_info,
                     congestion_controlled: packet_send_info.congestion_controlled,

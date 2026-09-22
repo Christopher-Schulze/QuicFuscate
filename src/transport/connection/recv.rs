@@ -1240,6 +1240,17 @@ impl Connection {
         // target size regardless of `stealth_padding_rate`, eliminating
         // size-based traffic analysis.
         let defense = self.config.traffic_analysis_defense;
+        if let Some(target) = self.pad_short_header_to.take() {
+            let tag_reserve = self.tag_reserve_1rtt();
+            let avail = out.len().saturating_sub(off + tag_reserve);
+            if target > off + tag_reserve {
+                let pad_len = (target - off - tag_reserve).min(avail);
+                if pad_len > 0 {
+                    off += frames::write_padding(pad_len, &mut out[off..])?;
+                }
+            }
+            return Ok(off);
+        }
         if matches!(defense, TrafficAnalysisDefense::FullPadding)
             || matches!(defense, TrafficAnalysisDefense::ConstantRate)
         {

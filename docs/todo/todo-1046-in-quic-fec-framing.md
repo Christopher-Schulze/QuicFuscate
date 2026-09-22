@@ -4,7 +4,7 @@ title: FEC repairs as normal QUIC packets in stealth modes
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1041]
 ---
@@ -60,14 +60,28 @@ Receiver:
 
 ## Sub-Tasks
 
-- [ ] Mode-to-framing pin with a unit test for all six mode names.
-- [ ] Symbol codec usable without `MAGIC`.
-- [ ] Send path emits a QUIC packet for stealth modes and the wrapper for `off` / `performance`.
-- [ ] Receive path decodes the in-QUIC symbol and still decodes the wrapper in speed modes.
-- [ ] Stealth modes drop `0xF1 0xEC`.
-- [ ] Equal-length burst test: repair UDP length equals data UDP length.
-- [ ] Epoch-mix test: a symbol from the previous AEAD epoch is rejected.
-- [ ] Existing qf-fec recovery tests stay green on the symbol codec.
+- [x] Mode-to-framing pin with a unit test for all six mode names.
+- [x] Symbol codec usable without `MAGIC`.
+- [x] Send path emits a QUIC packet for stealth modes and the wrapper for `off` / `performance`.
+- [x] Receive path decodes the in-QUIC symbol and still decodes the wrapper in speed modes.
+- [x] Stealth modes drop `0xF1 0xEC`.
+- [x] Equal-length burst test: repair UDP length equals data UDP length.
+- [x] Epoch-mix test: a symbol from the previous AEAD epoch is rejected.
+- [x] Existing qf-fec recovery tests stay green on the symbol codec.
+
+## Notes
+
+`FecFraming::Wrapper` is `off` and `performance`. Every other mode is `QuicFrame`.
+
+The UDP datagram in `QuicFrame` mode is a normal QUIC packet. The repair symbol is `write_symbol` (the 30-byte header plus payload, no magic) inside a DATAGRAM that starts with `0xFE`. The receiver prepends `MAGIC` only in memory before the existing decoder. A datagram that itself starts with `0xF1 0xEC` is dropped and counted.
+
+`set_short_header_pad_target` pads the next short header so a repair can match the source sealed length. `fence_fec_symbol_epoch` rejects older in-QUIC symbols.
+
+No live packet capture was taken. The emit and drop tests cover the bytes that would be on the wire.
+
+## Result
+
+`fec_framing_follows_stealth_mode`, `symbol_round_trip_matches_wrapped_packet_without_magic`, `stealth_drops_cleartext_fec_wrapper`, `quic_repair_from_previous_epoch_is_rejected`, and `short_header_pad_target_sets_sealed_length` passed. qf-fec 110/110. Core connection tests 60/60. Repair-ACK wrapper behavior stays on `performance`. Solver unchanged. No new AEAD.
 
 ## Acceptance
 

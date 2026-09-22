@@ -316,7 +316,7 @@ impl Connection {
     }
 
     /// Enqueues an inbound DATAGRAM only when the queue and zero-copy block contract permit it.
-    pub(super) fn enqueue_received_datagram(&mut self, data: Cow<'_, [u8]>) {
+    pub(crate) fn enqueue_received_datagram(&mut self, data: Cow<'_, [u8]>) {
         if self.is_dgram_recv_queue_full() {
             return;
         }
@@ -393,6 +393,33 @@ impl Connection {
     #[inline(always)]
     pub fn dgram_send(&mut self, buf: &[u8]) -> Result<(), crate::error::ConnectionError> {
         self.dgram_send_parts(&[], buf)
+    }
+
+    /// Pad the next short-header packet so its sealed length is `target` when it fits.
+    pub(crate) fn set_short_header_pad_target(&mut self, target: usize) {
+        self.pad_short_header_to = Some(target);
+    }
+
+    /// Remove received DATAGRAMs whose payload starts with `prefix`, preserving the rest.
+    pub(crate) fn drain_prefixed_datagrams(&mut self, prefix: u8) -> Vec<Vec<u8>> {
+        let mut kept = std::collections::VecDeque::new();
+        let mut taken = Vec::new();
+        while let Some(entry) = self.dgram_recv_queue.pop_front() {
+            #[cfg(not(feature = "zero_copy_dgram"))]
+            let is_match = entry.first() == Some(&prefix);
+            #[cfg(feature = "zero_copy_dgram")]
+            let is_match = entry.len > 0 && entry.data.first() == Some(&prefix);
+            if is_match {
+                #[cfg(not(feature = "zero_copy_dgram"))]
+                taken.push(entry);
+                #[cfg(feature = "zero_copy_dgram")]
+                taken.push(entry.data[..entry.len].to_vec());
+            } else {
+                kept.push_back(entry);
+            }
+        }
+        self.dgram_recv_queue = kept;
+        taken
     }
 
     /// Enqueues a DATAGRAM frame assembled from `prefix` + `payload` without
