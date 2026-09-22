@@ -79,6 +79,9 @@ pub mod tls_cover;
 /// TCP/ICMP fingerprint obfuscation (TODO-462).
 pub mod fingerprint;
 
+/// Outer IP/UDP header shaping for the claimed-OS persona (TODO-1057).
+pub mod outer_header;
+
 pub use fingerprint::{
     IcmpUnreachablePolicy, NormalizeOutcome, NormalizeResult, OsFingerprintProfile,
     PacketNormalizer,

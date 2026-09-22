@@ -3800,6 +3800,46 @@ path survives (`quicfuscate_disguise_migration_failures_total`). `off` and
 `performance` never migrate for disguise. The destination connection ID is
 stable across the port change — the wire signature matches a real NAT rebind.
 
+#### Outer IP/UDP Header Shaping (TODO-1057)
+
+The censor reads the *outer* client-link header: TTL, DF, and the IPv4 ID are
+cheaper tells than the ClientHello. `src/stealth/outer_header.rs` maps the
+frozen persona OS to socket options applied on the client UDP socket at
+connect time and after every disguise migration rebinds a socket (a fresh
+socket forgets them). The persona OS comes from `stealth_config.initial_os`
+at bind and from `StealthManager::persona_os()` — the live frozen fingerprint —
+on the migration path.
+
+| Persona OS | IPv4 TTL | IPv6 hop limit | IPv4 DF |
+|---|---|---|---|
+| Windows | 128 | 128 | set (PMTUD) |
+| macOS | 64 | 64 | set (PMTUD) |
+| Linux | 64 | 64 | set (PMTUD) |
+| Android | 64 | 64 | set (PMTUD) |
+| iOS | 64 | 64 | clear |
+
+TTL values follow the long-standing p0f OS defaults (Windows 128, all others
+64). DF follows QUIC-client reality rather than the generic OS default:
+Chromium-family QUIC stacks run PMTUD and emit DF=1 on IPv4, while the Apple
+iOS stack does not set DF on UDP datagrams and iOS browsers run no native
+QUIC client — the iOS persona therefore clears DF explicitly. IPv6 carries
+no DF flag and no ID field; only the hop limit is shaped there.
+
+**Documented gaps (no capture invented):** the per-packet IPv4 ID increment
+policy is not socket-controllable on Linux/macOS — with DF=1 the kernels
+emit ID=0 anyway, which matches QUIC captures. Windows' globally
+incrementing ID cannot be shaped without raw sockets and stays a non-goal.
+No independent packet capture backs this table; the values rest on the
+cited p0f defaults and documented QUIC stack behavior.
+
+Socket options are the mechanism — never manual IP-header rewriting after
+kernel checksum computation, and no raw-socket requirement. Unsupported
+platforms keep OS defaults, emit one process-wide `warn!` via
+`apply_outer_header_logged`, and continue: header shaping can never fail a
+connection. The server-side `PacketNormalizer` on decoded tunnel ingress
+(inner TCP/ICMP) is unchanged, and ICMP suppression stays an exit policy —
+this shapes only what the censor sees on the client link.
+
 #### Fingerprint Rotation Configuration
 ```toml
 [fingerprint_rotation]

@@ -457,6 +457,16 @@ impl StealthManager {
         format!("{:?}/{:?}", fingerprint.browser, fingerprint.os)
     }
 
+    /// Returns the persona OS the frozen fingerprint claims (TODO-1057).
+    ///
+    /// The persona is stable for the lifetime of a connection — this is the
+    /// live source of truth for outer IP/UDP header shaping, including after
+    /// a disguise migration rebinds the client socket. `pub` because the
+    /// binary runtime loop lives in a separate crate.
+    pub fn persona_os(&self) -> OsProfile {
+        self.current_fingerprint().os
+    }
+
     /// Applies the configured browser/OS persona's QUIC parameters to the
     /// transport configuration. Rustls owns the real wire ClientHello.
     pub(crate) fn apply_utls_profile(&self, config: &mut crate::transport::Config) {

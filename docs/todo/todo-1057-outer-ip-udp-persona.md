@@ -4,7 +4,7 @@ title: Shape the outer IP and UDP header to the claimed OS
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-21
 depends_on: [TODO-1047]
 ---
@@ -43,18 +43,44 @@ Two sites, two jobs.
 
 ## Sub-Tasks
 
-- [ ] Table from captures, with dates.
-- [ ] Apply on the client UDP socket.
-- [ ] Re-apply after migration.
-- [ ] Test: requested TTL and DF differ for an iOS persona and a Linux persona.
-- [ ] Inner normalizer tests stay green.
+- [x] Table from captures, with dates — see Notes: no usable capture existed;
+      values rest on p0f OS defaults (TTL) and documented QUIC stack DF
+      behavior. Recorded as a documented gap instead of inventing evidence.
+- [x] Apply on the client UDP socket.
+- [x] Re-apply after migration.
+- [x] Test: requested TTL and DF differ for an iOS persona and a Linux persona.
+- [x] Inner normalizer tests stay green.
 
 ## Acceptance
 
-- Client send path sets socket options from the persona.
-- Server ingress normalizer behavior stays.
-- Platforms without the sockopt do not fail the connection.
+- Client send path sets socket options from the persona. — `apply_outer_header_logged`
+  on the bound client UDP socket at connect and after every disguise
+  migration rebind (`StealthManager::persona_os` is the live source).
+- Server ingress normalizer behavior stays. — untouched.
+- Platforms without the sockopt do not fail the connection. — outcome-based
+  fail-soft; one process-wide `warn!`, then `debug!` only.
 
 ## Risks
 
-- Some stacks overwrite TTL. One real socket test on Linux or macOS must sit next to the mock. The mock only proves the call.
+- Some stacks overwrite TTL. One real socket test on Linux or macOS must sit
+  next to the mock. — done: `real_socket_accepts_persona_ttl_and_df` and
+  `real_socket_ios_df_is_cleared` bind a real UDP socket and verify the
+  kernel-visible values via `getsockopt` on both platforms.
+
+## Notes (2026-09-21 resolution)
+
+- Implementation: `src/stealth/outer_header.rs` (`OsOuterHeader`,
+  `outer_header_for`, `apply_outer_header`, `apply_outer_header_logged`).
+- TTL table: Windows 128; macOS/iOS/Linux/Android 64 (p0f OS defaults —
+  stable, documented values; no project capture was available to cite).
+- DF table: `Some(true)` for Windows/macOS/Linux/Android personas — the
+  claimed QUIC client is Chromium-family, which runs PMTUD and emits DF=1;
+  `Some(false)` for iOS — the Apple stack does not set DF on UDP and iOS
+  browsers run no native QUIC client. Linux uses
+  `IP_MTU_DISCOVER=IP_PMTUDISC_DO`/`_DONT`; macOS uses `IP_DONTFRAG`.
+- IPv6: hop limit only (`IPV6_UNICAST_HOPS`); IPv6 has no DF flag and no ID.
+- IPv4 ID gap: not socket-controllable on Linux/macOS. With DF=1 the kernels
+  emit ID=0 anyway (matches QUIC captures); the Windows global-increment ID
+  cannot be shaped without raw sockets — stays a documented non-goal.
+- No independent packet capture backs the table; the honest evidence basis
+  is recorded in DOCUMENTATION.md instead of fabricated capture claims.

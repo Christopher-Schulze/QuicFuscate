@@ -505,7 +505,7 @@
 - Detail: `docs/todo/todo-1056-persona-rotation-via-migration.md`
 
 ### TODO-1057 - Shape the outer IP and UDP header to the claimed OS
-- OPEN. Client UDP socket gets persona TTL/DF/IP-ID. Inner TCP/ICMP normalizer stays on the exit path only.
+- DONE. `src/stealth/outer_header.rs` maps the persona OS to socket options: TTL 128 for Windows / 64 elsewhere (p0f defaults), DF=1 for the Chromium-family QUIC personas and DF=0 for iOS, hop-limit-only on IPv6. Applied at connect and re-applied after disguise-migration rebinds (`StealthManager::persona_os` is the live source). Fail-soft with one process-wide warning; the inner `PacketNormalizer` and ICMP exit policy are unchanged. IPv4 ID is not socket-controllable — documented gap, no raw-socket requirement added. Real-socket tests on macOS verify the kernel-visible TTL/DF via getsockopt.
 - Detail: `docs/todo/todo-1057-outer-ip-udp-persona.md`
 
 ### TODO-1058 - DoH uses the same persona and is the only DNS

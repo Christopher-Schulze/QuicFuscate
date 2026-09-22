@@ -376,6 +376,16 @@ pub(super) async fn run_client(
         stealth_config.enable_fingerprint_rotation = should_rotate;
         stealth_config.fingerprint_rotation_interval = rotation_interval;
     }
+
+    // TODO-1057: shape the outer IP/UDP header to the claimed-OS persona
+    // (TTL/DF via sockopts). Fail-soft by contract — an unsupported platform
+    // keeps OS defaults and logs once, never breaks the connection.
+    quicfuscate::stealth::outer_header::apply_outer_header_logged(
+        &socket,
+        stealth_config.initial_os,
+        local_addr.is_ipv6(),
+    );
+
     let shared_stealth_config = Arc::new(std::sync::Mutex::new(stealth_config.clone()));
 
     let host = target.host.as_str();
@@ -1144,6 +1154,14 @@ pub(super) async fn run_client(
                                 Ok(_) => {
                                     standby_socket = Some(std::mem::replace(&mut socket, new_socket));
                                     enable_client_gro(&socket);
+                                    // TODO-1057: a freshly bound socket forgets
+                                    // sockopts — re-apply the persona header
+                                    // policy to the migrated path.
+                                    quicfuscate::stealth::outer_header::apply_outer_header_logged(
+                                        &socket,
+                                        conn.stealth_manager().persona_os(),
+                                        new_local.is_ipv6(),
+                                    );
                                     info!(
                                         "Disguise migration probing new local port {}",
                                         new_local.port()
