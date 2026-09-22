@@ -161,6 +161,29 @@ impl StealthMode {
     }
 }
 
+/// Outer-hop transport selected when the direct UDP dial fails (TODO-1063).
+///
+/// The fallback is a one-time retry per connection attempt: the client first
+/// dials plain QUIC over UDP, and only a hard reachability failure (handshake
+/// timeout or socket unreachable) switches the attempt to the configured outer
+/// hop. The selected transport then stays for the remainder of the connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum OuterHop {
+    /// Direct UDP only; no fallback is armed.
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    /// Retry once through a MASQUE CONNECT-UDP relay described by
+    /// `connection.outer_hop_relay`.
+    #[serde(rename = "masque")]
+    Masque,
+    /// Reserved for a rustls TCP/TLS HTTP CONNECT fallback. There is no
+    /// in-tree HTTP CONNECT client today, so this variant is rejected at
+    /// validation time until that follow-up lands (TODO-1063 notes).
+    #[serde(rename = "tls_http")]
+    TlsHttp,
+}
+
 /// FEC mode exposed by the engine configuration contract.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
@@ -681,6 +704,14 @@ pub struct ConnectionConfig {
     pub migration_cooldown_ms: u64,
     /// Congestion recovery boundary after port-only rebinding.
     pub migration_probe_target: qf_transport_recovery::MigrationProbeTarget,
+    /// UDP-blocked outer-hop fallback transport (TODO-1063). `none` keeps the
+    /// direct dial as the only attempt.
+    pub outer_hop: OuterHop,
+    /// MASQUE relay hop used when `outer_hop = "masque"`. The hop only helps
+    /// when its address is shared with real sites; a dedicated relay IP stays
+    /// attributable. Required for `masque`, rejected otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_hop_relay: Option<circuit::HopConfig>,
 }
 
 impl Default for ConnectionConfig {
@@ -704,6 +735,8 @@ impl Default for ConnectionConfig {
             migration_cwnd_reduction_factor: 0.5,
             migration_cooldown_ms: 750,
             migration_probe_target: qf_transport_recovery::MigrationProbeTarget::PreviousWindow,
+            outer_hop: OuterHop::None,
+            outer_hop_relay: None,
         }
     }
 }
@@ -769,6 +802,35 @@ impl ConnectionConfig {
                 && (id.len() != 12 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
             {
                 return Err(ConnectionConfigError("qkey_id must be 12 hex chars".to_string()));
+            }
+        }
+        match self.outer_hop {
+            OuterHop::None => {
+                if self.outer_hop_relay.is_some() {
+                    return Err(ConnectionConfigError(
+                        "connection.outer_hop_relay requires outer_hop = \"masque\"".to_string(),
+                    ));
+                }
+            }
+            OuterHop::Masque => {
+                let relay = self.outer_hop_relay.as_ref().ok_or_else(|| {
+                    ConnectionConfigError(
+                        "connection.outer_hop = \"masque\" requires outer_hop_relay".to_string(),
+                    )
+                })?;
+                if relay.role != circuit::HopRole::Relay {
+                    return Err(ConnectionConfigError(
+                        "connection.outer_hop_relay.role must be \"relay\"".to_string(),
+                    ));
+                }
+                relay.validate(0).map_err(|error| {
+                    ConnectionConfigError(format!("connection.outer_hop_relay: {error}"))
+                })?;
+            }
+            OuterHop::TlsHttp => {
+                return Err(ConnectionConfigError(
+                    "connection.outer_hop = \"tls_http\" is reserved; no in-tree HTTP CONNECT client exists yet (TODO-1063 follow-up)".to_string(),
+                ));
             }
         }
         Ok(())

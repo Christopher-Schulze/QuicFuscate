@@ -529,7 +529,7 @@
 - Detail: `docs/todo/todo-1062-remove-synthetic-clienthello.md`
 
 ### TODO-1063 - When UDP is blocked, fall back to MASQUE or real TLS
-- OPEN. One fallback to a configured MASQUE or real TLS hop. No Vision port. Default remains direct UDP until an outer hop is set.
+- DONE. `OuterHop::{None, Masque, TlsHttp}` arms a one-time retry in `Engine::connect` after a reachability failure (UDP unreachable or timeout). The synthesized two-hop circuit runs relay -> exit via the existing MASQUE machinery; `tls_http` is rejected until an in-tree HTTP CONNECT client exists. `it-outer-hop-fallback` ferries real inner QUIC bytes over a loopback relay association.
 - Detail: `docs/todo/todo-1063-udp-blocked-fallback.md`
 
 ### TODO-1064 - ECH only on a shared outer hop

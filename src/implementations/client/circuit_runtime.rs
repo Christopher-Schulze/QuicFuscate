@@ -758,6 +758,18 @@ impl ClientDataPlane {
             .map_err(|error| EngineError::Connection(error.to_string()))
     }
 
+    /// rust-tests only: enqueue one DATAGRAM frame on the exit hop so
+    /// integration tests can prove inner application bytes traverse the
+    /// MASQUE link rather than a second UDP 5-tuple.
+    #[cfg(feature = "rust-tests")]
+    pub fn send_exit_datagram(&mut self, payload: &[u8]) -> Result<(), EngineError> {
+        self.exit_mut()
+            .conn
+            .dgram_send(payload)
+            .map_err(|error| EngineError::Connection(error.to_string()))?;
+        self.flush_inner_outbound()
+    }
+
     pub fn send_tunnel_packet(&mut self, stream_id: u64, packet: &[u8]) -> Result<(), EngineError> {
         self.exit_mut().send_tunnel_packet(stream_id, packet).map_err(|error| match error {
             crate::error::ConnectionError::DgramQueueFull => EngineError::Backpressure,

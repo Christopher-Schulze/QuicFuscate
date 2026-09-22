@@ -107,6 +107,73 @@ pub(super) fn is_configured_single_hop_fallback(
         .is_some_and(|candidate| expected.has_same_operator_configuration(candidate))
 }
 
+/// Stealth modes that may arm the UDP-blocked outer-hop fallback (TODO-1063).
+/// `off` and `performance` stay on direct UDP by contract; `manual` is
+/// operator-owned and likewise excluded.
+pub(super) fn outer_hop_fallback_permitted(mode: qf_engine_types::StealthMode) -> bool {
+    use qf_engine_types::StealthMode;
+    matches!(mode, StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Dynamic)
+}
+
+/// Synthesize the one-time outer-hop fallback as a two-hop circuit.
+///
+/// The configured relay becomes the physical entry hop; the direct-dial target
+/// becomes the exit, authenticated with the connection QKey material. The
+/// synthesized config is canonical: circuit sections cannot coexist with
+/// legacy connection fields, so the consumed legacy endpoint/QKey fields and
+/// the outer-hop arming keys are cleared once they have been folded into hops.
+///
+/// Returns `None` when the fallback is not armed or not permitted for the
+/// configured stealth mode — validation rejects contradictory combinations
+/// earlier, so unreachable states degrade to `None` rather than new errors.
+pub(super) fn outer_hop_fallback_config(
+    config: &EngineConfig,
+) -> Result<Option<EngineConfig>, EngineError> {
+    use qf_engine_types::OuterHop;
+    let relay = match (config.connection.outer_hop, config.connection.outer_hop_relay.clone()) {
+        (OuterHop::Masque, Some(relay)) => relay,
+        _ => return Ok(None),
+    };
+    if config.circuit.is_some() || !outer_hop_fallback_permitted(config.stealth.mode) {
+        return Ok(None);
+    }
+    let Some(exit_topology) = crate::implementations::client::legacy_circuit_config(config) else {
+        return Ok(None);
+    };
+    let mut relay = relay;
+    relay.role = qf_engine_types::HopRole::Relay;
+    if relay.label.trim().is_empty() {
+        relay.label = "outer MASQUE hop".to_string();
+    }
+    let mut exit_hop =
+        exit_topology.hops.into_iter().next().ok_or_else(|| {
+            EngineError::Config("outer-hop fallback lost the exit hop".to_string())
+        })?;
+    exit_hop.role = qf_engine_types::HopRole::Exit;
+    exit_hop.label = "outer-hop exit".to_string();
+
+    let mut fallback = config.clone();
+    fallback.circuit = Some(qf_engine_types::CircuitConfig {
+        hops: vec![relay, exit_hop],
+        max_hops: 2,
+        max_parallel_circuits: 1,
+        allow_single_hop_fallback: false,
+        diversity: qf_engine_types::CircuitDiversityPolicy::default(),
+    });
+    fallback.alternate_circuit = None;
+    // The legacy endpoint, SNI, and QKey fields now live in the exit hop;
+    // keeping them on the connection section would violate the canonical
+    // "circuit or legacy" exclusivity rule on the next validation pass.
+    let legacy = qf_engine_types::ConnectionConfig::default();
+    fallback.connection.remote = legacy.remote;
+    fallback.connection.sni = legacy.sni;
+    fallback.connection.qkey_id = None;
+    fallback.connection.qkey_token = None;
+    fallback.connection.outer_hop = OuterHop::None;
+    fallback.connection.outer_hop_relay = None;
+    Ok(Some(fallback))
+}
+
 pub(super) fn build_server_runtime_profiles(
     config: &EngineConfig,
 ) -> Result<(qf_fec::FecConfig, qf_stealth::StealthConfig), EngineError> {

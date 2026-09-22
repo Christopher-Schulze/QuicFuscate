@@ -288,3 +288,127 @@ fn config_error_display_preserves_stable_categories() {
         "Validation error: bad mtu"
     );
 }
+
+#[test]
+fn outer_hop_none_is_default_and_rejects_stray_relay() {
+    let config = ConnectionConfig::default();
+    assert_eq!(config.outer_hop, OuterHop::None);
+    assert!(config.outer_hop_relay.is_none());
+    config.validate().expect("default connection validates");
+
+    let mut stray = ConnectionConfig::default();
+    stray.outer_hop_relay = Some(circuit::HopConfig::default());
+    assert!(stray.validate().is_err(), "a relay without masque mode is contradictory");
+}
+
+#[test]
+fn outer_hop_masque_requires_relay_with_relay_role() {
+    let mut config = ConnectionConfig::default();
+    config.outer_hop = OuterHop::Masque;
+    assert!(config.validate().is_err(), "masque without a relay description fails");
+
+    let mut relay = circuit::HopConfig {
+        label: "edge".to_string(),
+        endpoint: "relay.example.com:4433".to_string(),
+        sni: "relay.example.com".to_string(),
+        qkey_id: "0123456789ab".to_string(),
+        qkey_token_ref: "env:QF_RELAY_QKEY".to_string(),
+        ..circuit::HopConfig::default()
+    };
+    config.outer_hop_relay = Some(relay.clone());
+    assert!(
+        config.validate().is_err(),
+        "default exit role must be rejected for the outer relay hop"
+    );
+
+    relay.role = circuit::HopRole::Relay;
+    config.outer_hop_relay = Some(relay);
+    config.validate().expect("masque with a relay hop validates");
+}
+
+#[test]
+fn outer_hop_tls_http_is_reserved_and_fails_validation() {
+    let mut config = ConnectionConfig::default();
+    config.outer_hop = OuterHop::TlsHttp;
+    let error = config.validate().expect_err("tls_http is reserved, not implemented");
+    assert!(error.to_string().contains("tls_http"), "{error}");
+}
+
+#[test]
+fn outer_hop_engine_rules_gate_circuits_server_and_qkey() {
+    let relay = circuit::HopConfig {
+        label: "edge".to_string(),
+        endpoint: "relay.example.com:4433".to_string(),
+        sni: "relay.example.com".to_string(),
+        qkey_id: "0123456789ab".to_string(),
+        qkey_token_ref: "env:QF_RELAY_QKEY".to_string(),
+        role: circuit::HopRole::Relay,
+        ..circuit::HopConfig::default()
+    };
+
+    // Missing connection QKey: the synthesized exit hop could not authenticate.
+    let mut no_qkey = EngineConfig::default();
+    no_qkey.engine.mode = EngineMode::Client;
+    no_qkey.connection.outer_hop = OuterHop::Masque;
+    no_qkey.connection.outer_hop_relay = Some(relay.clone());
+    assert!(no_qkey.validate().is_err());
+
+    // Armed fallback plus explicit circuit: contradictory topology owners.
+    let mut with_circuit = no_qkey.clone();
+    with_circuit.connection.qkey_token = Some(crate::QKeyToken::new("ab".repeat(16)));
+    with_circuit.circuit = Some(circuit::CircuitConfig {
+        hops: vec![circuit::HopConfig {
+            label: "exit".to_string(),
+            endpoint: "exit.example.com:4433".to_string(),
+            sni: "exit.example.com".to_string(),
+            qkey_id: "0123456789ab".to_string(),
+            qkey_token_ref: "env:QF_EXIT_QKEY".to_string(),
+            ..circuit::HopConfig::default()
+        }],
+        ..circuit::CircuitConfig::default()
+    });
+    assert!(with_circuit.validate().is_err());
+
+    // Server mode never arms a client dial fallback.
+    let mut server = EngineConfig::default();
+    server.engine.mode = EngineMode::Server;
+    server.connection.outer_hop = OuterHop::Masque;
+    server.connection.outer_hop_relay = Some(relay.clone());
+    server.connection.qkey_token = Some(crate::QKeyToken::new("cd".repeat(16)));
+    assert!(server.validate().is_err());
+
+    // Well-formed client arming validates.
+    let mut client = EngineConfig::default();
+    client.engine.mode = EngineMode::Client;
+    client.connection.qkey_token = Some(crate::QKeyToken::new("ef".repeat(16)));
+    client.connection.outer_hop = OuterHop::Masque;
+    client.connection.outer_hop_relay = Some(relay);
+    client.validate().expect("armed masque fallback validates");
+}
+
+#[test]
+fn outer_hop_roundtrips_through_engine_toml() {
+    let config = EngineConfig::from_toml(
+        "[connection]\n\
+         remote = \"203.0.113.10:4433\"\n\
+         qkey_token = \"00112233445566778899aabbccddeeff\"\n\
+         outer_hop = \"masque\"\n\
+         [connection.outer_hop_relay]\n\
+         label = \"edge\"\n\
+         endpoint = \"relay.example.com:4433\"\n\
+         sni = \"relay.example.com\"\n\
+         qkey_id = \"0123456789ab\"\n\
+         qkey_token_ref = \"env:QF_RELAY_QKEY\"\n\
+         role = \"relay\"\n",
+    )
+    .expect("outer hop TOML parses");
+    assert_eq!(config.connection.outer_hop, OuterHop::Masque);
+    let relay = config.connection.outer_hop_relay.as_ref().expect("relay hop");
+    assert_eq!(relay.role, circuit::HopRole::Relay);
+    assert_eq!(relay.endpoint, "relay.example.com:4433");
+
+    let encoded = toml::to_string(&config).expect("serialize");
+    let decoded = EngineConfig::from_toml(&encoded).expect("roundtrip");
+    assert_eq!(decoded.connection.outer_hop, OuterHop::Masque);
+    assert!(decoded.connection.outer_hop_relay.is_some());
+}

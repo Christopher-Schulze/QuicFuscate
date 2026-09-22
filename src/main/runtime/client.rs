@@ -191,7 +191,12 @@ pub(super) async fn run_client(
                     format!("invalid configuration {}: {error}", config_path.display()),
                 )
             })?;
-        if engine_config.circuit.is_some() {
+        // A configured circuit or an armed outer-hop fallback both require the
+        // canonical engine data plane: the standalone loop owns exactly one
+        // direct-UDP connection and cannot ferry inner QUIC through MASQUE.
+        if engine_config.circuit.is_some()
+            || engine_config.connection.outer_hop != qf_engine_types::OuterHop::None
+        {
             return run_circuit_client(config_path, engine_config).await;
         }
         let (mode, family) = quicfuscate::crypto::payload_protection_pin(

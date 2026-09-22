@@ -640,6 +640,11 @@ path = "scripts/tests/rust/integration/stealth_mode_matrix.rs"
 required-features = ["rust-tests"]
 
 [[test]]
+name = "it-outer-hop-fallback"
+path = "scripts/tests/rust/integration/outer_hop_fallback.rs"
+required-features = ["rust-tests"]
+
+[[test]]
 name = "rt-transport-uring"
 path = "scripts/tests/rust/rt-transport-uring.rs"
 required-features = ["rust-tests", "io_uring"]

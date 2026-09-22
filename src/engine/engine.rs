@@ -32,7 +32,7 @@ use transport_config::build_runtime_transport_config;
 mod config_projection;
 use config_projection::{
     build_server_optimize_config, build_server_runtime_profiles, configured_standby,
-    is_configured_single_hop_fallback, load_runtime_profile_values,
+    is_configured_single_hop_fallback, load_runtime_profile_values, outer_hop_fallback_config,
     reject_started_client_config_changes, resolve_and_pin_client_entry, resolve_client_entry,
 };
 mod observability;
@@ -684,7 +684,51 @@ impl QuicFuscateEngine {
             runtime.disconnect()?;
         }
 
-        match runtime.connect() {
+        // TODO-1063: a configured outer hop arms exactly one retry after a
+        // hard UDP reachability failure. The plan is synthesized before the
+        // direct attempt so a mid-flight config mutation cannot arm a second
+        // fallback; the direct dial always runs first.
+        let mut outer_hop_plan = outer_hop_fallback_config(&self.config)?;
+        let mut remote = remote;
+        let mut connect_result = runtime.connect();
+        let fallback_attempt = match &connect_result {
+            Err(first_error) => {
+                outer_hop_plan.take().filter(|_| dial_failure_is_reachability(first_error))
+            }
+            Ok(()) => None,
+        };
+        if let Some(mut fallback_config) = fallback_attempt {
+            let first_error =
+                connect_result.as_ref().err().map(|error| error.to_string()).unwrap_or_default();
+            if runtime.is_connected() {
+                runtime.disconnect()?;
+            }
+            let relay_remote = resolve_and_pin_client_entry(&mut fallback_config)?;
+            runtime.update_next_config(&fallback_config)?;
+            if let Some(ref kill_switch) = self.kill_switch {
+                let relay_policy = VpnFirewallPolicy::new(
+                    if self.config.interface.tun_name.is_empty() {
+                        "tun0"
+                    } else {
+                        &self.config.interface.tun_name
+                    },
+                    relay_remote,
+                    None,
+                    self.config.interface.dns_servers.iter().copied(),
+                )
+                .map_err(|error| EngineError::Config(error.to_string()))?;
+                kill_switch
+                    .on_vpn_connecting(&relay_policy)
+                    .map_err(|error| EngineError::Internal(error.to_string()))?;
+            }
+            log::warn!(
+                "direct UDP dial failed ({first_error}); retrying once via configured outer hop"
+            );
+            remote = relay_remote;
+            connect_result = runtime.connect();
+        }
+
+        match connect_result {
             Ok(_) => {}
             Err(err) => {
                 self.set_state(EngineState::Running);
@@ -1417,6 +1461,30 @@ impl QuicFuscateEngine {
             self.state(),
             EngineState::Running | EngineState::Connecting | EngineState::Connected
         )
+    }
+}
+
+/// Whether a failed client dial classifies as a hard UDP reachability
+/// failure that may arm the one-time outer-hop fallback (TODO-1063).
+///
+/// Fail-safe direction: only positively identified reachability failures
+/// return true. A TLS alert, remote close, control-plane rejection, or a
+/// renamed diagnostic string degrades to `false` and never triggers the
+/// fallback — the asymmetry is deliberate, since a fallback after a
+/// peer-visible refusal only adds a second fingerprint.
+fn dial_failure_is_reachability(error: &EngineError) -> bool {
+    match error {
+        // Socket-level ICMP unreachable surfaced by the connected UDP socket.
+        // The "QUIC receive" and "H3 poll" components of the same fault
+        // variant are peer-visible protocol failures and do not match.
+        EngineError::DataPlane(qf_engine_types::DataPlaneFault::TransportReceive {
+            component,
+            ..
+        }) => component.contains("UDP receive"),
+        // The assignment dial exhausted its deadline without any response:
+        // the blackholed-UDP signature.
+        EngineError::Connection(message) => message.contains("timed out"),
+        _ => false,
     }
 }
 

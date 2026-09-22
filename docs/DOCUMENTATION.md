@@ -3042,6 +3042,20 @@ The headless `qf-e2e-client --migration-local` proof keeps the migration and thr
 
 ---
 
+### Outer-hop fallback (UDP blocked)
+
+`connection.outer_hop` arms a single transport fallback for the client dial (TODO-1063). The direct QUIC/UDP dial always runs first; only a hard reachability failure — a socket-level UDP unreachable fault or a dial timeout — retries the attempt exactly once through the configured outer hop. TLS alerts, control-plane rejections, and client-closed outcomes never trigger the switch, and the transport never flaps per packet.
+
+- `outer_hop = "none"` (default): direct UDP only.
+- `outer_hop = "masque"`: retry through the MASQUE CONNECT-UDP relay in `[connection.outer_hop_relay]` (`role = "relay"`). Requires `connection.qkey_token` so the synthesized exit hop can authenticate. Cannot be combined with an explicit `[[circuit.hops]]` topology.
+- `outer_hop = "tls_http"`: reserved and rejected at validation; there is no in-tree HTTP CONNECT client, so the feature stops at MASQUE rather than inventing a record layer.
+
+Eligibility is mode-gated: `stealth`, `Stealth MAX`, and `dynamic` may arm the fallback; `off`, `performance`, and `manual` always stay on direct UDP. `Engine::connect` synthesizes the fallback plan before the first dial (a mid-flight configuration change cannot arm a second retry), re-pins the kill switch to the relay endpoint, and then keeps the chosen transport for the connection's lifetime. `run_client` delegates to the engine path automatically whenever `outer_hop != "none"`.
+
+An outer hop does **not** hide a dedicated IP — it only helps when the relay address is shared with real traffic. Also note the wire budget: the outer `max_udp_payload` must exceed 1,200 bytes plus the MASQUE Flow-ID prefix for full-size inner Initials to fit (the nested-hop budget already subtracts 87 bytes per relay layer).
+
+---
+
 ### NAT Traversal and Path Discovery
 
 NAT traversal is an optional connectivity and path-discovery layer. It is not a default stealth mechanism and it must not generate permanent background STUN/ICE traffic on clean links.

@@ -670,3 +670,118 @@ fn test_handle_connection_loss_no_op_when_not_connected() {
     // State should remain Created
     assert_eq!(engine.state(), EngineState::Created);
 }
+
+fn outer_hop_test_config(mode: qf_engine_types::StealthMode) -> EngineConfig {
+    let mut config = EngineConfig::default();
+    config.engine.mode = EngineMode::Client;
+    config.stealth.mode = mode;
+    config.connection.remote = "203.0.113.10:4433".to_string();
+    config.connection.qkey_token = Some(qf_engine_types::QKeyToken::new("ab".repeat(16)));
+    config.connection.outer_hop = qf_engine_types::OuterHop::Masque;
+    config.connection.outer_hop_relay = Some(qf_engine_types::HopConfig {
+        label: "edge".to_string(),
+        endpoint: "relay.example.com:4433".to_string(),
+        sni: "relay.example.com".to_string(),
+        qkey_id: "0123456789ab".to_string(),
+        qkey_token_ref: "env:QF_RELAY_QKEY".to_string(),
+        role: qf_engine_types::HopRole::Relay,
+        ..qf_engine_types::HopConfig::default()
+    });
+    config
+}
+
+#[test]
+fn outer_hop_fallback_synthesizes_two_hop_circuit_once() {
+    let config = outer_hop_test_config(qf_engine_types::StealthMode::Stealth);
+    config.validate().expect("armed fallback validates");
+
+    let fallback = outer_hop_fallback_config(&config)
+        .expect("synthesis")
+        .expect("fallback plan exists for stealth mode");
+    fallback.validate().expect("synthesized config stays canonical");
+
+    let circuit = fallback.circuit.as_ref().expect("fallback circuit");
+    assert_eq!(circuit.hops.len(), 2);
+    assert_eq!(circuit.hops[0].role, qf_engine_types::HopRole::Relay);
+    assert_eq!(circuit.hops[0].endpoint, "relay.example.com:4433");
+    assert_eq!(circuit.hops[1].role, qf_engine_types::HopRole::Exit);
+    assert_eq!(circuit.hops[1].endpoint, "203.0.113.10:4433");
+    assert_ne!(circuit.hops[0].label, circuit.hops[1].label);
+    assert!(!circuit.allow_single_hop_fallback);
+
+    // The synthesized plan is self-contained: legacy endpoint, QKey, and the
+    // outer-hop arming keys are folded into the hops exactly once.
+    assert!(fallback.connection.qkey_token.is_none());
+    assert_eq!(fallback.connection.outer_hop, qf_engine_types::OuterHop::None);
+    assert!(fallback.connection.outer_hop_relay.is_none());
+    assert!(fallback.alternate_circuit.is_none());
+}
+
+#[test]
+fn outer_hop_fallback_respects_mode_and_topology_gates() {
+    for mode in [
+        qf_engine_types::StealthMode::Stealth,
+        qf_engine_types::StealthMode::StealthMax,
+        qf_engine_types::StealthMode::Dynamic,
+    ] {
+        assert!(
+            outer_hop_fallback_config(&outer_hop_test_config(mode)).expect("synthesis").is_some(),
+            "mode {} must arm the fallback",
+            mode.as_str()
+        );
+    }
+    for mode in [
+        qf_engine_types::StealthMode::Off,
+        qf_engine_types::StealthMode::Performance,
+        qf_engine_types::StealthMode::Manual,
+    ] {
+        assert!(
+            outer_hop_fallback_config(&outer_hop_test_config(mode)).expect("synthesis").is_none(),
+            "mode {} must stay on direct UDP",
+            mode.as_str()
+        );
+    }
+
+    let mut none = outer_hop_test_config(qf_engine_types::StealthMode::Stealth);
+    none.connection.outer_hop = qf_engine_types::OuterHop::None;
+    none.connection.outer_hop_relay = None;
+    assert!(outer_hop_fallback_config(&none).expect("synthesis").is_none());
+}
+
+#[test]
+fn dial_failure_classification_is_fail_safe() {
+    // Blackholed UDP: the assignment dial exhausts its deadline.
+    assert!(dial_failure_is_reachability(&EngineError::Connection(
+        "timed out waiting for authenticated server assignment".to_string()
+    )));
+
+    // ICMP unreachable surfaced through the connected UDP socket.
+    assert!(dial_failure_is_reachability(&EngineError::DataPlane(
+        qf_engine_types::DataPlaneFault::TransportReceive {
+            component: "client assignment UDP receive".to_string(),
+            error: "Connection refused (os error 111)".to_string(),
+        }
+    )));
+
+    // TLS alert / remote close / control-plane rejection: the path works,
+    // the peer refused — no fallback.
+    for error in [
+        EngineError::Connection("client closed before receiving server assignment".to_string()),
+        EngineError::Connection("client assignment control plane rejected: bad token".to_string()),
+        EngineError::DataPlane(qf_engine_types::DataPlaneFault::TransportReceive {
+            component: "client assignment QUIC receive".to_string(),
+            error: "tls alert: handshake failure".to_string(),
+        }),
+        EngineError::DataPlane(qf_engine_types::DataPlaneFault::TransportSend {
+            component: "client assignment UDP send".to_string(),
+            error: "sendmsg failed".to_string(),
+        }),
+        EngineError::DataPlane(qf_engine_types::DataPlaneFault::TunWrite {
+            component: "tun".to_string(),
+            error: "device closed".to_string(),
+        }),
+        EngineError::Io("UDP bind failed: address in use".to_string()),
+    ] {
+        assert!(!dial_failure_is_reachability(&error), "{error:?} must not arm the fallback");
+    }
+}

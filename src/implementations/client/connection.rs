@@ -313,6 +313,12 @@ impl ClientConnection {
         guard.recv_physical_mut(data)
     }
 
+    /// rust-tests only: enqueue one DATAGRAM frame on the circuit exit hop.
+    #[cfg(feature = "rust-tests")]
+    pub fn send_exit_datagram(&mut self, payload: &[u8]) -> Result<(), EngineError> {
+        self.inner.lock().send_exit_datagram(payload)
+    }
+
     /// Get the remote peer address.
     pub fn peer_addr(&self) -> SocketAddr {
         self.remote_addr
@@ -670,7 +676,9 @@ fn derive_sni(configured: &str, remote: SocketAddr) -> String {
     }
 }
 
-fn legacy_circuit_config(config: &EngineConfig) -> Option<qf_engine_types::CircuitConfig> {
+pub(crate) fn legacy_circuit_config(
+    config: &EngineConfig,
+) -> Option<qf_engine_types::CircuitConfig> {
     let token = config.connection.qkey_token.clone()?;
     let endpoint = config.connection.remote.trim();
     if endpoint.is_empty() {

@@ -4,8 +4,9 @@ title: When UDP is blocked, fall back to MASQUE or real TLS
 severity: MEDIUM
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-21
+completed: 2026-09-22
 depends_on: [TODO-1048]
 ---
 
@@ -47,16 +48,51 @@ A QUIC VPN on its own UDP port is dropped by filters that allow only known HTTP/
 
 ## Sub-Tasks
 
-- [ ] Config enum and dial order.
-- [ ] Timeout and unreachable trigger fallback. A TLS alert does not.
-- [ ] Local MASQUE test: UDP listener down, application bytes still flow.
-- [ ] Config comment: a dedicated IP is not hidden.
+- [x] Config enum and dial order.
+- [x] Timeout and unreachable trigger fallback. A TLS alert does not.
+- [x] Local MASQUE test: UDP listener down, application bytes still flow.
+- [x] Config comment: a dedicated IP is not hidden.
 
 ## Acceptance
 
 - `OuterHop::None` keeps today's dial.
 - A blackholed UDP server plus a local MASQUE hop still carries application bytes.
 - No Vision splice code.
+
+## Implementation notes
+
+- `OuterHop::{None, Masque, TlsHttp}` lives next to `StealthMode` in
+  `qf-engine-types` (`connection.outer_hop`, `connection.outer_hop_relay`).
+  `TlsHttp` is deliberately rejected at validation: there is no in-tree HTTP
+  CONNECT client, so the spec's "real TCP TLS" path stops at MASQUE rather than
+  growing a fake record layer. Recorded here as the follow-up.
+- `Engine::connect` synthesizes the fallback plan *before* the direct dial
+  (`outer_hop_fallback_config` in `config_projection.rs`): the configured relay
+  becomes hop 0 (`role = "relay"`), `legacy_circuit_config` turns the legacy
+  endpoint/SNI/QKey fields into the exit hop, and the consumed legacy keys are
+  neutralized so the canonical "circuit XOR legacy" rule still validates.
+- Eligibility is classified by `dial_failure_is_reachability`:
+  `DataPlaneFault::TransportReceive` with a `UDP receive` component (ICMP
+  unreachable) or a `Connection` timeout. TLS alerts, control-plane rejects,
+  and client-closed paths do not match, so an ambiguous error never flips the
+  transport (fail-safe).
+- One retry, ever: `outer_hop_plan.take()` consumes the plan; the kill switch
+  is re-pinned to the relay endpoint before the second dial; `remote` is
+  updated so firewall policy and logs name the relay, not the exit.
+- `run_client` delegates to the engine path whenever
+  `connection.outer_hop != OuterHop::None` (`run_circuit_client`).
+- Mode gate: `stealth`, `Stealth MAX`, and `dynamic` may arm the fallback;
+  `off`, `performance`, and `manual` never synthesize it.
+- Acceptance test `it-outer-hop-fallback` (scripts/tests/rust/integration):
+  real `ClientConnection` over a two-hop circuit, real `MasqueRelayOwner`
+  association on loopback, inner QUIC bytes decode on the exit server. The
+  pre-fallback dial and classifier are covered by engine unit tests; the test
+  owns the post-fallback topology directly.
+- Measured along the way: the outer `max_udp_payload` must exceed 1200 +
+  flow-prefix for full-size inner Initials (test uses 1400; the nested-hop
+  budget already subtracts `NESTED_MASQUE_OVERHEAD` per relay layer).
+- Config comment in `config/quicfuscate.toml` states that a dedicated IP is
+  not hidden by an outer hop.
 
 ## Risks
 

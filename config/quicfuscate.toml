@@ -91,6 +91,33 @@ migration_cooldown_ms = 750
 # Options: "previous-window", "reduced-window"
 migration_probe_target = "previous-window"
 
+# Outer-hop fallback when the direct UDP dial is blocked (client mode only).
+# "none"     = direct UDP only, no fallback (default)
+# "masque"   = if the UDP dial fails with timeout or unreachable, retry exactly
+#              once through the MASQUE CONNECT-UDP relay in
+#              [connection.outer_hop_relay]. The direct dial always runs first;
+#              the transport never flaps per packet. Applies to stealth,
+#              "Stealth MAX", and dynamic modes only; off/performance always
+#              stay on direct UDP.
+# "tls_http" = reserved; rejected until an in-tree HTTP CONNECT client exists.
+#
+# IMPORTANT: an outer hop does NOT hide a dedicated IP. It only helps when the
+# relay address is shared with real traffic (e.g. a multi-tenant HTTP/3
+# endpoint). Pointing it at a dedicated server IP changes the transport, not
+# the fingerprint.
+outer_hop = "none"
+#
+# Relay hop used when outer_hop = "masque" (role must be "relay"; requires
+# connection.qkey_token so the exit hop can authenticate).
+# [connection.outer_hop_relay]
+# endpoint = "relay.example.com:443"
+# sni = "relay.example.com"
+# verify_peer = true
+# ca_file = ""
+# qkey_id = "..."
+# qkey_token_ref = "env:QF_RELAY_QKEY"
+# role = "relay"
+
 # ==============================================================================
 # NAT TRAVERSAL / PATH DISCOVERY
 # ==============================================================================

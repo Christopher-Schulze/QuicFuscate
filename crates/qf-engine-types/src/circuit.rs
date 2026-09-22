@@ -216,7 +216,7 @@ impl HopConfig {
         parse_endpoint_authority(&self.endpoint)
     }
 
-    fn validate(&self, index: usize) -> Result<(), CircuitConfigError> {
+    pub(crate) fn validate(&self, index: usize) -> Result<(), CircuitConfigError> {
         let label = self.label.trim();
         if label.is_empty()
             || label.chars().count() > MAX_CIRCUIT_HOP_LABEL_CHARS

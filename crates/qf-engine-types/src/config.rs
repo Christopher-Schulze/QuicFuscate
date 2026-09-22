@@ -111,10 +111,27 @@ impl EngineConfig {
         self.connection.validate().map_err(|error| ConfigError::Validation(error.to_string()))?;
         self.transport.validate().map_err(|error| ConfigError::Validation(error.to_string()))?;
         if self.engine.mode == EngineMode::Server
-            && (self.circuit.is_some() || self.alternate_circuit.is_some())
+            && (self.circuit.is_some()
+                || self.alternate_circuit.is_some()
+                || self.connection.outer_hop != crate::OuterHop::None)
         {
             return Err(ConfigError::Validation(
-                "circuit and alternate_circuit are client-only configuration sections".to_string(),
+                "circuit, alternate_circuit, and outer_hop are client-only configuration sections"
+                    .to_string(),
+            ));
+        }
+        if self.connection.outer_hop != crate::OuterHop::None && self.circuit.is_some() {
+            return Err(ConfigError::Validation(
+                "connection.outer_hop wraps the direct UDP dial; it cannot be combined with an explicit circuit"
+                    .to_string(),
+            ));
+        }
+        if self.connection.outer_hop == crate::OuterHop::Masque
+            && self.connection.qkey_token.is_none()
+        {
+            return Err(ConfigError::Validation(
+                "connection.outer_hop = \"masque\" requires connection.qkey_token so the exit hop can authenticate"
+                    .to_string(),
             ));
         }
         if let Some(circuit) = self.circuit.as_ref() {
