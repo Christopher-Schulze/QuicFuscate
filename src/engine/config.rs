@@ -31,9 +31,10 @@ pub enum FecFraming {
 pub fn engine_mode_fec_framing(mode: StealthMode) -> FecFraming {
     match mode {
         StealthMode::Off | StealthMode::Performance => FecFraming::Wrapper,
-        StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Manual | StealthMode::Dynamic => {
-            FecFraming::QuicFrame
-        }
+        StealthMode::Stealth
+        | StealthMode::StealthMax
+        | StealthMode::Manual
+        | StealthMode::Dynamic => FecFraming::QuicFrame,
     }
 }
 
@@ -130,12 +131,21 @@ mod tests {
             runtime_mode_fec_framing(qf_stealth::StealthMode::Performance),
             FecFraming::Wrapper
         );
-        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Stealth), FecFraming::QuicFrame);
+        assert_eq!(
+            runtime_mode_fec_framing(qf_stealth::StealthMode::Stealth),
+            FecFraming::QuicFrame
+        );
         assert_eq!(
             runtime_mode_fec_framing(qf_stealth::StealthMode::StealthMax),
             FecFraming::QuicFrame
         );
-        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Dynamic), FecFraming::QuicFrame);
-        assert_eq!(runtime_mode_fec_framing(qf_stealth::StealthMode::Manual), FecFraming::QuicFrame);
+        assert_eq!(
+            runtime_mode_fec_framing(qf_stealth::StealthMode::Dynamic),
+            FecFraming::QuicFrame
+        );
+        assert_eq!(
+            runtime_mode_fec_framing(qf_stealth::StealthMode::Manual),
+            FecFraming::QuicFrame
+        );
     }
 }

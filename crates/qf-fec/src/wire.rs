@@ -434,7 +434,8 @@ pub fn write_symbol(
 ) -> Result<usize, WireError> {
     meta.validate()?;
     let payload_len = u16::try_from(payload.len()).map_err(|_| WireError::PayloadTooLarge)?;
-    let wire_len = SYMBOL_HEADER_LEN.checked_add(payload.len()).ok_or(WireError::PayloadTooLarge)?;
+    let wire_len =
+        SYMBOL_HEADER_LEN.checked_add(payload.len()).ok_or(WireError::PayloadTooLarge)?;
     if output.len() < wire_len {
         return Err(WireError::BufferTooShort);
     }
@@ -491,7 +492,9 @@ pub fn parse_symbol(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> 
         return Err(WireError::LengthMismatch);
     }
     let profile = WireProfile {
-        epoch: u32::from_be_bytes(datagram[6..10].try_into().map_err(|_| WireError::BufferTooShort)?),
+        epoch: u32::from_be_bytes(
+            datagram[6..10].try_into().map_err(|_| WireError::BufferTooShort)?,
+        ),
         codec: WireCodec::from_byte(datagram[2])?,
         source_count: u16::from_be_bytes([datagram[22], datagram[23]]),
         total_count: u16::from_be_bytes([datagram[24], datagram[25]]),
@@ -499,7 +502,9 @@ pub fn parse_symbol(datagram: &[u8]) -> Result<ParsedWirePacket<'_>, WireError> 
     };
     let meta = WirePacketMeta {
         profile,
-        window: u32::from_be_bytes(datagram[10..14].try_into().map_err(|_| WireError::BufferTooShort)?),
+        window: u32::from_be_bytes(
+            datagram[10..14].try_into().map_err(|_| WireError::BufferTooShort)?,
+        ),
         sequence: u64::from_be_bytes(
             datagram[14..22].try_into().map_err(|_| WireError::BufferTooShort)?,
         ),

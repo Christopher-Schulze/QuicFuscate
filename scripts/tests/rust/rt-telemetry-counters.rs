@@ -45,10 +45,7 @@ fn telemetry_counters_snapshot() {
     }
 
     // SVE2 may be unavailable on the current host; record the observed value for telemetry audit.
-    println!(
-        "telemetry_snapshot: pattern_neon={} pattern_sve2={}",
-        pattern_neon, pattern_sve2
-    );
+    println!("telemetry_snapshot: pattern_neon={} pattern_sve2={}", pattern_neon, pattern_sve2);
     assert!(
         pattern_sve2 >= base_pattern_sve2,
         "PATTERN_SVE2_OPS should be monotonic ({} -> {})",

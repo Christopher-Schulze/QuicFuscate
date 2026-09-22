@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use proptest::prelude::*;
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::RingChaCha20Poly1305;
 use quicfuscate::crypto::select_data_aead;
+use quicfuscate::crypto::RingChaCha20Poly1305;
 use quicfuscate::fec::{Encoder8, FecDecoder8, FecPacket};
 use quicfuscate::optimize::MemoryPool;
 use quicfuscate::rng::push_hex_byte;

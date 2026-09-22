@@ -38,7 +38,6 @@ impl AccelerationPlans {
     }
 }
 
-
 /// SIMD-width-aware transport batching plan.
 #[derive(Debug, Clone, Copy)]
 pub struct TransportPlan {

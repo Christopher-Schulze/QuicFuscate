@@ -355,7 +355,6 @@ pub(super) unsafe fn find_pattern_sse42_short(haystack: &[u8], needle: &[u8]) ->
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

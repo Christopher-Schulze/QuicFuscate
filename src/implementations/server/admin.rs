@@ -629,8 +629,8 @@ impl AdminHandler for DefaultAdminHandler {
         // Test-only fallback handler emits a deterministic synthetic server profile.
         use qf_engine_types as qkey;
 
-        let config =
-            qkey::QKeyConfig::new("vpn.example.com:4433", "cdn.example.com").with_stealth("dynamic");
+        let config = qkey::QKeyConfig::new("vpn.example.com:4433", "cdn.example.com")
+            .with_stealth("dynamic");
         let mut nonce = [0u8; 8];
         crate::rng::fill_secure_or_abort(&mut nonce, "admin::handle_qkey_nonce");
         let extra: String = nonce.iter().map(|b| format!("{:02x}", b)).collect();

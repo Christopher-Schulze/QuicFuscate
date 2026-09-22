@@ -909,11 +909,7 @@ fn bench_brain_packet_observer(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 // Group registration
 // ---------------------------------------------------------------------------
-criterion_group!(
-    crypto_benches,
-    bench_data_aead_backends,
-    bench_rustls_standard_packet_keys,
-);
+criterion_group!(crypto_benches, bench_data_aead_backends, bench_rustls_standard_packet_keys,);
 
 criterion_group!(
     transport_benches,

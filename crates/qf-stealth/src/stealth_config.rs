@@ -805,8 +805,7 @@ impl StealthConfig {
         {
             return Err("off mode cannot enable stealth transport/runtime features".into());
         }
-        if let Some(invalid) =
-            self.reality_cover_targets.iter().find(|t| !is_valid_cover_target(t))
+        if let Some(invalid) = self.reality_cover_targets.iter().find(|t| !is_valid_cover_target(t))
         {
             return Err(format!(
                 "stealth.reality_cover_targets entry '{invalid}' is not a valid host or host:port"

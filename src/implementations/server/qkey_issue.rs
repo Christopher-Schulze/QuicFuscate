@@ -114,9 +114,7 @@ pub fn resolve_qkey_cover_sni_policy(
     } else if mode_raw == COVER_SNI_MODE_OFF {
         COVER_SNI_MODE_OFF
     } else {
-        return Err(
-            "Invalid cover SNI strategy. Valid: fixed, auto_rotating, off".to_string()
-        );
+        return Err("Invalid cover SNI strategy. Valid: fixed, auto_rotating, off".to_string());
     };
     let server_host = extract_host_from_endpoint(listen_addr);
 
@@ -143,8 +141,8 @@ pub fn resolve_qkey_cover_sni_policy(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .ok_or_else(|| "Cover SNI fixed mode requires a domain".to_string())?;
-        let domain = normalize_sni_host(requested)
-            .ok_or_else(|| "Invalid cover SNI domain".to_string())?;
+        let domain =
+            normalize_sni_host(requested).ok_or_else(|| "Invalid cover SNI domain".to_string())?;
         if !allowlist.iter().any(|v| v == &domain) {
             return Err("Cover SNI domain is not allowlisted".to_string());
         }

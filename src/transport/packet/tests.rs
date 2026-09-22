@@ -947,7 +947,8 @@ fn tls_cover_open_failure_preserves_sequence_state() {
 
 #[test]
 fn packet_payload_boundaries_reject_overflow_before_aead() {
-    let aead = RingAesGcm128::from_arrays(&[0xB1; 16], &[0xB2; 12]).expect("valid AES-GCM material");
+    let aead =
+        RingAesGcm128::from_arrays(&[0xB1; 16], &[0xB2; 12]).expect("valid AES-GCM material");
     let mut packet = [0xC3u8; 64];
     let original = packet;
     assert!(encrypt_packet(&mut packet, usize::MAX, 0, 8, &aead).is_err());
@@ -1040,10 +1041,22 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
     let handshake_iv = [0x32; 12];
     let handshake_hp_key = [0x33; 16];
     installer.install_handshake_keys(QuicTlsHandshakeKeys {
-        seal: Box::new(RingAesGcm128::from_arrays(&handshake_key, &handshake_iv).expect("valid AES-GCM material")),
-        open: Box::new(RingAesGcm128::from_arrays(&handshake_key, &handshake_iv).expect("valid AES-GCM material")),
-        hp_seal: Box::new(crate::crypto::RingAesHp::from_key(&handshake_hp_key).expect("valid header-protection key")),
-        hp_open: Box::new(crate::crypto::RingAesHp::from_key(&handshake_hp_key).expect("valid header-protection key")),
+        seal: Box::new(
+            RingAesGcm128::from_arrays(&handshake_key, &handshake_iv)
+                .expect("valid AES-GCM material"),
+        ),
+        open: Box::new(
+            RingAesGcm128::from_arrays(&handshake_key, &handshake_iv)
+                .expect("valid AES-GCM material"),
+        ),
+        hp_seal: Box::new(
+            crate::crypto::RingAesHp::from_key(&handshake_hp_key)
+                .expect("valid header-protection key"),
+        ),
+        hp_open: Box::new(
+            crate::crypto::RingAesHp::from_key(&handshake_hp_key)
+                .expect("valid header-protection key"),
+        ),
         standard_cipher_suite: crate::qftls::StandardCipherSuite::Aes128GcmSha256,
     });
 
@@ -1052,15 +1065,19 @@ fn qftls_key_installer_replaces_and_clears_complete_packet_key_bundles() {
     let one_rtt_hp_key = [0x43; 16];
     installer.install_one_rtt_keys(QuicTlsOneRttKeys {
         seal: Arc::new(qf_crypto::PacketAeadSeal::dynamic(Box::new(
-            RingAesGcm128::from_arrays(&one_rtt_key, &one_rtt_iv)
-                .expect("valid AES-GCM material"),
+            RingAesGcm128::from_arrays(&one_rtt_key, &one_rtt_iv).expect("valid AES-GCM material"),
         ))),
         open: Arc::new(qf_crypto::PacketAeadOpen::dynamic(Box::new(
-            RingAesGcm128::from_arrays(&one_rtt_key, &one_rtt_iv)
-                .expect("valid AES-GCM material"),
+            RingAesGcm128::from_arrays(&one_rtt_key, &one_rtt_iv).expect("valid AES-GCM material"),
         ))),
-        hp_seal: Arc::new(crate::crypto::RingAesHp::from_key(&one_rtt_hp_key).expect("valid header-protection key")),
-        hp_open: Arc::new(crate::crypto::RingAesHp::from_key(&one_rtt_hp_key).expect("valid header-protection key")),
+        hp_seal: Arc::new(
+            crate::crypto::RingAesHp::from_key(&one_rtt_hp_key)
+                .expect("valid header-protection key"),
+        ),
+        hp_open: Arc::new(
+            crate::crypto::RingAesHp::from_key(&one_rtt_hp_key)
+                .expect("valid header-protection key"),
+        ),
         standard_cipher_suite: crate::qftls::StandardCipherSuite::Aes128GcmSha256,
     });
 
@@ -1160,7 +1177,8 @@ fn protect_and_remove_header_reject_missing_sample_without_mutation() {
 #[test]
 fn unprotect_rejects_missing_sample_before_header_or_payload_processing() {
     let hp = crate::crypto::RingAesHp::new(&[0x43; 16]).expect("valid header-protection key");
-    let aead = RingAesGcm128::from_arrays(&[0x44; 16], &[0x45; 12]).expect("valid AES-GCM material");
+    let aead =
+        RingAesGcm128::from_arrays(&[0x44; 16], &[0x45; 12]).expect("valid AES-GCM material");
     let header = Header {
         ty: PacketType::Initial,
         version: crate::transport::PROTOCOL_VERSION,

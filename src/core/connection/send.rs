@@ -980,7 +980,8 @@ impl QuicFuscateConnection {
         };
 
         let quic_frame = self.fec_framing() == crate::engine::FecFraming::QuicFrame;
-        let raw_quic = if quic_frame { Some(send_buffer[quic_range.clone()].to_vec()) } else { None };
+        let raw_quic =
+            if quic_frame { Some(send_buffer[quic_range.clone()].to_vec()) } else { None };
 
         let (packet_id, fec_data_len) = if wire_profile.is_some() {
             let quic_len =
@@ -1079,9 +1080,9 @@ impl QuicFuscateConnection {
                         crate::error::ConnectionError::Transport(error.to_string())
                     })?;
                     body.truncate(written);
-                    self.conn
-                        .dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &body)
-                        .map_err(|error| crate::error::ConnectionError::Transport(error.to_string()))?;
+                    self.conn.dgram_send_parts(&[wire::QUIC_REPAIR_DISCRIMINATOR], &body).map_err(
+                        |error| crate::error::ConnectionError::Transport(error.to_string()),
+                    )?;
                     if let Some(raw) = raw_quic.as_ref() {
                         self.conn.set_short_header_pad_target(raw.len());
                     }
@@ -1089,7 +1090,9 @@ impl QuicFuscateConnection {
                 }
                 let packet = if quic_frame && is_systematic {
                     let raw = raw_quic.as_ref().ok_or_else(|| {
-                        crate::error::ConnectionError::Transport("systematic quic image missing".into())
+                        crate::error::ConnectionError::Transport(
+                            "systematic quic image missing".into(),
+                        )
                     })?;
                     FecPacket::from_block(sequence, raw, self.optimization_manager.memory_pool())
                         .map_err(crate::error::ConnectionError::Transport)?
@@ -1153,7 +1156,10 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            self.stealth_window_tick(self.bounded_stealth_release(now, delay_opt, transport_jitter), now);
+            self.stealth_window_tick(
+                self.bounded_stealth_release(now, delay_opt, transport_jitter),
+                now,
+            );
         }
         // Every datagram materialized inside a drain epoch spends one unit
         // of its budget - including the packet whose window edge armed it.
@@ -1284,7 +1290,10 @@ impl QuicFuscateConnection {
             } else {
                 None
             };
-            self.stealth_window_tick(self.bounded_stealth_release(now, delay_opt, transport_jitter), now);
+            self.stealth_window_tick(
+                self.bounded_stealth_release(now, delay_opt, transport_jitter),
+                now,
+            );
             self.reorder_window_tick(&send_info, now);
             // A window edge expiring inside the ticks arms the drain
             // mid-call: this packet belongs to the burst batch, so it

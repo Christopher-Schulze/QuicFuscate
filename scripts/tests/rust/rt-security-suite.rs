@@ -8,8 +8,8 @@ use std::sync::{
 use crossbeam_channel::bounded;
 
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::RingChaCha20Poly1305;
 use quicfuscate::crypto::select_data_aead;
+use quicfuscate::crypto::RingChaCha20Poly1305;
 use quicfuscate::error::ConnectionError;
 use quicfuscate::fec::{Encoder8, FecDecoder8, FecPacket};
 use quicfuscate::optimize::{ConstPacketPool, MemoryPool};

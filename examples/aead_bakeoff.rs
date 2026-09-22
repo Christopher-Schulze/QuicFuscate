@@ -12,8 +12,7 @@ use quicfuscate::crypto::aead::{
     AeadOpen, AeadOpenItem, AeadSeal, AeadSealItem, PacketHeaderProtector,
 };
 use quicfuscate::crypto::{
-    select_libaegis128_packet, LibAegis128Variant, RingAesGcm128, RingAesHp,
-    RingChaCha20Poly1305,
+    select_libaegis128_packet, LibAegis128Variant, RingAesGcm128, RingAesHp, RingChaCha20Poly1305,
 };
 use quicfuscate::error::ConnectionError;
 use rustls::quic::PacketKey;

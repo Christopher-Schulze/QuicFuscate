@@ -285,5 +285,4 @@ mod tests {
         assert_eq!(stamped, 0);
         assert!(plan_tls_cover_record(4096, true, false, &"x".repeat(65), &environment).is_err());
     }
-
 }

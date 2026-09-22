@@ -1331,8 +1331,7 @@ mod tests {
 
             let environment = qf_common::env_utils::EnvSnapshot::capture();
             let (tx, mut rx) = mpsc::channel(8);
-            let proxy =
-                RealityProxy::new_with_targets(tx, &environment, &[cover_addr.to_string()]);
+            let proxy = RealityProxy::new_with_targets(tx, &environment, &[cover_addr.to_string()]);
             let probe_source: SocketAddr = "10.9.8.7:4444".parse().unwrap();
             proxy.forward_probe(b"PROBE_PACKET", probe_source);
 

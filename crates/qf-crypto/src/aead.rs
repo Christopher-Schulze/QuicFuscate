@@ -1,4 +1,3 @@
-
 /// Invalid key, IV, nonce, or header-protection secret length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyMaterialError {
@@ -206,4 +205,3 @@ pub trait KeyScheduleHooks {
         secret: &[u8],
     ) -> Result<(), crate::error::ConnectionError>;
 }
-

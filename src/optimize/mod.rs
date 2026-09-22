@@ -47,9 +47,9 @@ pub use qf_cpu::{
 };
 pub use qf_cpu::{
     dispatch, AmxCapability, Avx2, Avx512, Avx512Gfni, Avx512Vbmi2, CacheHierarchy, CacheLevel,
-    CpuFeature, CpuFeatures, CpuProfile, FeatureDetector, Neon, NeonCrypto,
-    OptimizeConfig, Pclmulqdq, Scalar, SimdDispatch, SimdFeatureMatrix, SimdPolicy, Sse2, Sve,
-    Sve2, VERIFIED_BACKEND,
+    CpuFeature, CpuFeatures, CpuProfile, FeatureDetector, Neon, NeonCrypto, OptimizeConfig,
+    Pclmulqdq, Scalar, SimdDispatch, SimdFeatureMatrix, SimdPolicy, Sse2, Sve, Sve2,
+    VERIFIED_BACKEND,
 };
 pub(crate) use qf_cpu::{prefetch, PrefetchHint};
 

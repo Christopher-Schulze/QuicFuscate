@@ -300,7 +300,6 @@ fn test_compress_find_pattern_full_match() {
     assert_eq!(compress::find_pattern(haystack, b"exact"), Some(0));
 }
 
-
 // ---- FeatureDetector consistency ----
 
 #[test]

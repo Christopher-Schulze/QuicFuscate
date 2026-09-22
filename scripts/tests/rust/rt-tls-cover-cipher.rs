@@ -58,4 +58,3 @@ fn tls_cover_aes_gcm_roundtrip() {
     let after = telemetry::FAKETLS_AES_GCM_OPS.get();
     assert!(after > before, "telemetry counter should increase");
 }
-

@@ -1,6 +1,6 @@
 #![cfg(feature = "rust-tests")]
 use quicfuscate::crypto::aead::{AeadOpen, AeadSeal};
-use quicfuscate::crypto::{select_private_packet_data_aead, RingAesGcm128, PrivateAeadFamily};
+use quicfuscate::crypto::{select_private_packet_data_aead, PrivateAeadFamily, RingAesGcm128};
 use quicfuscate::fec::matrix_multiply_scalar;
 
 fn make_vec(data: &[&[u8]]) -> Vec<Vec<u8>> {

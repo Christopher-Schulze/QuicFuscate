@@ -95,9 +95,7 @@ pub(crate) fn checked_seal_capacity(
 pub mod aead;
 mod libaegis_aead;
 mod ring_aead;
-pub use ring_aead::{
-    aes128_gcm_tag_aad_only, RingAesGcm128, RingAesHp, RingChaCha20Poly1305,
-};
+pub use ring_aead::{aes128_gcm_tag_aad_only, RingAesGcm128, RingAesHp, RingChaCha20Poly1305};
 
 const MAX_QUIC_PACKET_NUMBER: u64 = (1 << 62) - 1;
 
