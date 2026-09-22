@@ -878,8 +878,40 @@ fn analyze_short(packet: &[u8], c2s: bool, state: &mut State, report: &mut Repor
         }
         return;
     }
+    // Last resort: a QUIC key update rotates the standard traffic secret —
+    // including the header-protection key, so the packet number must be
+    // re-decoded under the updated hp key.
+    if let Some(secret) = state.secrets.get(std_secret_name) {
+        let mut next = secret.to_vec();
+        for hop in 1..=4u8 {
+            let Ok(n) = quic_kdf::derive_next_secret_for_version(&next, version) else {
+                break;
+            };
+            next = n;
+            let Some(upd) = DirectionKeys::from_secret(&next, version) else { continue };
+            let Some((b0u, pnb, pnl)) = unprotect_header(&upd.hp, packet, pn_offset, false) else {
+                continue;
+            };
+            let trunc = truncated_to_u64(&pnb, pnl);
+            let pnu = reconstruct_pn(*expect, trunc, (pnl * 8) as u32);
+            let aadu = aad_for(packet, pn_offset, pnl, b0u, &pnb);
+            let mut buf = body.to_vec();
+            if upd.open.open_with_u64_counter(pnu, &aadu, &mut buf).is_ok() {
+                *expect = pnu + 1;
+                report.rtt_standard_above_boundary += 1;
+                println!(
+                    "  1rtt {dir_name} pn={pnu} opened STANDARD key-update hop {hop} (boundary-crossing?)"
+                );
+                return;
+            }
+        }
+    }
     report.rtt_failed += 1;
-    println!("  1rtt {dir_name} pn={pn} failed every available key");
+    let key_phase = (b0 & 0x04) != 0;
+    println!(
+        "  1rtt {dir_name} pn={pn} failed every available key (b0={b0:02x} kp={key_phase} pn_len={pn_len} pkt_len={})",
+        packet.len()
+    );
 }
 
 fn dir(c2s: bool) -> &'static str {
