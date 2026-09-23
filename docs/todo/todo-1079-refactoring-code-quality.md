@@ -27,6 +27,22 @@ where duplication is proven — never cosmetic churn.
 - Dead-path removal: unreachable config surfaces, write-only selectors
   (TODO-1069 pattern), stale compat shims (TODO-910 overlap).
 - Shared abstractions: extract only where ≥2 real consumers exist.
+- `crates/qf-instrumentation/src/lib.rs::StealthMetrics::record_mode` has no
+  repository caller. Its public `mode_auto`/`mode_max` fields still name the
+  removed values, recognize only three of the six canonical modes, and are
+  absent from `StealthMetrics::export`. Determine whether an external API
+  consumer exists; otherwise remove these dead counters and method in place.
+  If an actual consumer exists, use the one canonical typed mode and export
+  truthful metrics for every supported value. Do not add another policy enum.
+- Consolidation audit, linked to TODO-1075's one-entry contract: inspect
+  persona/QUIC/H3/outer-header configuration, Brain/Maybenot/cover scheduling,
+  FEC wrapper versus QUIC-frame placement, standard versus private AEAD
+  negotiation, and desktop versus standalone QKey/config derivation. For each,
+  map actual call sites and wire behavior, identify the single policy owner,
+  and record whether the variants are redundant implementations or necessary
+  protocol/carrier differences. Delete a variant only after a behavior and
+  performance comparison proves the surviving path subsumes it; route any
+  behavioral fix to its owning task instead of bundling it into a refactor.
 
 ## Non-goals
 
@@ -42,8 +58,14 @@ where duplication is proven — never cosmetic churn.
 ## Acceptance
 
 - [ ] Refactor list populated with concrete targets and the proof each needs.
+- [ ] Each consolidation target above has a code-backed owner/consumer map,
+      retain/merge/remove verdict, migration effects, and proof gate. A
+      visible mode switch alone is not evidence of duplicate implementation.
 - [ ] Each landed refactor: green suite + no measured regression + docs
       flushed in the same commit.
+- [ ] Mode instrumentation has one evidenced consumer and complete canonical
+      semantics, or its unused public counters/method are removed with all
+      references and instrumentation docs updated.
 
 ## Rollback
 

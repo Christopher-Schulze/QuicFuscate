@@ -497,7 +497,7 @@
 - Detail: `docs/todo/todo-1054-cover-ping-follows-persona-trace.md`
 
 ### TODO-1055 - QPACK, User-Agent, and server push only on the outer hop
-- DONE. Inner `/tun` streams carry pseudo + functional `x-qf-*` headers only; outer-hop MASQUE/H3 requests take the persona header list and debit the wire ledger. `use_qpack_headers` now really gates the QPACK dynamic table. Fake server-push generation removed end to end (sender, brain triggers, telemetry, `Event::PushPromise`); receive side hardened: no `MAX_PUSH_ID` advertisement, push streams → `StreamCreationError`, `PUSH_PROMISE` → `IdError`, `CANCEL_PUSH`/`MAX_PUSH_ID` parsed and dropped. `enable_server_push_cover = true` is a config error. WebTransport cover is a one-shot outer-hop emit.
+- DONE. Inner `/tun` streams carry pseudo + functional `x-qf-*` headers only; outer-hop MASQUE/H3 requests take the persona header list and debit the wire ledger. `use_qpack_headers` now really gates the QPACK dynamic table. Fake server-push generation removed end to end (sender, brain triggers, telemetry, `Event::PushPromise`); the original receive path disabled `MAX_PUSH_ID`, parsed and dropped `CANCEL_PUSH`/`MAX_PUSH_ID`, and rejected push streams and `PUSH_PROMISE`. TODO-1110 corrects the original server-push stream error code and wires application-close delivery. `enable_server_push_cover = true` is a config error. WebTransport cover is a one-shot outer-hop emit.
 - Detail: `docs/todo/todo-1055-outer-hop-only-h3-masquerade.md`
 
 ### TODO-1056 - Persona change via connection migration, not a 120 s handshake
@@ -581,6 +581,7 @@
 
 ### TODO-1071 - Performance rebench and honest baselines after the crypto rebuild
 - OPEN. Cluster parent. Re-measure every dataplane baseline that moved under the crypto rebuild (libaegis private owner, ring-only standard path, qf-hpke ECH, MORUS removal): same-API AEAD cells (R-RING, R-LC opt-in, S-AEGIS), transport pps/latency, FEC encode/decode, stealth wire overhead, e2e TUN throughput. Omega/aarch64 Linux is the primary measurement host (product target); macOS numbers are recorded as secondary reference only and labeled as such. Output: a baseline table committed to docs, permanent criterion regression gates where missing, and the measurement input for TODO-1072/1073/1074.
+- Review correction (2026-09-23): provisional `allocs=0 copied=16` fields are runner constants, the FEC suite filters/targets do not select its intended groups, broad bench preflight can compile unrelated targets, and the in-memory handshake cell is software cost rather than network latency. `bench-crypto.sh` ranks test-runner wall times as if they were measured AEAD throughput and emits an unmeasured speedup header. The performance regression suite requests a deleted AES-GCM cell, has no baseline file, reverses the throughput regression direction, and drops Criterion units; transport suite JSON records whole-command time rather than the Criterion metric. Exact remediation and acceptance are in the detail file.
 - Detail: `docs/todo/todo-1071-perf-rebench-baselines.md`
 
 ### TODO-1072 - Dataplane performance and efficiency optimization cluster
@@ -595,8 +596,8 @@
 - OPEN. Cluster parent. Measure and reduce the cost of the wire defenses: wire-image/persona-trace byte overhead, Maybenot pad share vs machine quality, ChameleonFlow/Adaptive-Tamaraw/UPGen candidates, timing/reorder/padding/cover budgets under the TODO-1052 ledger, persona fidelity per byte spent. Each defense gets a measured cost/effect table; unmeasured claims are not allowed. TODO-1060's sensor/actuator split stays: packet shape is never a runtime actuator.
 - Detail: `docs/todo/todo-1074-stealth-optimization.md`
 
-### TODO-1075 - Xray Reality / core-stack high-tech stealth adoption analysis
-- OPEN. Research + decision cluster. Systematically evaluate which concepts from Xray Vision/Reality and comparable state-of-the-art censorship-circumvention stacks (ShadowTLS, REALITY-derived flows, MASQUE-CONNECT-IP/UDP variants, uTLS research, WF defenses) are technically adoptable or worth evolving beyond — per candidate: threat model, wire effect, detection surface, implementation cost, measurement plan, adopt/evolve/reject verdict with rationale. No blind feature copying; domain fronting stays rejected per earlier research; GFW QUIC blocking stays classified residual/compute-limited. Output: a ranked candidate table and follow-up TODOs only where a verdict says adopt or evolve.
+### TODO-1075 - Unified Reality, shared-front, and stealth entry architecture
+- OPEN. Define one authenticated entry identity, inner tunnel, and typed carrier-selection policy that combine protocol-valid Reality probe behavior with authorized shared-edge/front routing and ECH where supported. Direct QUIC and shared-edge/MASQUE are carriers, not independent tunnel implementations; a validated shared ingress is primary when its shared-IP property is required or preferred, and a fallback cannot breach the binding's anonymity/ECH floor. Arbitrary CDN SNI/Host mismatch remains invalid. Bind TODO-1080/1081/1083/1092/1094/1095 into one wire-level contract and compare against a pinned Xray REALITY baseline before any superiority claim. Retain the per-candidate research verdicts for Vision, ShadowTLS, uTLS, traffic defenses, and QUIC blocking.
 - Detail: `docs/todo/todo-1075-reality-core-stack-adoption.md`
 
 ### TODO-1076 - Stability and robustness cluster
@@ -614,6 +615,158 @@
 ### TODO-1079 - Refactoring and code-quality cluster
 - OPEN. Cluster parent. Structural improvements only where they pay: module clarity, ownership boundaries, feature-gate correctness (TODO-1070 class of bugs), dead-path removal, shared-abstraction extraction. Hard gate: a refactor lands only with the behavior test suite green and a TODO-1071 baseline showing no dataplane regression. No cosmetic rewrites.
 - Detail: `docs/todo/todo-1079-refactoring-code-quality.md`
+
+### TODO-1080 - Reality probe fallback correctness
+- OPEN. Replace the invalid cached TCP TLS flight on UDP with a protocol-valid, routed response or an explicit no-response outcome; preserve per-scanner targets and errors. The ordinary `stealth` preset has neither cover targets nor an enabled Reality proxy, and a cache enabled without a proxy can silently consume a probe. TODO-1048's canned UDP reply is not live TLS/QUIC proof.
+- Detail: `docs/todo/todo-1080-reality-probe-fallback-correctness.md`
+
+### TODO-1081 - ECH service binding and default policy
+- OPEN. Resolve HTTPS/SVCB semantics and endpoint/TTL binding correctly; automatically offer ECH on eligible shared-hop connections, prevent silent plaintext downgrade, and report persona/offer/acceptance truthfully. Discovery currently runs only in the CLI circuit path, not public Engine startup, and its eager DoH constructor blocks the async executor before a kill switch exists. Direct dedicated-IP traffic stays outside ECH scope.
+- Detail: `docs/todo/todo-1081-ech-service-binding-and-default-policy.md`
+
+### TODO-1082 - Persona capture fidelity
+- OPEN. Capture and compare every automatically selected browser/OS persona; Firefox source constants and Safari unverified catalog are not wire-capture proof. Record and compare the actual QUIC version: the current v2-first runtime cannot inherit a version-unspecified Chrome fixture's wire claim. Fail freshness/selection for unsupported personas. The synthetic QUIC Initial listener must refuse existing output, bound packet lengths and remain excluded from real OS-header proof.
+- Detail: `docs/todo/todo-1082-persona-capture-fidelity.md`
+
+### TODO-1083 - UDP-blocked fallback end-to-end
+- OPEN. Cover both early dial errors and handshake timeouts with typed reachability classification, then prove a blackholed direct path switches once and carries bidirectional application bytes through MASQUE. Also prove a shared-primary binding never downgrades to a dedicated IP when the shared address or ECH is required.
+- Detail: `docs/todo/todo-1083-udp-blocked-fallback-e2e.md`
+
+### TODO-1084 - TUN E2E evidence ownership
+- OPEN. Reject header-only captures, dangling symlinks and concurrent path collisions; atomically own artifacts and record positive matching packet counts.
+- Detail: `docs/todo/todo-1084-e2e-evidence-ownership.md`
+
+### TODO-1085 - Outer-header persona wire proof
+- OPEN. Compare actual IP/UDP packet captures with browser personas on supported platforms and after migration; distinguish socket configuration from wire proof and unsupported IPv4 ID control.
+- Detail: `docs/todo/todo-1085-outer-header-persona-wire-proof.md`
+
+### TODO-1086 - Migration CID privacy
+- OPEN. Deliberate disguise migration must use a fresh peer-issued DCID with the new source port, or skip when forbidden/unavailable; capture path validation and rollback. Stable-DCID NAT rebind remains a separate contract.
+- Detail: `docs/todo/todo-1086-migration-cid-privacy.md`
+
+### TODO-1087 - H3 inner-flow wire proof
+- OPEN. Capture decrypted inner and outer H3 flows to prove persona/QPACK/cover bytes remain outer-only and server push remains absent, completing TODO-1055's unproven wire acceptance.
+- Detail: `docs/todo/todo-1087-h3-inner-flow-wire-proof.md`
+
+### TODO-1088 - One-time 0-RTT finalization
+- OPEN. Guard the accepted/rejected early-data transition so repeated TLS polls do not rescan streams, discard state or clear keys repeatedly; prove exact retransmission semantics.
+- Detail: `docs/todo/todo-1088-zero-rtt-finalization-once.md`
+
+### TODO-1089 - Session documentation truth reconciliation
+- OPEN. Correct current-state crypto/Reality/ECH/persona/fallback/migration claims, unsupported DONE proof, future-dated results, unmeasured benchmark numbers and stale AGENTS.md leaf-crate inventories without rewriting historical evidence.
+- Detail: `docs/todo/todo-1089-session-doc-truth-reconciliation.md`
+
+### TODO-1090 - Devin commit provenance instruction
+- OPEN. Record three historical attribution violations and prevent future unwanted assistant trailers without rewriting published commits or adding broad hook infrastructure.
+- Detail: `docs/todo/todo-1090-devin-commit-provenance.md`
+
+### TODO-1091 - Complete lake-rooster changed-path audit
+- STOPPED by user on 2026-09-23. The unverified remainder of 52 session commits, 326 changed paths and raw CLI outputs remains unreviewed; no full-coverage claim is permitted. Do not resume this audit without a new explicit instruction.
+- Detail: `docs/todo/todo-1091-lake-rooster-remaining-path-audit.md`
+
+### TODO-1092 - QKey SNI and certificate binding
+- OPEN. Replace the global CDN allowlist assumption with certificate-valid deployment binding and make desktop/standalone clients interpret the same QKey SNI identically. Prove matching and mismatching handshakes with verification on.
+- Detail: `docs/todo/todo-1092-qkey-sni-certificate-binding.md`
+
+### TODO-1093 - Cover-target UI TOML roundtrip
+- OPEN. Parse and validate edited cover targets before serialization; reject control characters and malformed arrays without corrupting the config or losing the legacy alias.
+- Detail: `docs/todo/todo-1093-cover-target-ui-toml-roundtrip.md`
+
+### TODO-1094 - QUIC Initial admission identity and probe routing
+- OPEN. The client sends a stable, public 12-character ASCII QKey ID as the QUIC Initial token; the server uses it for pre-handshake registry lookup. Measure its wire signature/linkability and design early authenticated routing or a genuine shared-edge entry without a stable cleartext client marker. Preserve Retry, QKey revocation, DoS bounds, and protocol-valid probe behavior; do not claim Xray REALITY equivalence before a complete live exchange.
+- Detail: `docs/todo/todo-1094-quic-initial-admission-privacy.md`
+
+### TODO-1095 - Restore RFC QUIC long-header Length framing
+- OPEN. `format_header` and `parse_header` omit the mandatory Length varint for Initial, Handshake and 0-RTT, while senders place the packet number immediately after the token/SCID. The TODO-1029 analyzer was adapted to that private format. Implement RFC 9000/9369 packet boundaries in the single transport stack, migrate callers atomically, and re-run private-AEAD/0-RTT/persona wire proof using an independent parser and peer-ingress capture.
+- Detail: `docs/todo/todo-1095-rfc-quic-long-header-length.md`
+
+### TODO-1096 - Execute one validated Reality and shared-front entry
+- OPEN. A Reality cover origin, H3 `:authority`, MASQUE relay and authenticated TLS endpoint currently share an untyped cover-target string in parts of the runtime; an absent cover list can also inject `cdn.cloudflare.com` into H3 cover/WebTransport authority. A hostname entry is synchronously resolved after the Engine's kill switch is enabled. Build one validated entry binding with protected pre-dial discovery and one authenticated tunnel across direct QUIC and an authorized shared-edge carrier, with shared ingress primary where configured and no forbidden privacy downgrade; use protocol-correct probe handling, ECH only for the selected service, and explicit reachability-based carrier selection. Remove the cover-target-as-proxy-authority shortcut and prove the end-to-end direct/shared route plus the Xray REALITY comparison before any superiority claim.
+- Detail: `docs/todo/todo-1096-unified-reality-shared-front-entry.md`
+
+### TODO-1097 - Bound Maybenot event and padding work
+- OPEN. The optional Maybenot adapter's `pump` drains self-generated events without a step bound. A valid timer self-transition can repeatedly request `UpdateTimer(replace=true)` at the same deadline, and the adapter emits another `TimerBegin` even when the deadline did not move. Its receive/send event timing and padding classification also diverge from Maybenot's documented contract. Prove the reproducer, bound work and queues, correct event origins/classification, and preserve loss-recovery/ACK progress.
+- Detail: `docs/todo/todo-1097-bound-maybenot-event-pump.md`
+
+### TODO-1098 - Charge FEC repair from actual QUIC wire bytes
+- OPEN. In the in-QUIC FEC path, core charges `body.len()` before queuing a repair DATAGRAM, excluding at least its discriminator and QUIC frame encoding and, for a standalone repair packet, short header, packet number and AEAD tag. The shared budget can therefore report a cap-respecting spend while emitted repair traffic exceeds it. Move repair admission/accounting to a single serialized-packet cost contract, preserve normal traffic and recovery on denial, and prove caps from captures under both coalesced and standalone repair output.
+- Detail: `docs/todo/todo-1098-fec-repair-wire-budget-accounting.md`
+
+### TODO-1099 - Restrict private packet key dump to owned proof artifacts
+- OPEN. TODO-1029 added a production-compiled `QUICFUSCATE_PRIVATE_KEY_DUMP` hook that appends private packet keys and the derivation root to an arbitrary path with no explicit restrictive file mode or symlink refusal. The E2E runner passes one path to both peers; the analyzer also prints the standard header-protection key on failure. Compile diagnostics only for an explicit wire-proof build, create role-separated owner-only files, remove raw-key output, and keep default product binaries free of the dump path.
+- Detail: `docs/todo/todo-1099-private-key-dump-proof-boundary.md`
+
+### TODO-1100 - Migrate legacy QKey stealth values without silent policy changes
+- OPEN. Devin replaced the previously issued `auto`/`anti-dpi`/`max` spellings with `dynamic`/`Stealth MAX`, but desktop and standalone clients map every unrecognized QKey value to `dynamic` while the server ignores it. Persisted, imported or cross-version QKeys can therefore silently change the requested policy and diverge from the server. Resolve only historically issued aliases through one canonical parser at issuance, registry load and both clients; reject genuinely unknown values with an explicit error and verify policy parity through real QKey roundtrips.
+- Detail: `docs/todo/todo-1100-qkey-stealth-policy-migration.md`
+
+### TODO-1101 - Prove and repair the DoH TCP persona claim
+- OPEN. TODO-1058 claims DoH uses the tunnel persona, but its runtime carries only TLS 1.3 cipher IDs into a separate reqwest/rustls TCP ClientHello with a fixed `quicfuscate-doh/1.0` user agent. The implementation also replaces the entire provider cipher list, removing TLS 1.2 suites although its code comment and task result claim they stay at rustls defaults. Restore honest TLS-version behavior and measure a real DoH ClientHello/HTTP request against the chosen browser's TCP persona; correct the claim or implementation based on evidence.
+- Detail: `docs/todo/todo-1101-doh-tcp-persona-fidelity.md`
+
+### TODO-1102 - Make private-AEAD pcap proof complete and fail closed
+- OPEN. The TODO-1029 analyzer silently skips truncated/unsupported frames, Version Negotiation, Retry and every 0-RTT packet; its PASS threshold accepts any positive Initial-or-Handshake count and any positive 1-RTT count, with no capture-to-analyzed packet reconciliation. It keys TLS secrets only by label, infers direction from source port, and its standard key-update branch reuses a body slice based on the old packet-number length. Make scope and skips explicit, bind one connection/role, require the expected packet classes and zero unexplained captures, and verify key-update parsing with real packets after TODO-1095 framing repair.
+- Detail: `docs/todo/todo-1102-private-aead-pcap-proof-completeness.md`
+
+### TODO-1103 - Remove the write-only deep orchestrator path
+- OPEN. After TODO-1055 removed server-push triggers, `DeepIntegrationOrchestrator` only stores five atomics. No runtime consumer reads them, yet the optional feature still initializes a global singleton, samples process CPU/memory and updates the values; docs call it cross-signal steering. Remove the dead feature/wiring and its now-vacuous integration target, or demonstrate a concrete existing consumer before retaining it. Preserve real Brain/FEC and connection-local telemetry behavior.
+- Detail: `docs/todo/todo-1103-write-only-orchestrator.md`
+
+### TODO-1104 - Make persona trace scheduling and wire budget match emitted packets
+- OPEN. The cover schedule starts at the trace's Initial packets after the live handshake, charges the full captured PING length before send and then charges target padding again, and the ordinary padder treats UDP payload length classes as plaintext lengths. Move scheduling to validated post-handshake evidence and reconcile one atomic budget charge with actual emitted UDP payload length; no failed, queued or undersized packet can consume a successful cover slot or claim an exact persona class.
+- Detail: `docs/todo/todo-1104-persona-trace-emission-accounting.md`
+
+### TODO-1105 - Charge H3 and WebTransport cover from emitted wire bytes
+- OPEN. H3 persona headers use `name+value+8` as a pre-send estimate and WebTransport uses `authority+path+64`; both debit before QPACK encoding, QUIC serialization and emission. Failed sends can retain the debit, while a too-small estimate can exceed the shared budget. Make cover origin and actual added UDP bytes explicit in the existing send pipeline, reconcile unsuccessful output, and prove the single cap with decrypted H3 and packet captures.
+- Detail: `docs/todo/todo-1105-h3-cover-wire-budget.md`
+
+### TODO-1106 - Advance FEC receive epoch only after valid symbol admission
+- OPEN. The in-QUIC FEC path raises `fec_symbol_epoch_floor` after parsing a header but before `WireFecReceiver::receive`; that call can still reject a malformed systematic payload, profile mismatch or resource exhaustion. Such a packet can permanently exclude lower-epoch valid symbols without being decoded. Make epoch transition transactional with receiver admission, retain the prior window on rejection, and test malformed high-epoch, valid transition, reordering and wrap behavior.
+- Detail: `docs/todo/todo-1106-fec-receive-epoch-admission.md`
+
+### TODO-1107 - Resolve DoH bootstrap only through an explicit protected path
+- OPEN. A hostname DoH endpoint is resolved synchronously by `to_socket_addrs` while preparing the reqwest client. Both client runtimes prepare it before the authenticated tunnel and DNS proxy are ready; the Engine has already enabled its blocking kill switch, while a no-kill-switch client can issue an ordinary underlay DNS lookup even in stealth mode. Replace implicit system bootstrap with a bounded, certificate-preserving tunnel resolver or an explicit pinned bootstrap address, and prove startup and zero underlay UDP/53 leakage for both runtimes.
+- Detail: `docs/todo/todo-1107-protected-doh-bootstrap.md`
+
+### TODO-1108 - Display dynamic stealth status without inventing performance state
+- OPEN. Desktop `TunnelStats` maps policy/runtime `dynamic` to `performance`, but its IPC `stealthMode` is only the configured connection mode; it carries no current Brain escalation or committed wire-image state. Show the verified policy as `dynamic` and, only if a real backend field is added, show effective activity separately. Cover imported legacy/unknown values through TODO-1100's canonical parser.
+- Detail: `docs/todo/todo-1108-dynamic-stealth-status-truth.md`
+
+### TODO-1109 - Demultiplex in-QUIC FEC without stealing application DATAGRAMs
+- OPEN. In QuicFrame mode, `absorb_quic_fec_datagrams` removes every received QUIC DATAGRAM beginning with `0xFE`, even when the rest is not a valid FEC symbol. That byte is a private convention within an application-owned payload namespace, so a raw DATAGRAM or a sufficiently large H3 flow identifier can collide and be lost before its owner sees it. Negotiate a disjoint owner/context and route once without a full-queue scan; prove FEC, MASQUE and generic DATAGRAM coexistence.
+- Detail: `docs/todo/todo-1109-in-quic-fec-datagram-demux.md`
+
+### TODO-1110 - Return the RFC HTTP/3 error for an unauthorized push stream
+- OPEN. The client never sends `MAX_PUSH_ID`, yet it rejected a server push stream with `H3_STREAM_CREATION_ERROR` instead of RFC 9114 Section 4.6 `H3_ID_ERROR`. The server already classified a client-initiated push as `H3_STREAM_CREATION_ERROR`; the prior contrary audit claim was false. Neither local H3 error queued an application close. Correct the client code, emit both wire errors, keep synthetic push disabled, and prove received close codes.
+- Detail: `docs/todo/todo-1110-h3-unauthorized-push-error.md`
+
+### TODO-1111 - Restore Windows compilation and outer-header socket policy
+- OPEN. TODO-1057 added an unconditional `std::os::unix::io::AsRawFd` import and `RawFd` API in `src/stealth/outer_header.rs`, while `src/stealth/mod.rs` exports the module and the client calls it without a Windows gate. The native Windows client build therefore cannot compile this path, and the required CI matrix is macOS-only. Implement a Windows socket backend for TTL/hop-limit and supported DF control, retain truthful per-option outcomes, gate the Windows build on push/PR, and prove migration reapply.
+- Detail: `docs/todo/todo-1111-windows-outer-header-portability.md`
+
+### TODO-1112 - Commit 1-RTT control and ACK state only after packet sealing
+- OPEN. The TODO-1051 admitted-run builder removes pending control frames and PTO probes and commits Application ACK state while only framing deferred packets. On a later build/seal failure, `abort_admitted_batch` restores held stream transmissions but not those control/ACK/probe states; no packet is returned to the caller. Make all send-side effects transactional through successful sealing and delivery ownership, with fault-injected recovery tests.
+- Detail: `docs/todo/todo-1112-transactional-admitted-send-state.md`
+
+### TODO-1113 - Remove HPKE hazmat private-key debug exposure
+- OPEN. `qf-hpke` enables `hpke-rs/hazmat` to export generated private-key bytes into rustls. In pinned `hpke-rs` 0.7.0, that same feature makes `Debug` print raw HPKE private keys and context key material. Use the existing RustCrypto backend's public KEM key-generation trait for this adapter boundary, remove `hazmat` from the product dependency, and preserve all suite and ECH interoperability gates.
+- Detail: `docs/todo/todo-1113-hpke-hazmat-key-debug.md`
+
+### TODO-1114 - Negotiate WebTransport only with real transport and persona support
+- OPEN. WebTransport is currently H3 cover only. Its H3 SETTINGS gate ignores mandatory QUIC DATAGRAM and `reset_stream_at` support; Chrome/Safari fixtures declare the latter absent, while Firefox advertises it without a `RESET_STREAM_AT` transport handler. The server accepts any nonempty CONNECT authority/path with `200`. Pin the draft, implement complete negotiated support and authorized-resource admission where justified, disable cover otherwise, and prove a persona-consistent peer transcript.
+- Detail: `docs/todo/todo-1114-webtransport-capability-and-persona-coherence.md`
+
+### TODO-1115 - Enforce authenticated QUIC v2 version information on both peers
+- OPEN. `validate_peer_version_information` requires the parameter only on the client, while the v2 server accepts a missing parameter and marks it validated; the existing test asserts that path. RFC 9369 requires v2 endpoints to send, process and validate `version_information` against downgrade. Require and verify the parameter on a v2 server before handshake completion, preserve a narrowly defined v1 compatibility rule, and prove malformed/missing/downgrade cases on both roles.
+- Detail: `docs/todo/todo-1115-quic-v2-version-information-validation.md`
+
+### TODO-1116 - Route migration packets through the actual old and new sockets
+- OPEN. The TODO-1056 client loop swaps to the new connected UDP socket before path validation and never polls the standby socket. Its receive call labels new-socket packets with the old `CoreConnection::local_addr`, while the connected send helper calls `send` and discards `SendInfo.from/to`. PATH_RESPONSE can be attributed to the wrong path and data on the old path can be lost during validation. Keep both sockets serviced and route every packet by the transport-selected path until commit or rollback; then apply TODO-1086's new-CID privacy rule.
+- Detail: `docs/todo/todo-1116-disguise-migration-socket-routing.md`
+
+### TODO-1117 - Complete H3 protocol-error wire closure
+- OPEN. `h3::Connection::poll` returns most peer protocol errors without queuing their RFC 9114/QPACK application close; core converts them to text and may stop processing without sending a close. TODO-1110 owns `IdError` and `StreamCreationError` from peer STREAM processing; this task owns the remaining classes and runtime dispatch. Classify peer-caused versus local/retryable failures, map every remaining fatal H3/QPACK error once, and prove actual peer-received codes plus runtime flush/teardown behavior without closing on `Done`, partial frames, backpressure or unknown stream types.
+- Detail: `docs/todo/todo-1117-h3-protocol-error-wire-close.md`
 
 ## Completed
 

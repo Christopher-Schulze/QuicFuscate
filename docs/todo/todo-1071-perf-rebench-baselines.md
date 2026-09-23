@@ -108,25 +108,165 @@ phantom numbers - they need fresh, honestly labeled measurements first.
 
 Runs 02-04 passed vectors, matrix, distinguish, and profile on one Neoverse-N1 vCPU at commit `2291744478617da16993ca9823859621e7be7e21` with rustc 1.97.1. Raw outputs are in `scripts/out/benchmarks/todo-1071-aead-omega-arm-22917444-run0{2,3,4}/`. The failed `b0aae929` run01 is excluded because it invoked unsupported `--match-x`. P1 `ns/packet` repeated medians; listed p95/p99 were identical across all three runs:
 
-| Owner | 1200 B medians; median (range); p95/p99 | 1400 B medians; median (range); p95/p99 | Allocs / copied bytes |
+| Owner | 1200 B medians; median (range); p95/p99 | 1400 B medians; median (range); p95/p99 | Runner constants, not measurements |
 | --- | ---: | ---: | ---: |
 | R-RING | 1120/1120/1120; 1120 (0); 1120/1160 | 1320/1320/1280; 1320 (40); 1320/1320 | 0 / 16 |
 | R-LC | 1160/1160/1160; 1160 (0); 1200/1200 | 1360/1320/1320; 1320 (40); 1360/1360 | 0 / 16 |
 | S-AEGIS | 680/640/680; 680 (40); 680/680 | 720/720/720; 720 (0); 760/760 | 0 / 16 |
 
-Across successful Omega runs, the primary-cell median ranges are 0-40 ns and every owner remains at 0 allocations/16 copied bytes. These are in-process software measurements, not wire throughput; no owner verdict is drawn until the M1 reference and remaining transport/FEC/stealth/E2E cells are complete.
+Across successful Omega runs, the primary-cell median ranges are 0-40 ns. The printed `allocs=0 copied=16` values are constants in `examples/aead_bakeoff.rs::emit`, not measured allocation or copy counts; P2 allocates item vectors and copies each payload in the measured body. These are in-process software measurements, not wire throughput; no owner verdict is drawn until the remaining transport/FEC/stealth/E2E cells are complete.
 
 ### macOS Reference (3/3)
 
 M1 runs 01-03 passed vectors, full matrix, distinguish, and profile at commit `2291744478617da16993ca9823859621e7be7e21` with rustc 1.98.0. Raw artifacts are in `scripts/out/benchmarks/todo-1071-aead-macos-arm-22917444-run0{1,2,3}/`. P1 `ns/packet` repeated medians; p95/p99 are the across-run ranges for each sample percentile:
 
-| Owner | 1200 B medians; median (range); p95 / p99 range | 1400 B medians; median (range); p95 / p99 range | Allocs / copied bytes |
+| Owner | 1200 B medians; median (range); p95 / p99 range | 1400 B medians; median (range); p95 / p99 range | Runner constants, not measurements |
 | --- | ---: | ---: | ---: |
 | R-RING | 500/541/500; 500 (41); 500-583 / 542-625 | 583/625/625; 625 (42); 625-667 / 625-708 | 0 / 16 |
 | R-LC | 458/458/458; 458 (0); 459-500 / 459-542 | 542/542/542; 542 (0); 583-625 / 584-625 | 0 / 16 |
 | S-AEGIS | 292/333/292; 292 (41); 334-334 / 334-375 | 333/333/333; 333 (0); 334-375 / 375-417 | 0 / 16 |
 
 These are secondary developer-host references only, not Linux dataplane estimates.
+
+## Review corrections and remaining measurement work (2026-09-23)
+
+- `scripts/benchmarks/suites/bench-fec.sh` filters for `fec_pipeline`, but
+  `benches/fec_pipeline.rs` registers `fec_encode_pipeline`,
+  `fec_decode_pipeline` and other named groups; `fec_matrix_mul` belongs to
+  `ci_regression`. Select each intended target explicitly with its real group
+  name. Fail if an expected group produces zero valid Criterion samples.
+- `qf_bench_preflight` in `scripts/tests/lib/lib-common.sh` builds all bench
+  targets when no target name is passed; the FEC and transport suites also
+  dispatch broad `cargo bench` commands. On a constrained primary host this
+  can compile unrelated libtest targets and exhaust memory before any useful
+  cell runs. Preflight and execute exact `--bench` targets; record peak RSS,
+  exit cause and host limit. A build-only failure is not a benchmark result.
+- `scripts/tests/fast/test-benchmark-fast-mode-contract.sh` checks dry-run
+  selection metadata, not the real Criterion dispatch or a nonempty sample.
+  Add a bounded real-run contract test for target/filter mapping and a
+  zero-sample failure fixture.
+- `examples/aead_bakeoff.rs::run_p1` applies header protection but opens
+  with the original, unprotected AAD. Either execute the full protect and
+  unprotect roundtrip or label the cell as seal + HP + open without unprotect;
+  compare owners only under identical operations. The P2 body allocates
+  seal/open item vectors and copies payloads, so allocation and copy counts
+  must be instrumented or reported as unavailable, separately by path.
+- `measure_ns` records one `Instant` duration per operation. On the M1 some
+  owner gaps are comparable to timer resolution, so use calibrated batch
+  timing or Criterion with multiple samples and confidence intervals. Report
+  repeat medians and p95/p99 without pretending a timer quantization step is
+  an actual performance difference.
+- `connection_tls_handshake/fresh_rustls_quic_cover_off` pumps packets in
+  memory. Label it CPU/software handshake cost with certificate verification,
+  not network handshake latency. Measure socket/netns RTT and completed dial
+  separately, with the same commit and host metadata.
+  The Devin CLI run at node 18908 terminated this exact Criterion cell with
+  `TlsError("Read handshake error: invalid peer certificate: UnknownIssuer")`
+  at `src/transport/connection/bench.rs::bench_rustls_quic_handshake_latency`.
+  The current helper generates a CA/leaf hierarchy, preloads a process-wide
+  server identity and loads the CA path into the client config, but that
+  source chain does not explain the failed verifier outcome. Trace the
+  actual certificate chain, `OnceLock` identity owner, loaded root store,
+  and selected peer name on the failing run. Make the cell pass with real
+  certificate verification; do not disable verification or mark a panicking
+  cell as a measured baseline. Add a bounded smoke invocation that fails
+  when this cell cannot complete one verified handshake.
+- `scripts/benchmarks/suites/bench-crypto.sh` calls filtered
+  `cargo test --release -p qf-crypto --lib ...`, records the whole command's
+  `duration_sec`, and constructs `comparison.txt` from the final test-output
+  token. This is test execution time, not AEAD throughput, despite its
+  "Crypto Comprehensive Benchmark", "Performance comparison" and
+  "Best performing configuration" wording. Its `speedup.txt` is a static
+  header with no measured factors, and the best-owner scan searches for
+  `16384` in test logs. A green test exit can thus yield a green benchmark
+  suite with no per-byte timed crypto operation. Use the existing same-API
+  AEAD benchmark cells for owner comparison; keep the filtered tests as a
+  separate correctness gate with their own labels. Generate throughput and
+  speedup only from parsed, nonempty timed samples of comparable operations.
+- `scripts/benchmarks/ci_regression.rs` removed the
+  `aes_gcm_seal/1024B` Criterion group, but both modes of
+  `scripts/tests/suites/test-performance-regression.sh` still request it.
+  The suite correctly fails an empty filter, so its throughput scope is
+  permanently red on the present target. The fake-Cargo contract test
+  (`scripts/tests/fast/test-benchmark-cell-contract.sh`) asserts only that
+  this obsolete name fails under its injected empty-filter condition; it
+  does not test that declared cells really exist in Criterion. Replace the
+  dead cell with the actual standard rustls packet-key seal/open cells and
+  the private libaegis cells at equivalent sizes; use exact registered
+  names and comparable operations. A bounded real target/list proof must
+  fail on any missing selected name before measuring.
+- The suite sets `BASELINE_FILE` to
+  `scripts/tests/suites/performance_baseline.json`, but that file does not
+  exist in the current checkout. `measure_performance` labels each surviving
+  sample `benchmark_completed_without_baseline` and returns PASS; its 5%
+  throughput and 10% latency thresholds therefore enforce nothing. Create
+  pinned, host-specific baseline data only from this task's accepted fresh
+  measurements, with units and direction for each cell. Fail or explicitly
+  report UNAVAILABLE when the selected host/cell baseline is missing; never
+  claim a regression gate from an unbaselined PASS. The report path must
+  compare compatible cells, not shallow-merge baseline/current JSON.
+- `measure_performance` computes `(current-baseline)/baseline` and fails on
+  a positive change for both `time` and `thrpt`. For throughput, positive
+  change is an improvement and negative change is the regression; the
+  present rule would invert the decision once baselines exist. The parser
+  extracts only the first number from Criterion's estimate bracket and
+  discards `ns`/`us`/`ms`, or throughput scale, so equal physical values
+  in different printed units can compare as different numbers. Its fallback
+  from missing throughput to `time` also changes the metric dimension
+  mid-cell. Parse named Criterion estimates with units into canonical
+  ns/op or bytes/s, store the unit and metric direction, reject mismatched
+  dimensions, and apply the threshold in the correct direction. A selected
+  throughput cell must not silently turn into a latency cell.
+- `scripts/benchmarks/suites/bench-transport.sh` validates that Criterion
+  printed a metric but writes `metric=duration_sec` and the whole
+  `cargo bench` command duration as the cell value. Compilation, target
+  selection and setup time can dominate that number, so the JSON cannot
+  substantiate transport pps, handshake CPU cost or a before/after result.
+  Parse the declared Criterion estimate and throughput for each named cell;
+  retain command duration only as orchestration metadata with a separate
+  key. `run_report_scope` currently shallow-merges two JSON documents via
+  `jq -s '.[0] * .[1]'`, which is not a per-cell comparison and can overwrite
+  evidence. Join baseline and current by stable cell/host/feature identity,
+  then calculate a unit-safe delta and an explicit missing-cell result.
+
+### Additional acceptance
+
+- [ ] FEC encode, decode and matrix cells each invoke the intended Cargo
+      target and group; a zero-sample run exits nonzero, including in a real
+      bounded contract run.
+- [ ] Benchmark suites preflight and run only declared target(s). A memory
+      kill or compilation failure is recorded as unavailable, never as a
+      successful zero-sample baseline.
+- [ ] AEAD P1 operation list is exact; allocations and payload copies are
+      measured per path or explicitly unmeasured. Remove constant claims from
+      results, reports and dependent TODO-1039 wording.
+- [ ] Primary/secondary tables separate software CPU, packet throughput and
+      end-to-end network latency; repeat counts, confidence/spread, host
+      limits and raw artifacts accompany every number.
+- [ ] `bench-crypto.sh` never reports a test runner's wall duration as AEAD
+      throughput or ranks owners from `cargo test` output. Every advertised
+      comparison/speedup cell has a nonempty, unit-checked timed sample from
+      the same-API harness; missing samples fail or are explicitly UNAVAILABLE.
+- [ ] Every selected performance-regression filter names a registered
+      Criterion cell, including standard rustls AES-GCM and private
+      libaegis seal/open at comparable sizes. A real target-list contract
+      rejects any deleted or zero-sample cell; fake-Cargo tests remain only
+      error-path tests.
+- [ ] Primary-host baselines exist for every gated cell with commit,
+      hardware, feature set, unit, measurement direction and sampling
+      method. A selected cell without its matching baseline never reports
+      PASS for a regression threshold; a deliberate baseline-establishment
+      run is labeled separately. A known worse sample fails the gate.
+- [ ] A lower-throughput fixture fails, a higher-throughput fixture passes,
+      a higher-latency fixture fails, and equivalent `ns`/`us`/`ms` values
+      compare equal after canonical conversion. Mismatched dimensions and
+      missing throughput estimates fail the exact cell rather than silently
+      switching to a time metric.
+- [ ] Transport-suite JSON records parsed Criterion estimate, unit,
+      direction and sample identity separately from command wall duration.
+      A compile-only or empty-filter run can never produce a performance
+      number; the baseline/current report reconciles matching cells rather
+      than merging documents wholesale.
 
 ## Acceptance
 
