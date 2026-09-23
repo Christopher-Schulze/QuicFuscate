@@ -1304,6 +1304,45 @@ impl RustlsProvider {
     }
 }
 
+/// Process-shared TLS identity for Criterion benches. The server leaf carries
+/// SANs for `localhost` (key-bundle benches) and `*.example` (per-iteration
+/// handshake SNIs), so whichever bench publishes first serves all callers.
+/// Returns the PEM path that clients load as their CA bundle.
+#[cfg(feature = "benches")]
+pub(crate) fn bench_identity_ca_path() -> &'static str {
+    static BENCHMARK_CA_PATH: OnceLock<String> = OnceLock::new();
+    BENCHMARK_CA_PATH.get_or_init(|| {
+        let directory = std::env::temp_dir()
+            .join(format!("quicfuscate-rustls-benchmark-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("benchmark TLS fixture directory");
+        let ca_path = directory.join("ca.crt");
+        let cert_path = directory.join("server.crt");
+        let key_path = directory.join("server.key");
+        let mut hierarchy = qf_pki::generate_hierarchy_with_dns_sans(
+            &["localhost", "*.bench.example"],
+            "QuicFuscate Benchmark",
+        )
+        .expect("benchmark TLS hierarchy");
+        qf_pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &ca_path)
+            .expect("benchmark root CA");
+        qf_pki::write_cert_chain_pem(
+            &hierarchy.server_leaf.cert_der,
+            &hierarchy.intermediate_ca.cert_der,
+            &cert_path,
+        )
+        .expect("benchmark server certificate");
+        qf_pki::write_key_pem(&mut hierarchy.server_leaf.key_der, &key_path)
+            .expect("benchmark server key");
+        preload_tls_server_identity(
+            cert_path.to_str().expect("benchmark certificate path"),
+            key_path.to_str().expect("benchmark key path"),
+            false,
+        )
+        .expect("benchmark preloaded server identity");
+        ca_path.to_str().expect("benchmark CA path").to_string()
+    })
+}
+
 #[cfg(any(test, feature = "benches"))]
 #[allow(clippy::expect_used)]
 /// Complete one in-memory rustls QUIC handshake and return its installed 1-RTT key bundles.
@@ -1312,34 +1351,7 @@ pub fn bench_standard_one_rtt_key_bundles(
 ) -> (QuicTlsOneRttKeys, QuicTlsOneRttKeys) {
     #[cfg(feature = "benches")]
     fn benchmark_ca_path() -> &'static str {
-        static BENCHMARK_CA_PATH: OnceLock<String> = OnceLock::new();
-        BENCHMARK_CA_PATH.get_or_init(|| {
-            let directory = std::env::temp_dir()
-                .join(format!("quicfuscate-rustls-benchmark-{}", std::process::id()));
-            std::fs::create_dir_all(&directory).expect("benchmark TLS fixture directory");
-            let ca_path = directory.join("ca.crt");
-            let cert_path = directory.join("server.crt");
-            let key_path = directory.join("server.key");
-            let mut hierarchy = qf_pki::generate_hierarchy("localhost", "QuicFuscate Benchmark")
-                .expect("benchmark TLS hierarchy");
-            qf_pki::write_ca_cert_pem(&hierarchy.root_ca.cert_der, &ca_path)
-                .expect("benchmark root CA");
-            qf_pki::write_cert_chain_pem(
-                &hierarchy.server_leaf.cert_der,
-                &hierarchy.intermediate_ca.cert_der,
-                &cert_path,
-            )
-            .expect("benchmark server certificate");
-            qf_pki::write_key_pem(&mut hierarchy.server_leaf.key_der, &key_path)
-                .expect("benchmark server key");
-            preload_tls_server_identity(
-                cert_path.to_str().expect("benchmark certificate path"),
-                key_path.to_str().expect("benchmark key path"),
-                false,
-            )
-            .expect("benchmark preloaded server identity");
-            ca_path.to_str().expect("benchmark CA path").to_string()
-        })
+        bench_identity_ca_path()
     }
 
     fn transfer(source: &mut RustlsProvider, destination: &mut RustlsProvider) -> usize {

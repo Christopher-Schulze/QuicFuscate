@@ -103,6 +103,89 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
 }
 
 #[cfg(feature = "benches")]
+#[allow(clippy::expect_used)]
+/// Measure a fresh rustls QUIC handshake through the in-memory transport packet pump.
+/// The shared benchmark identity (`bench_identity_ca_path`) covers the
+/// per-iteration `*.bench.example` SNI, so the client runs full webpki verification
+/// and the unique server name prevents TLS session resumption between
+/// iterations.
+pub fn bench_rustls_quic_handshake_latency(iteration: u64) -> Duration {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    let client_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 29_101));
+    let server_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 29_102));
+    let client_scid = b"qf-bench-client";
+    let server_scid = b"qf-bench-server";
+    let ca_path = crate::qftls::bench_identity_ca_path();
+    let mut client_config =
+        Config::new_with_version(crate::transport::PROTOCOL_VERSION).expect("client bench config");
+    client_config.load_verify_locations_from_file(ca_path).expect("client benchmark CA bundle");
+    let mut server_config =
+        Config::new_with_version(crate::transport::PROTOCOL_VERSION).expect("server bench config");
+
+    let mut client = Connection::new_client(client_scid, client_addr, server_addr, client_config)
+        .expect("valid benchmark client");
+    client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+    let mut server = packet::accept(
+        server_scid,
+        Some(server_scid),
+        server_addr,
+        client_addr,
+        &mut server_config,
+    )
+    .expect("accept benchmark server");
+    server.set_destination_cid(ConnectionId::from_ref(client_scid));
+
+    let environment =
+        Arc::new(crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_TLS_COVER", "0")]));
+    client.set_environment_snapshot(Arc::clone(&environment));
+    server.set_environment_snapshot(environment);
+    client.enable_tls("benchmark").expect("enable benchmark client TLS");
+    server.enable_tls("benchmark").expect("enable benchmark server TLS");
+
+    let sni = format!("qf-bench-{:016x}.bench.example", iteration);
+    let mut profile = crate::qftls::TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some(sni.clone());
+    client.configure_tls(&profile, &sni).expect("configure benchmark client TLS");
+    server.configure_tls(&profile, &sni).expect("configure benchmark server TLS");
+
+    let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
+    let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
+    let mut client_packet = [0u8; 4096];
+    let mut server_packet = [0u8; 4096];
+    let started = Instant::now();
+    for _ in 0..64 {
+        let mut progressed = false;
+        match client.send(&mut client_packet) {
+            Ok((length, _)) => {
+                server
+                    .recv(&mut client_packet[..length], &client_to_server)
+                    .expect("open client benchmark flight");
+                progressed = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {}
+            Err(error) => panic!("client benchmark flight failed: {error:?}"),
+        }
+        match server.send(&mut server_packet) {
+            Ok((length, _)) => {
+                client
+                    .recv(&mut server_packet[..length], &server_to_client)
+                    .expect("open server benchmark flight");
+                progressed = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {}
+            Err(error) => panic!("server benchmark flight failed: {error:?}"),
+        }
+        if client.tls_handshake_complete() && server.tls_handshake_complete() {
+            return started.elapsed();
+        }
+        assert!(progressed, "in-memory TLS handshake stalled");
+    }
+    panic!("in-memory TLS handshake exceeded the bounded packet pump")
+}
+
+#[cfg(feature = "benches")]
 /// Client and authenticated Retry packet for receive-path Criterion benchmarks.
 pub struct BenchRetryCase {
     pub client: Connection,

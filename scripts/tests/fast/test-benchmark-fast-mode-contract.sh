@@ -94,23 +94,15 @@ for name, item in items.items():
 PY
 }
 
-case "$(uname -m)" in
-  x86_64)
-    CRYPTO_FULL_CELLS="crypto_all_native,crypto_all_sse2,crypto_all_avx2,aes_gcm_native,aes_gcm_aesni,aes_gcm_vaes,chacha20_poly1305_native"
-    ;;
-  aarch64|arm64)
-    CRYPTO_FULL_CELLS="crypto_all_native,crypto_all_neon,aes_gcm_native,aes_gcm_crypto,chacha20_poly1305_native"
-    ;;
-  *)
-    CRYPTO_FULL_CELLS="crypto_all_native,aes_gcm_native,chacha20_poly1305_native"
-    ;;
-esac
+# bench-crypto.sh reports the same fixed cell set in fast and full mode on
+# every architecture: ring AES-GCM, ring ChaCha20-Poly1305, libaegis AEGIS-128L,
+# and the all-owner proxy.
+CRYPTO_CELLS="crypto_all_native,aes_gcm_native,chacha20_poly1305_native,aegis128l_native"
 
 crypto_fast_dir="$(run_dry crypto scripts/benchmarks/suites/bench-crypto.sh fast)"
-assert_mode_metadata "$crypto_fast_dir/results.json" fast \
-  "crypto_all_native,aes_gcm_native,chacha20_poly1305_native"
+assert_mode_metadata "$crypto_fast_dir/results.json" fast "$CRYPTO_CELLS"
 crypto_full_dir="$(run_dry crypto scripts/benchmarks/suites/bench-crypto.sh full)"
-assert_mode_metadata "$crypto_full_dir/results.json" full "$CRYPTO_FULL_CELLS"
+assert_mode_metadata "$crypto_full_dir/results.json" full "$CRYPTO_CELLS"
 
 fec_fast_dir="$(run_dry fec scripts/benchmarks/suites/bench-fec.sh fast)"
 assert_mode_metadata "$fec_fast_dir/results.json" fast fec_pipeline
@@ -130,7 +122,8 @@ assert_mode_metadata "$stealth_full_dir/results.json" full padding_gen
 transport_fast_dir="$(run_dry transport scripts/benchmarks/suites/bench-transport.sh fast)"
 assert_mode_metadata "$transport_fast_dir/results.json" fast varint
 transport_full_dir="$(run_dry transport scripts/benchmarks/suites/bench-transport.sh full)"
-assert_mode_metadata "$transport_full_dir/results.json" full varint,packet_number
+assert_mode_metadata "$transport_full_dir/results.json" full \
+  varint,packet_number,connection_1rtt_send_recv,connection_rustls_standard_1rtt,connection_tls_handshake,connection_1rtt_stealth_compare
 
 coverage_fast_dir="$(run_dry coverage scripts/tests/analysis/analysis-coverage-summary.sh fast)"
 assert_mode_metadata "$coverage_fast_dir/results.json" fast static-function-test-inventory

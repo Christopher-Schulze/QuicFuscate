@@ -55,7 +55,7 @@ pub use bench::{
     bench_paired_standard_1rtt_connections, BenchConnectionPair,
 };
 #[cfg(feature = "benches")]
-pub use bench::{bench_retry_case, BenchRetryCase};
+pub use bench::{bench_retry_case, bench_rustls_quic_handshake_latency, BenchRetryCase};
 
 #[cfg(test)]
 mod tests;

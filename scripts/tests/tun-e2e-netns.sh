@@ -20,9 +20,13 @@
 #   ./scripts/tests/tun-e2e-netns.sh
 # UDP evidence wrapper: ./scripts/tests/tun-e2e-omega-udp.sh
 # Hook env: TAG, UDPRATE (UDP), DURATION, IPERF_LEN (optional), IPERF_REVERSE
-# (TCP, optional), QF_E2E_HOOK_OUTPUT_DIR (absolute). Optional QF_E2E_FEC_CONFIG
+# (TCP, optional), QF_E2E_HOOK_OUTPUT_DIR (absolute), QF_E2E_READY_CAPTURE_FILE
+# (UDP hook: underlay pcap of the loaded wire). Optional QF_E2E_FEC_CONFIG
 # is a TOML path passed as --fec-config to both sides (not with --config).
 # Hook stdout (qtun0 counters, iperf results) lands in the e2e run log.
+# TODO-1071: QF_E2E_LOG_DIR moves ns-srv.log, ns-srv-restart.log and
+# ns-cli.log out of /tmp into an isolated per-run directory; when set,
+# pre-existing log artifacts are refused instead of overwritten.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -69,6 +73,18 @@ HANDSHAKE_CAPTURE_SERVER_PID=""
 # operator-local analysis material and never enter version control.
 KEYLOG_FILE="${QF_E2E_KEYLOG_FILE:-}"
 PRIVATE_DUMP_FILE="${QF_E2E_PRIVATE_DUMP_FILE:-}"
+# TODO-1071: isolated per-run log directory. Unset keeps the historical
+# /tmp/ns-*.log paths so hooks and sibling scripts work unchanged; when set,
+# pre-existing log artifacts are refused instead of overwritten.
+E2E_LOG_DIR_EXPLICIT=0
+if [ -n "${QF_E2E_LOG_DIR:-}" ]; then
+  E2E_LOG_DIR_EXPLICIT=1
+fi
+QF_E2E_LOG_DIR="${QF_E2E_LOG_DIR:-/tmp}"
+export QF_E2E_LOG_DIR
+NS_SRV_LOG="$QF_E2E_LOG_DIR/ns-srv.log"
+NS_SRV_RESTART_LOG="$QF_E2E_LOG_DIR/ns-srv-restart.log"
+NS_CLI_LOG="$QF_E2E_LOG_DIR/ns-cli.log"
 WIRE_ENV=()
 if [ -n "$KEYLOG_FILE" ]; then
   WIRE_ENV+=(SSLKEYLOGFILE="$KEYLOG_FILE")
@@ -207,12 +223,12 @@ dump_diagnostics() {
   ip netns exec ns-srv ip -s link show qtun0 >&2 2>/dev/null || true
   ip netns exec ns-cli ip -s link show qtun0 >&2 2>/dev/null || true
   echo "=== failure diagnostics: server MASQUE/TUN/errors ===" >&2
-  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" /tmp/ns-srv.log 2>/dev/null | \
+  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" "$NS_SRV_LOG" 2>/dev/null | \
     grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache|stats:" | tail -80 >&2 || true
-  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" /tmp/ns-srv-restart.log 2>/dev/null | \
+  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" "$NS_SRV_RESTART_LOG" 2>/dev/null | \
     grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache|stats:" | tail -80 >&2 || true
   echo "=== failure diagnostics: client MASQUE/TUN/errors ===" >&2
-  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" /tmp/ns-cli.log 2>/dev/null | \
+  grep -iE "tun|error|warn|panic|MASQUE|datagram|ICMP" "$NS_CLI_LOG" 2>/dev/null | \
     grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache|stats:" | tail -80 >&2 || true
 }
 
@@ -344,6 +360,18 @@ if [ -n "$TRAFFIC_CAPTURE_FILE" ]; then
     exit 2
   fi
 fi
+if [ "$E2E_LOG_DIR_EXPLICIT" = "1" ]; then
+  if ! mkdir -p "$QF_E2E_LOG_DIR"; then
+    echo "FAIL: could not create QF_E2E_LOG_DIR $QF_E2E_LOG_DIR" >&2
+    exit 2
+  fi
+  for e2e_log_path in "$NS_SRV_LOG" "$NS_SRV_RESTART_LOG" "$NS_CLI_LOG"; do
+    if [ -e "$e2e_log_path" ]; then
+      echo "FAIL: e2e log artifact already exists; refusing to overwrite $e2e_log_path" >&2
+      exit 2
+    fi
+  done
+fi
 trap cleanup_on_exit EXIT
 
 # --- ensure server cert valid for the client's hardcoded validation SNI ---
@@ -442,8 +470,8 @@ wait_for_qkey() {
 }
 
 # --- start server in ns-srv ---
-start_server "$ADMIN_SOCKET" /tmp/ns-srv.log
-wait_for_qkey "$ADMIN_SOCKET" /tmp/ns-srv.log
+start_server "$ADMIN_SOCKET" "$NS_SRV_LOG"
+wait_for_qkey "$ADMIN_SOCKET" "$NS_SRV_LOG"
 
 # --- prove process-loss recovery before opening the client data plane ---
 if [ ! -f "$ROUTING_STATE_PATH" ]; then
@@ -462,8 +490,8 @@ SERVER_PID=""
 if [ ! -f "$ROUTING_STATE_PATH" ]; then
   fail "process loss unexpectedly removed the durable routing ownership record"
 fi
-start_server "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
-wait_for_qkey "$RESTART_ADMIN_SOCKET" /tmp/ns-srv-restart.log
+start_server "$RESTART_ADMIN_SOCKET" "$NS_SRV_RESTART_LOG"
+wait_for_qkey "$RESTART_ADMIN_SOCKET" "$NS_SRV_RESTART_LOG"
 
 # --- optional handshake/activation capture (TODO-1029) ---
 if [ -n "$HANDSHAKE_CAPTURE_FILE" ]; then
@@ -493,7 +521,7 @@ ip netns exec ns-cli env "${WIRE_ENV[@]}" "$B" client --remote 10.10.0.1:4433 --
   --qkey "$QKEY" --ca-file "$CA" --verify-peer --disable-doh \
   --tun --tun-name qtun0 --no-utls -v \
   "${CLIENT_CONFIG_ARGS[@]}" \
-  > /tmp/ns-cli.log 2>&1 &
+  > "$NS_CLI_LOG" 2>&1 &
 CLIENT_PID=$!
 sleep 4
 
@@ -512,10 +540,10 @@ echo "=== TUN ifaces ==="
 echo "srv: $(ip netns exec ns-srv ip -br addr show qtun0 2>&1)"
 echo "cli: $(ip netns exec ns-cli ip -br addr show qtun0 2>&1)"
 echo "=== handshake status ==="
-echo "client_complete=$(grep -c 'TLS handshake complete' /tmp/ns-cli.log) server_complete=$(grep -c 'TLS handshake complete' "$SERVER_LOG_PATH")"
-if [ "$(grep -c 'TLS handshake complete' /tmp/ns-cli.log)" = "0" ] || [ "$(grep -c 'TLS handshake complete' "$SERVER_LOG_PATH")" = "0" ]; then
+echo "client_complete=$(grep -c 'TLS handshake complete' "$NS_CLI_LOG") server_complete=$(grep -c 'TLS handshake complete' "$SERVER_LOG_PATH")"
+if [ "$(grep -c 'TLS handshake complete' "$NS_CLI_LOG")" = "0" ] || [ "$(grep -c 'TLS handshake complete' "$SERVER_LOG_PATH")" = "0" ]; then
   cat "$SERVER_LOG_PATH" >&2
-  cat /tmp/ns-cli.log >&2
+  cat "$NS_CLI_LOG" >&2
   fail "TLS handshake did not complete on both sides"
 fi
 
@@ -581,7 +609,7 @@ fi
 
 echo "=== MASQUE counters ==="
 echo "srv: $(grep -i 'MASQUE' "$SERVER_LOG_PATH" | tail -3)"
-echo "cli: $(grep -i 'MASQUE' /tmp/ns-cli.log | tail -3)"
+echo "cli: $(grep -i 'MASQUE' "$NS_CLI_LOG" | tail -3)"
 
 if [ -n "$HANDSHAKE_CAPTURE_FILE" ]; then
   # The activation boundary and the post-activation ping data in both
@@ -605,7 +633,7 @@ fi
 echo "=== server log tail (TUN/errors) ==="
 grep -iE "tun|error|warn|panic|MASQUE" "$SERVER_LOG_PATH" | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10
 echo "=== client log tail (TUN/errors) ==="
-grep -iE "tun|error|warn|panic|MASQUE" /tmp/ns-cli.log | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10
+grep -iE "tun|error|warn|panic|MASQUE" "$NS_CLI_LOG" | grep -vE "rate limiter|Memory|browser|CPU|NEON|SIMD|Cache" | tail -10
 
 # --- graceful shutdown must remove the durable routing record ---
 if ! stop_owned_process_gracefully "$CLIENT_PID"; then

@@ -143,8 +143,8 @@ for profile in "${PROFILES[@]}"; do
     tail -120 "$run_dir/tun-e2e.log" >&2 || true
     fail "TUN E2E harness failed for profile $profile"
   fi
-  cp /tmp/ns-srv.log "$run_dir/server.log"
-  cp /tmp/ns-cli.log "$run_dir/client.log"
+  cp "${QF_E2E_LOG_DIR:-/tmp}/ns-srv.log" "$run_dir/server.log"
+  cp "${QF_E2E_LOG_DIR:-/tmp}/ns-cli.log" "$run_dir/client.log"
   p0f_regex="$(profile_pattern "$profile")"
   if ! grep -Eiq "$p0f_regex" "$run_dir/p0f.log" "$run_dir/p0f.stderr.log"; then
     printf 'p0f_gate=fail\n' > "$run_dir/classifier-gates.txt"

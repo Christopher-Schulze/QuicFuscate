@@ -159,12 +159,27 @@ pub fn generate_hierarchy(
     organization: &str,
 ) -> Result<CaHierarchy, PkiError> {
     let pki_time = PkiTime::capture()?;
-    generate_hierarchy_at(server_hostname, organization, pki_time)
+    generate_hierarchy_at(&[server_hostname], organization, pki_time)
+}
+
+/// Generate a full CA hierarchy whose server leaf carries every listed
+/// hostname or IP address as a SAN. One identity can then serve several
+/// distinct SNI values in shared-process benches and tests.
+#[cfg(feature = "rcgen")]
+pub fn generate_hierarchy_with_dns_sans(
+    server_hostnames: &[&str],
+    organization: &str,
+) -> Result<CaHierarchy, PkiError> {
+    if server_hostnames.is_empty() {
+        return Err(PkiError::GenerationFailed("at least one server hostname is required".into()));
+    }
+    let pki_time = PkiTime::capture()?;
+    generate_hierarchy_at(server_hostnames, organization, pki_time)
 }
 
 #[cfg(feature = "rcgen")]
 fn generate_hierarchy_at(
-    server_hostname: &str,
+    server_hostnames: &[&str],
     organization: &str,
     pki_time: PkiTime,
 ) -> Result<CaHierarchy, PkiError> {
@@ -227,19 +242,22 @@ fn generate_hierarchy_at(
         .map_err(|e| PkiError::GenerationFailed(format!("intermediate cert: {e}")))?;
 
     // --- Server Leaf ---
+    let leaf_common_name = server_hostnames.first().copied().unwrap_or_default();
     let mut leaf_params = CertificateParams::new(vec![])?;
     leaf_params.distinguished_name = DistinguishedName::new();
     leaf_params.distinguished_name.push(DnType::CountryName, "US");
     leaf_params.distinguished_name.push(DnType::OrganizationName, organization);
-    leaf_params.distinguished_name.push(DnType::CommonName, server_hostname);
-    // SANs: hostname + IP if it's an IP address.
+    leaf_params.distinguished_name.push(DnType::CommonName, leaf_common_name);
+    // SANs: every listed name; IP literals become IP SANs.
     let mut sans = vec![];
-    if let Ok(ip) = server_hostname.parse::<std::net::IpAddr>() {
-        sans.push(SanType::IpAddress(ip));
-    } else {
-        let dns_name = rcgen::Ia5String::try_from(server_hostname)
-            .map_err(|_| PkiError::GenerationFailed("invalid SAN hostname".into()))?;
-        sans.push(SanType::DnsName(dns_name));
+    for server_hostname in server_hostnames {
+        if let Ok(ip) = server_hostname.parse::<std::net::IpAddr>() {
+            sans.push(SanType::IpAddress(ip));
+        } else {
+            let dns_name = rcgen::Ia5String::try_from(*server_hostname)
+                .map_err(|_| PkiError::GenerationFailed("invalid SAN hostname".into()))?;
+            sans.push(SanType::DnsName(dns_name));
+        }
     }
     // Always include localhost for development.
     sans.push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
@@ -306,6 +324,15 @@ fn checked_validity_window(
 #[cfg(not(feature = "rcgen"))]
 pub fn generate_hierarchy(
     _server_hostname: &str,
+    _organization: &str,
+) -> Result<CaHierarchy, PkiError> {
+    Err(PkiError::FeatureNotEnabled)
+}
+
+/// Multi-SAN hierarchy variant (stub when rcgen is not enabled).
+#[cfg(not(feature = "rcgen"))]
+pub fn generate_hierarchy_with_dns_sans(
+    _server_hostnames: &[&str],
     _organization: &str,
 ) -> Result<CaHierarchy, PkiError> {
     Err(PkiError::FeatureNotEnabled)
@@ -690,7 +717,7 @@ fn ensure_pki_at(
     );
 
     #[cfg(feature = "rcgen")]
-    let mut hierarchy = generate_hierarchy_at(server_hostname, organization, pki_time)?;
+    let mut hierarchy = generate_hierarchy_at(&[server_hostname], organization, pki_time)?;
     #[cfg(not(feature = "rcgen"))]
     let mut hierarchy = generate_hierarchy(server_hostname, organization)?;
 
@@ -950,7 +977,7 @@ mod tests {
         };
 
         let pki_time = PkiTime::capture_from(&clock).unwrap();
-        let hierarchy = generate_hierarchy_at("vpn.example.com", "TestOrg", pki_time).unwrap();
+        let hierarchy = generate_hierarchy_at(&["vpn.example.com"], "TestOrg", pki_time).unwrap();
         assert!(!hierarchy.server_leaf.cert_der.is_empty());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -965,7 +992,7 @@ mod tests {
         };
 
         let result = PkiTime::capture_from(&clock)
-            .and_then(|pki_time| generate_hierarchy_at("vpn.example.com", "TestOrg", pki_time));
+            .and_then(|pki_time| generate_hierarchy_at(&["vpn.example.com"], "TestOrg", pki_time));
         assert!(matches!(result, Err(PkiError::ClockError(_))));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -974,7 +1001,7 @@ mod tests {
     #[test]
     fn test_generate_hierarchy_accepts_unix_epoch_boundary() {
         let pki_time = PkiTime::from_system_time(UNIX_EPOCH).unwrap();
-        let hierarchy = generate_hierarchy_at("vpn.example.com", "TestOrg", pki_time)
+        let hierarchy = generate_hierarchy_at(&["vpn.example.com"], "TestOrg", pki_time)
             .expect("Unix epoch is a representable certificate boundary");
         assert!(!hierarchy.root_ca.cert_der.is_empty());
         assert!(!hierarchy.intermediate_ca.cert_der.is_empty());

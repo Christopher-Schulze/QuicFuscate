@@ -179,7 +179,7 @@ analyze_capture() {
   if [ "$observed_bits_per_second" -gt "$((expected_rate * expected_size * 8 * 110 / 100))" ]; then
     fail "$case_name observed bandwidth ${observed_bits_per_second}bps exceeds bounded cost"
   fi
-  if ! grep -q 'traffic-analysis defense enabled:' /tmp/ns-cli.log; then
+  if ! grep -q 'traffic-analysis defense enabled:' "${QF_E2E_LOG_DIR:-/tmp}/ns-cli.log"; then
     fail "$case_name did not emit the explicit traffic-analysis bandwidth warning"
   fi
   cpu_percent="$(
@@ -202,8 +202,8 @@ analyze_capture() {
     fail "$case_name client CPU ${cpu_percent}% exceeds ${MAX_CPU_PERCENT}%"
   fi
 
-  cp /tmp/ns-cli.log "$OUTPUT_DIR/${case_name}-client.log"
-  cp /tmp/ns-srv-restart.log "$OUTPUT_DIR/${case_name}-server.log"
+  cp "${QF_E2E_LOG_DIR:-/tmp}/ns-cli.log" "$OUTPUT_DIR/${case_name}-client.log"
+  cp "${QF_E2E_LOG_DIR:-/tmp}/ns-srv-restart.log" "$OUTPUT_DIR/${case_name}-server.log"
   printf '%s\n' \
     "artifact_sha256=$ARTIFACT_SHA256" \
     "capture_seconds=$CAPTURE_SECONDS" \

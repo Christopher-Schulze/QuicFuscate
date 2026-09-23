@@ -609,6 +609,28 @@ fn bench_connection_rustls_standard_1rtt(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_connection_tls_handshake(c: &mut Criterion) {
+    use quicfuscate::transport::bench_rustls_quic_handshake_latency;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    static NEXT_HANDSHAKE: AtomicU64 = AtomicU64::new(0);
+    let mut group = c.benchmark_group("connection_tls_handshake");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("fresh_rustls_quic_cover_off", |b| {
+        b.iter_custom(|iterations| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iterations {
+                let iteration = NEXT_HANDSHAKE.fetch_add(1, Ordering::Relaxed);
+                total =
+                    total.saturating_add(black_box(bench_rustls_quic_handshake_latency(iteration)));
+            }
+            total
+        });
+    });
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // ACK sent-byte accounting under N in-flight PNs (TODO-400)
 // ---------------------------------------------------------------------------
@@ -915,6 +937,7 @@ criterion_group!(
     bench_transport_connection_id_set,
     bench_connection_1rtt_send_recv,
     bench_connection_rustls_standard_1rtt,
+    bench_connection_tls_handshake,
     bench_ack_sent_byte_accounting,
     bench_connection_1rtt_stealth_compare,
     bench_stream_frame_encoding,

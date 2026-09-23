@@ -39,7 +39,14 @@ JSON="$OUTPUT_DIR/results.json"; json_begin "$JSON" "bench_transport_all"; JSON_
 if (( FAST )); then
   SELECTED_CELLS=(varint)
 else
-  SELECTED_CELLS=(varint packet_number)
+  SELECTED_CELLS=(
+    varint
+    packet_number
+    connection_1rtt_send_recv
+    connection_rustls_standard_1rtt
+    connection_tls_handshake
+    connection_1rtt_stealth_compare
+  )
 fi
 FAILURES=0
 

@@ -5,6 +5,7 @@
 #   TAG            run label, default tcp
 #   DURATION       iperf3 seconds, default 15
 #   QF_E2E_HOOK_OUTPUT_DIR  optional absolute evidence directory
+#   QF_E2E_LOG_DIR         runner log directory, default /tmp (TODO-1071)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +24,7 @@ IPERF_REVERSE="${IPERF_REVERSE:-}"
 IPERF_MSS="${IPERF_MSS:-}"
 IPERF_SWAP="${IPERF_SWAP:-}"
 IPERF_NC="${IPERF_NC:-}"
+E2E_LOG_DIR="${QF_E2E_LOG_DIR:-/tmp}"
 prepare_evidence_dir "$TAG"
 
 SERVER_LOG="$EVIDENCE_DIR/${TAG}.iperf-server.log"
@@ -207,9 +209,9 @@ if recv_bytes <= 0 and sent_bytes <= 0:
 PY
 fi
 
-if [ -f /tmp/ns-cli.log ]; then
+if [ -f "$E2E_LOG_DIR/ns-cli.log" ]; then
   emit "=== client stats ==="
-  grep -E "client stats:|FEC" /tmp/ns-cli.log | tail -8 | tee -a "$EVIDENCE_FILE"
+  grep -E "client stats:|FEC" "$E2E_LOG_DIR/ns-cli.log" | tail -8 | tee -a "$EVIDENCE_FILE"
 fi
 
 emit "evidence_file=${EVIDENCE_FILE}"
