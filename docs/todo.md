@@ -785,13 +785,17 @@
 - DONE. Core client/server construction returns the original typed TLS error and never publishes a failed connection; provider-less product transport cannot report completion or emit 1-RTT application data. Live server failure abandons its auth attempt once. Cached resumption parameters no longer masquerade as the current CID/version identity, and the authenticated UDP limit replaces the remembered 0-RTT value. Focused core, transport, QKey integration, and full root-library tests pass; strict all-target Clippy's unrelated Rust 1.98 diagnostics remain in TODO-1079.
 - Detail: `docs/todo/done/todo-1121-fail-closed-core-tls-provider-initialization.md`
 
-### TODO-1122 - Keep 1-RTT STREAM ownership and FIFO unchanged until seal
-- OPEN. The 1-RTT frame builder removes new STREAM bytes, advances offsets/credit/statistics, and can reorder retained retransmissions before AEAD/HP succeeds. Stage ranges and FIN across single and eight-packet sends; on failure preserve exact source buffers, FIFO and counters, then prove ordered peer delivery once under default and ring-buffer features.
-- Detail: `docs/todo/todo-1122-transactional-one-rtt-stream-send.md`
+### TODO-1122 - Keep 1-RTT and 0-RTT STREAM ownership unchanged until seal
+- DONE. A shared STREAM builder now stages fresh and retained ranges without changing sources, FIFO, offsets, FIN or send counters; bounded preflight precedes AEAD/HP and packet-ordered commit follows successful sealing. Failed single/batch/0-RTT sends preserve ownership; retry delivers exact peer bytes and FIN. Eight STREAM packets use one `seal_batch`; retained-entry capacity and late ACK release are covered. Default root library 1,856 passed (one ignored), ring-buffer plus zero-copy-DATAGRAM connection 177/177, strict library Clippy and formatting pass. Core output handoff remains TODO-1123; the separate no-key packet primitive is TODO-1124.
+- Detail: `docs/todo/done/todo-1122-transactional-stream-send.md`
 
 ### TODO-1123 - Make sealed transport packets safe through Core outgoing admission
 - OPEN. `finish_produced_packet` remains fallible after transport commits a sealed packet; a later batch member can fail after earlier sources have been queued. Establish one provable transport-to-Core ownership boundary for raw, framed and in-QUIC FEC; preserve each mandatory systematic source, reconcile optional repairs and budget, and prove exact peer delivery and queue counts.
 - Detail: `docs/todo/todo-1123-core-outgoing-send-handoff.md`
+
+### TODO-1124 - Fail closed when QUIC packet encryption lacks a sealer
+- OPEN. `encrypt_and_protect` can return `Ok(hdr_len)` with no Initial, Handshake, 0-RTT or 1-RTT AEAD key, and its callers treat that as a protected send. Replace no-key and unsupported-type successes with typed errors, prove send-state preservation, and validate peer-opened retries at each reachable level.
+- Detail: `docs/todo/todo-1124-packet-encryption-missing-key-fail-closed.md`
 
 ## Completed
 

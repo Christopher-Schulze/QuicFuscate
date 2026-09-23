@@ -456,7 +456,6 @@ pub const INITIAL_WINDOW: usize = 14720;
 /// QUIC stream state including send/receive buffers, offsets, and flow control limits.
 #[derive(Debug)]
 pub struct Stream {
-    id: u64,
     #[cfg(not(feature = "stream_ring_buffer"))]
     send_buf: Vec<u8>,
     #[cfg(not(feature = "stream_ring_buffer"))]

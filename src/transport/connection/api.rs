@@ -324,7 +324,6 @@ impl Connection {
         }
 
         let stream = self.streams.entry(stream_id).or_insert_with(|| Stream {
-            id: stream_id,
             #[cfg(not(feature = "stream_ring_buffer"))]
             send_buf: Vec::new(),
             #[cfg(not(feature = "stream_ring_buffer"))]

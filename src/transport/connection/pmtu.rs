@@ -110,12 +110,6 @@ pub(super) struct StreamTransmission {
     pub(super) lost_packets: VecDeque<u64>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct StreamTransmissionEmission {
-    pub(super) id: u64,
-    pub(super) retransmission: bool,
-}
-
 impl PendingPathValidation {
     pub(super) fn matches_path(&self, local_addr: SocketAddr, peer_addr: SocketAddr) -> bool {
         self.local_addr == local_addr && self.peer_addr == peer_addr

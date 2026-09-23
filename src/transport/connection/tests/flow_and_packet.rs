@@ -335,6 +335,95 @@ fn zero_rtt_sends_only_explicit_safe_stream_data() {
 }
 
 #[test]
+fn failed_zero_rtt_seal_preserves_replay_safe_stream_for_retry() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+    use crate::transport::anti_replay::{AntiReplayConfig, StrikeRegister};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RejectHeaderProtection(std::sync::Arc<AtomicUsize>);
+    impl packet::HeaderProtector for RejectHeaderProtection {
+        fn new_mask(&self, _sample: &[u8]) -> Result<[u8; 5], ConnectionError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Err(ConnectionError::InvalidState)
+        }
+    }
+
+    let client_scid = b"early-client-scid";
+    let server_scid = b"early-server-scid";
+    let secret = [0x5Au8; 32];
+    let payload = b"replay-safe control";
+    let mut client_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    client_config.enable_early_data = true;
+    let mut client =
+        Connection::new_client(client_scid, local(), peer(), client_config).expect("client");
+    client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+    client.stream_send_replay_safe_0rtt(0, payload, true).expect("queue replay-safe stream");
+    let original_queue = client.writable_streams.clone();
+    let original_buffered = client.send_buffered_bytes;
+    let mut packet = [0u8; 2048];
+    let now = client.clock.now();
+    let hp_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let real_hp = {
+        let mut crypto = client.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_write_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &secret)
+            .expect("install early sealer");
+        crypto
+            .hp_0rtt
+            .replace(Box::new(RejectHeaderProtection(std::sync::Arc::clone(&hp_calls))))
+            .expect("replace installed HP owner")
+    };
+
+    let mut too_small = [0u8; 1];
+    assert_eq!(
+        client.send_zero_rtt_packet(&mut too_small, now).unwrap_err(),
+        ConnectionError::BufferTooShort
+    );
+    assert_eq!(client.writable_streams, original_queue);
+    assert_eq!(client.send_buffered_bytes, original_buffered);
+    assert_eq!(client.streams.get(&0).unwrap().send_off, 0);
+
+    assert_eq!(
+        client.send_zero_rtt_packet(&mut packet, now).unwrap_err(),
+        ConnectionError::InvalidState
+    );
+    assert_eq!(hp_calls.load(Ordering::Relaxed), 1, "AEAD must reach HP failure");
+    assert_eq!(client.writable_streams, original_queue);
+    assert_eq!(client.send_buffered_bytes, original_buffered);
+    assert_eq!(client.streams.get(&0).unwrap().send_off, 0);
+    assert_eq!(client.conn_bytes_sent, 0);
+    assert_eq!(client.stats.stream_sent_bytes, 0);
+    assert!(client.stream_transmissions.is_empty());
+    client.crypto.write().hp_0rtt = Some(real_hp);
+    let (length, _) = client.send_zero_rtt_packet(&mut packet, now).expect("retry early send");
+    assert_eq!(client.stats.stream_sent_bytes, payload.len() as u64);
+    assert_eq!(client.send_buffered_bytes, 0);
+    assert_eq!(client.zero_rtt_sent_pns.len(), 1);
+
+    let register = std::sync::Arc::new(StrikeRegister::new(AntiReplayConfig::default()));
+    let mut server_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    server_config.enable_early_data = true;
+    server_config.set_strike_register(register);
+    let mut server =
+        Connection::new_server(server_scid, peer(), local(), server_config).expect("server");
+    server.set_destination_cid(ConnectionId::from_ref(client_scid));
+    {
+        let mut crypto = server.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_read_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &secret)
+            .expect("install early opener");
+    }
+    let recv_info = RecvInfo { from: local(), to: peer(), ecn: None };
+    server.recv(&mut packet[..length], &recv_info).expect("open retry");
+    let mut received = [0u8; 64];
+    let (read, fin) = server.stream_recv(0, &mut received).expect("read early stream");
+    assert_eq!(&received[..read], payload);
+    assert!(fin);
+}
+
+#[test]
 fn rejected_zero_rtt_transmission_requeues_as_one_rtt() {
     let mut pair = bench_paired_1rtt_connections();
     let payload = b"fallback control stream";
@@ -1249,6 +1338,21 @@ fn failed_admitted_run_preserves_control_ack_and_probe() {
     )));
     pair.client.set_short_header_pad_target(900);
     let before_sent = pair.client.stats.sent;
+    let before_stream_sent_bytes = pair.client.stats.stream_sent_bytes;
+    let before_conn_bytes_sent = pair.client.conn_bytes_sent;
+    let before_send_buffered_bytes = pair.client.send_buffered_bytes;
+    let before_send_off = pair.client.streams.get(&0).unwrap().send_off;
+    #[cfg(not(feature = "stream_ring_buffer"))]
+    let before_source = pair.client.streams.get(&0).unwrap().send_buf.clone();
+    #[cfg(feature = "stream_ring_buffer")]
+    let before_source = {
+        let ring = &pair.client.streams.get(&0).unwrap().send_ring;
+        let mut bytes = vec![0; ring.len()];
+        assert_eq!(ring.peek_from(0, &mut bytes), bytes.len());
+        bytes
+    };
+    let before_stream_queue = pair.client.stream_retransmit_queue.clone();
+    let before_writable_queue = pair.client.writable_streams.clone();
     let before_budget = pair.client.wire_ledger_mut().unwrap().remaining(now);
     let mut first = [0u8; 2048];
     let mut too_small = [0u8; 1];
@@ -1263,6 +1367,21 @@ fn failed_admitted_run_preserves_control_ack_and_probe() {
     assert_eq!(pair.client.pending_probe_spaces.front(), Some(&recovery::PacketSpace::Application));
     assert_eq!(pair.client.dgram_send_queue_len(), 2);
     assert_eq!(pair.client.stats.sent, before_sent);
+    assert_eq!(pair.client.stats.stream_sent_bytes, before_stream_sent_bytes);
+    assert_eq!(pair.client.conn_bytes_sent, before_conn_bytes_sent);
+    assert_eq!(pair.client.send_buffered_bytes, before_send_buffered_bytes);
+    assert_eq!(pair.client.streams.get(&0).unwrap().send_off, before_send_off);
+    #[cfg(not(feature = "stream_ring_buffer"))]
+    assert_eq!(pair.client.streams.get(&0).unwrap().send_buf, before_source);
+    #[cfg(feature = "stream_ring_buffer")]
+    {
+        let ring = &pair.client.streams.get(&0).unwrap().send_ring;
+        let mut bytes = vec![0; ring.len()];
+        assert_eq!(ring.peek_from(0, &mut bytes), bytes.len());
+        assert_eq!(bytes, before_source);
+    }
+    assert_eq!(pair.client.stream_retransmit_queue, before_stream_queue);
+    assert_eq!(pair.client.writable_streams, before_writable_queue);
     assert_eq!(pair.client.pad_short_header_to, Some(900));
     assert_eq!(pair.client.wire_ledger_mut().unwrap().remaining(now), before_budget);
 
@@ -1290,6 +1409,256 @@ fn failed_admitted_run_preserves_control_ack_and_probe() {
 }
 
 #[test]
+fn failed_partial_retransmission_preserves_fifo_and_fin() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    let payload: Vec<u8> = (0..1200).map(|index| (index % 251) as u8).collect();
+    let transmission_id = pair
+        .client
+        .stage_stream_transmission(0, 0, std::sync::Arc::from(payload.as_slice()), true, false)
+        .expect("retain stream range");
+    let original_queue = pair.client.stream_retransmit_queue.clone();
+    let original_bytes = pair.client.stream_retransmit_bytes;
+    let original_entries = pair.client.stream_transmissions.len();
+    let mut first = [0u8; 1500];
+    let mut too_small = [0u8; 1];
+    let mut failed: [&mut [u8]; 2] = [&mut first, &mut too_small];
+
+    assert_eq!(
+        pair.client.send_admitted_batch(&mut failed, 0).unwrap_err(),
+        ConnectionError::BufferTooShort
+    );
+    assert_eq!(pair.client.stream_retransmit_queue, original_queue);
+    assert_eq!(pair.client.stream_retransmit_bytes, original_bytes);
+    assert_eq!(pair.client.stream_transmissions.len(), original_entries);
+    let retained = pair.client.stream_transmissions.get(&transmission_id).unwrap();
+    assert_eq!(retained.data.as_ref(), payload);
+    assert!(retained.fin);
+    assert!(retained.queued);
+    assert!(retained.active_packet.is_none());
+
+    let mut storage = vec![vec![0u8; 1500]; 2];
+    let mut outputs: Vec<&mut [u8]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+    let produced = pair.client.send_admitted_batch(&mut outputs, 0).expect("retry split range");
+    assert_eq!(produced.len(), 2);
+    for (index, (length, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*length], &pair.recv_info).expect("open split");
+    }
+    let mut received = vec![0; payload.len()];
+    let (length, fin) = pair.server.stream_recv(0, &mut received).expect("read split stream");
+    assert_eq!(length, payload.len());
+    assert_eq!(received, payload);
+    assert!(fin);
+}
+
+#[test]
+fn failed_mixed_retransmission_new_data_and_fin_only_preserves_sources() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    let retained_id = pair
+        .client
+        .stage_stream_transmission(8, 0, std::sync::Arc::from(&b"retained"[..]), true, false)
+        .expect("queue retained range");
+    pair.client.stream_send(0, b"", true).expect("queue FIN-only range");
+    pair.client.stream_send(4, b"fresh", true).expect("queue new range");
+    let original_retransmit_queue = pair.client.stream_retransmit_queue.clone();
+    let original_writable_queue = pair.client.writable_streams.clone();
+    let mut first = [0u8; 1500];
+    let mut second = [0u8; 1500];
+    let mut too_small = [0u8; 1];
+    let mut failed: [&mut [u8]; 3] = [&mut first, &mut second, &mut too_small];
+
+    assert_eq!(
+        pair.client.send_admitted_batch(&mut failed, 0).unwrap_err(),
+        ConnectionError::BufferTooShort
+    );
+    assert_eq!(pair.client.stream_retransmit_queue, original_retransmit_queue);
+    assert_eq!(pair.client.writable_streams, original_writable_queue);
+    assert_eq!(pair.client.stream_transmissions.len(), 1);
+    assert!(pair.client.stream_transmissions.get(&retained_id).unwrap().queued);
+    assert_eq!(pair.client.stats.stream_sent_bytes, 0);
+    assert_eq!(pair.client.conn_bytes_sent, 0);
+    assert_eq!(pair.client.streams.get(&4).unwrap().send_off, 0);
+    assert_eq!(pair.client.send_buffered_bytes, 5);
+
+    let mut storage = vec![vec![0u8; 1500]; 3];
+    let mut outputs: Vec<&mut [u8]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+    let produced = pair.client.send_admitted_batch(&mut outputs, 0).expect("retry mixed run");
+    assert_eq!(produced.len(), 3);
+    for (index, (length, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*length], &pair.recv_info).expect("open mixed run");
+    }
+    let mut received = [0; 16];
+    for (stream_id, expected) in [(0, &b""[..]), (4, &b"fresh"[..]), (8, &b"retained"[..])] {
+        let (length, fin) = pair.server.stream_recv(stream_id, &mut received).expect("read stream");
+        assert_eq!(&received[..length], expected);
+        assert!(fin);
+    }
+}
+
+#[test]
+fn admitted_stream_run_stages_multiple_ranges_before_one_seal() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    let payload: Vec<u8> = (0..3000).map(|index| (index % 251) as u8).collect();
+    pair.client.stream_send(0, &payload, true).expect("queue stream");
+    let mut storage = vec![vec![0u8; 1500]; 8];
+    let mut outputs: Vec<&mut [u8]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+    pair.client.admitted_seal_batch_calls = 0;
+    let produced = pair.client.send_admitted_batch(&mut outputs, 0).expect("stage stream run");
+    assert!(produced.len() >= 2 && produced.len() <= 8);
+    assert_eq!(pair.client.admitted_seal_batch_calls, 1);
+    assert_eq!(pair.client.stats.stream_sent_bytes, payload.len() as u64);
+    assert_eq!(pair.client.conn_bytes_sent, payload.len() as u64);
+    assert_eq!(pair.client.send_buffered_bytes, 0);
+    for (index, (length, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*length], &pair.recv_info).expect("open stream");
+    }
+    let mut received = vec![0; payload.len()];
+    let (length, fin) = pair.server.stream_recv(0, &mut received).expect("read stream run");
+    assert_eq!(length, payload.len());
+    assert_eq!(received, payload);
+    assert!(fin);
+}
+
+#[test]
+fn eight_stream_packets_share_one_batch_seal_and_preserve_fin() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    for index in 0..8u8 {
+        pair.client
+            .stream_send(u64::from(index) * 4, &[index; 64], true)
+            .expect("queue independent stream");
+    }
+    let mut storage = vec![vec![0u8; 1500]; 8];
+    let mut outputs: Vec<&mut [u8]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+    pair.client.admitted_seal_batch_calls = 0;
+    let produced = pair.client.send_admitted_batch(&mut outputs, 0).expect("send eight streams");
+    assert_eq!(produced.len(), 8);
+    assert_eq!(pair.client.admitted_seal_batch_calls, 1);
+    assert_eq!(pair.client.admitted_seal_batch_packets, 8);
+    assert_eq!(pair.client.stats.stream_sent_bytes, 8 * 64);
+    for (index, (length, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*length], &pair.recv_info).expect("open stream");
+        let mut bytes = [0; 64];
+        let (read, fin) = pair
+            .server
+            .stream_recv((index as u64) * 4, &mut bytes)
+            .expect("read independent stream");
+        assert_eq!(read, 64);
+        assert_eq!(bytes, [index as u8; 64]);
+        assert!(fin);
+    }
+}
+
+#[test]
+fn failed_single_packet_seal_preserves_stream_until_peer_retry() {
+    let mut pair = bench_paired_1rtt_connections();
+    let payload = b"single packet stream stays pending";
+    pair.client.stream_send(0, payload, true).expect("queue stream");
+    let original_writable = pair.client.writable_streams.clone();
+    let sealer = pair.client.crypto.write().seal_1rtt.take().expect("installed 1-RTT sealer");
+    pair.client.crypto_1rtt.store(None);
+    let mut packet = [0u8; 1500];
+
+    let failed = pair.client.send(&mut packet);
+    assert!(matches!(failed, Err(ConnectionError::TlsError(_))), "{failed:?}");
+    assert_eq!(pair.client.writable_streams, original_writable);
+    assert_eq!(pair.client.send_buffered_bytes, payload.len());
+    assert_eq!(pair.client.streams.get(&0).unwrap().send_off, 0);
+    assert_eq!(pair.client.conn_bytes_sent, 0);
+    assert_eq!(pair.client.stats.stream_sent_bytes, 0);
+    assert!(pair.client.stream_transmissions.is_empty());
+
+    let original_hp = {
+        let mut crypto = pair.client.crypto.write();
+        crypto.seal_1rtt = Some(sealer);
+        crypto.hp_1rtt.replace(std::sync::Arc::new(FailingHeaderProtector))
+    };
+    pair.client.refresh_short_header_tag_reserve();
+    let failed_hp = pair.client.send(&mut packet);
+    assert!(matches!(failed_hp, Err(ConnectionError::CryptoError(_))), "{failed_hp:?}");
+    assert_eq!(pair.client.writable_streams, original_writable);
+    assert_eq!(pair.client.send_buffered_bytes, payload.len());
+    assert_eq!(pair.client.streams.get(&0).unwrap().send_off, 0);
+    assert_eq!(pair.client.conn_bytes_sent, 0);
+    assert_eq!(pair.client.stats.stream_sent_bytes, 0);
+    assert!(pair.client.stream_transmissions.is_empty());
+
+    pair.client.crypto.write().hp_1rtt = original_hp;
+    pair.client.refresh_short_header_tag_reserve();
+    pair.client.sync_1rtt();
+    let (length, _) = pair.client.send(&mut packet).expect("retry single packet");
+    pair.server.recv(&mut packet[..length], &pair.recv_info).expect("peer opens retry");
+    let mut received = [0; 64];
+    let (read, fin) = pair.server.stream_recv(0, &mut received).expect("read stream");
+    assert_eq!(&received[..read], payload);
+    assert!(fin);
+}
+
+#[test]
+fn committed_non_fin_stream_exits_writable_queue_until_new_data_arrives() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.stream_send(0, b"first", false).expect("first range");
+    let mut packet = [0u8; 1500];
+    let (first_len, _) = pair.client.send(&mut packet).expect("send first range");
+    pair.server.recv(&mut packet[..first_len], &pair.recv_info).expect("open first range");
+    assert!(pair.client.writable_streams.is_empty());
+    assert!(!pair.client.writable_stream_ids.contains(&0));
+
+    pair.client.stream_send(0, b"second", true).expect("append after first send");
+    assert_eq!(pair.client.writable_streams.front(), Some(&0));
+    let (second_len, _) = pair.client.send(&mut packet).expect("send second range");
+    pair.server.recv(&mut packet[..second_len], &pair.recv_info).expect("open second range");
+    let mut received = [0; 16];
+    let (length, fin) = pair.server.stream_recv(0, &mut received).expect("read both ranges");
+    assert_eq!(&received[..length], b"firstsecond");
+    assert!(fin);
+}
+
+#[test]
+fn full_retained_entry_ledger_preserves_new_stream_until_ack_frees_capacity() {
+    let mut pair = bench_paired_1rtt_connections();
+    let retained_byte = std::sync::Arc::<[u8]>::from([0x5A]);
+    for index in 0..MAX_STREAM_ORIGINAL_TRANSMISSIONS {
+        let id = pair
+            .client
+            .stage_stream_transmission(
+                4,
+                index as u64,
+                std::sync::Arc::clone(&retained_byte),
+                false,
+                false,
+            )
+            .expect("fill retained entry ledger");
+        pair.client.commit_stream_transmission(id, index as u64);
+    }
+    let payload = b"send after ACK";
+    pair.client.stream_send(0, payload, true).expect("queue new stream");
+    let original_pn = pair.client.next_send_pn_by_space[2];
+    let mut packet = [0u8; 1500];
+
+    assert_eq!(pair.client.send(&mut packet).unwrap_err(), ConnectionError::Done);
+    assert_eq!(pair.client.next_send_pn_by_space[2], original_pn);
+    assert_eq!(pair.client.streams.get(&0).unwrap().send_off, 0);
+    assert_eq!(pair.client.send_buffered_bytes, payload.len());
+    assert_eq!(pair.client.stats.stream_sent_bytes, 0);
+
+    pair.client.lose_stream_transmission_packet(0);
+    pair.client.acknowledge_late_stream_packets(&[(0, 0)]);
+    let (length, _) = pair.client.send(&mut packet).expect("entry capacity restored");
+    pair.server.recv(&mut packet[..length], &pair.recv_info).expect("peer opens new stream");
+    let mut received = [0; 32];
+    let (read, fin) = pair.server.stream_recv(0, &mut received).expect("read new stream");
+    assert_eq!(&received[..read], payload);
+    assert!(fin);
+}
+
+#[test]
 fn failed_admitted_seal_preserves_unsent_obligations() {
     let mut pair = bench_paired_1rtt_connections();
     pair.client.enable_datagrams(4, 4);
@@ -1299,9 +1668,12 @@ fn failed_admitted_seal_preserves_unsent_obligations() {
     assert!(pair.client.pkt_spaces[2].on_packet_recv(9));
     pair.client.pkt_spaces[2].note_ack_eliciting(0, 1);
     pair.client.pending_probe_spaces.push_back(recovery::PacketSpace::Application);
+    let stream_payload = b"seal failure keeps stream ownership";
+    pair.client.stream_send(0, stream_payload, true).unwrap();
     pair.client.dgram_send(&[0x31; 32]).unwrap();
     pair.client.dgram_send(&[0x32; 32]).unwrap();
     let before_sent = pair.client.stats.sent;
+    let before_buffered = pair.client.send_buffered_bytes;
     pair.client.crypto_1rtt.store(None);
     let mut storage = vec![vec![0u8; 2048]; 2];
     let mut refs: Vec<&mut [u8]> = storage.iter_mut().map(|buffer| buffer.as_mut_slice()).collect();
@@ -1315,6 +1687,11 @@ fn failed_admitted_seal_preserves_unsent_obligations() {
     assert_eq!(pair.client.pending_probe_spaces.front(), Some(&recovery::PacketSpace::Application));
     assert_eq!(pair.client.dgram_send_queue_len(), 2);
     assert_eq!(pair.client.stats.sent, before_sent);
+    assert_eq!(pair.client.streams.get(&0).unwrap().send_off, 0);
+    assert_eq!(pair.client.send_buffered_bytes, before_buffered);
+    assert_eq!(pair.client.conn_bytes_sent, 0);
+    assert_eq!(pair.client.stats.stream_sent_bytes, 0);
+    assert!(pair.client.stream_transmissions.is_empty());
 
     pair.client.sync_1rtt();
     let produced = pair.client.send_admitted_batch(&mut refs, 0).expect("retry after seal failure");
@@ -1328,6 +1705,10 @@ fn failed_admitted_seal_preserves_unsent_obligations() {
         let expected = if index == 0 { &[0x31; 32] } else { &[0x32; 32] };
         assert_eq!(pair.server.dgram_recv_vec().expect("one datagram"), expected);
     }
+    let mut received = [0u8; 64];
+    let (length, fin) = pair.server.stream_recv(0, &mut received).expect("read retry stream");
+    assert_eq!(&received[..length], stream_payload);
+    assert!(fin);
 }
 
 #[test]

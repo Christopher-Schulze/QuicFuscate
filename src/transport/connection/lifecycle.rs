@@ -1,8 +1,24 @@
+use super::state::StagedStreamFrame;
 use super::*;
+use smallvec::SmallVec;
 
 mod tls_and_crypto;
 
 impl Connection {
+    fn staged_stream_cursor(
+        cursors: &mut SmallVec<[(u64, usize, bool); 8]>,
+        stream_id: u64,
+    ) -> Result<&mut (u64, usize, bool), crate::error::ConnectionError> {
+        let position = match cursors.iter().position(|entry| entry.0 == stream_id) {
+            Some(position) => position,
+            None => {
+                cursors.push((stream_id, 0, false));
+                cursors.len() - 1
+            }
+        };
+        cursors.get_mut(position).ok_or(crate::error::ConnectionError::InvalidState)
+    }
+
     /// Retain the first error in a state slot without borrowing the whole connection.
     pub(super) fn retain_first_error(
         slot: &mut Option<crate::error::ConnectionError>,
@@ -323,7 +339,6 @@ impl Connection {
             admitted_batch_reserved: 0,
             admitted_batch_dgram_skip: 0,
             admitted_batch_frames: Vec::new(),
-            admitted_batch_held_streams: Vec::new(),
             admitted_batch_control_indices: Vec::new(),
             admitted_batch_wire_reserved: 0,
             pad_short_header_to: None,
@@ -471,7 +486,7 @@ impl Connection {
         &mut self,
         transmission_id: u64,
         prefix_len: usize,
-    ) -> Result<(), crate::error::ConnectionError> {
+    ) -> Result<u64, crate::error::ConnectionError> {
         let Some(transmission) = self.stream_transmissions.get(&transmission_id) else {
             return Err(crate::error::ConnectionError::InvalidState);
         };
@@ -526,6 +541,162 @@ impl Connection {
                 transmission_ids.push(tail_id);
             }
         }
+        Ok(tail_id)
+    }
+
+    pub(super) fn preflight_staged_stream_frames(
+        &self,
+        frames: &[(u64, &StagedStreamFrame)],
+    ) -> Result<(), crate::error::ConnectionError> {
+        use crate::error::ConnectionError;
+
+        let mut entries = self.stream_transmissions.len();
+        let mut retained_bytes = self.stream_retransmit_bytes;
+        let mut next_id = self.next_stream_transmission_id;
+        let mut reserved_ids = SmallVec::<[u64; 8]>::new();
+        let mut retained_cursors = SmallVec::<[(u64, usize, bool); 8]>::new();
+        let mut fresh_cursors = SmallVec::<[(u64, usize, bool); 8]>::new();
+        for &(_, stream_frame) in frames {
+            let allocates_id = match stream_frame {
+                StagedStreamFrame::Retained { source_id, start, len, offset, fin } => {
+                    let source = self
+                        .stream_transmissions
+                        .get(source_id)
+                        .ok_or(ConnectionError::InvalidState)?;
+                    let cursor = Self::staged_stream_cursor(&mut retained_cursors, *source_id)?;
+                    if !source.queued
+                        || source.active_packet.is_some()
+                        || cursor.2
+                        || *start != cursor.1
+                        || *offset != source.offset.saturating_add(*start as u64)
+                        || *len > source.data.len().saturating_sub(*start)
+                        || *fin != (source.fin && *start + *len == source.data.len())
+                    {
+                        return Err(ConnectionError::InvalidState);
+                    }
+                    cursor.1 += *len;
+                    if cursor.1 == source.data.len() {
+                        cursor.2 = true;
+                        false
+                    } else {
+                        if entries >= MAX_STREAM_TRANSMISSIONS {
+                            return Err(ConnectionError::Done);
+                        }
+                        entries += 1;
+                        true
+                    }
+                }
+                StagedStreamFrame::Fresh { stream_id, offset, data, fin, .. } => {
+                    let stream =
+                        self.streams.get(stream_id).ok_or(ConnectionError::InvalidState)?;
+                    let cursor = Self::staged_stream_cursor(&mut fresh_cursors, *stream_id)?;
+                    #[cfg(not(feature = "stream_ring_buffer"))]
+                    let available = stream.send_buf.len();
+                    #[cfg(feature = "stream_ring_buffer")]
+                    let available = stream.send_ring.len();
+                    if cursor.2
+                        || *offset != stream.send_off.saturating_add(cursor.1 as u64)
+                        || data.len() > available.saturating_sub(cursor.1)
+                        || *fin != (stream.send_fin && cursor.1 + data.len() == available)
+                        || entries >= MAX_STREAM_ORIGINAL_TRANSMISSIONS
+                    {
+                        return Err(ConnectionError::InvalidState);
+                    }
+                    cursor.1 += data.len();
+                    if *fin {
+                        cursor.2 = true;
+                    }
+                    retained_bytes = retained_bytes.saturating_add(data.len());
+                    if retained_bytes > MAX_STREAM_RETRANSMIT_BYTES {
+                        return Err(ConnectionError::Done);
+                    }
+                    entries += 1;
+                    true
+                }
+            };
+            if allocates_id {
+                if self.stream_transmissions.contains_key(&next_id)
+                    || reserved_ids.contains(&next_id)
+                {
+                    return Err(ConnectionError::InvalidState);
+                }
+                reserved_ids.push(next_id);
+                next_id = next_id.wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn commit_staged_stream_frames(
+        &mut self,
+        frames: &[(u64, &StagedStreamFrame)],
+    ) -> Result<(), crate::error::ConnectionError> {
+        use crate::error::ConnectionError;
+
+        let mut tails = SmallVec::<[(u64, u64); 8]>::new();
+        for &(packet_number, stream_frame) in frames {
+            match stream_frame {
+                StagedStreamFrame::Retained { source_id, len, .. } => {
+                    let current_id = tails
+                        .iter()
+                        .find(|(original_id, _)| original_id == source_id)
+                        .map_or(*source_id, |(_, tail_id)| *tail_id);
+                    let current_len = self
+                        .stream_transmissions
+                        .get(&current_id)
+                        .ok_or(ConnectionError::InvalidState)?
+                        .data
+                        .len();
+                    if *len < current_len {
+                        let tail_id = self.split_queued_stream_transmission(current_id, *len)?;
+                        if let Some((_, current_tail)) =
+                            tails.iter_mut().find(|(original_id, _)| original_id == source_id)
+                        {
+                            *current_tail = tail_id;
+                        } else {
+                            tails.push((*source_id, tail_id));
+                        }
+                    }
+                    self.commit_stream_transmission(current_id, packet_number);
+                }
+                StagedStreamFrame::Fresh { stream_id, offset, data, fin, early_data } => {
+                    let transmission_id = self.stage_stream_transmission(
+                        *stream_id,
+                        *offset,
+                        Arc::clone(data),
+                        *fin,
+                        *early_data,
+                    )?;
+                    let stream =
+                        self.streams.get_mut(stream_id).ok_or(ConnectionError::InvalidState)?;
+                    stream.send_off = stream.send_off.saturating_add(data.len() as u64);
+                    #[cfg(not(feature = "stream_ring_buffer"))]
+                    stream.send_buf.drain(..data.len());
+                    #[cfg(feature = "stream_ring_buffer")]
+                    if !stream.send_ring.discard(data.len()) {
+                        return Err(ConnectionError::InvalidState);
+                    }
+                    self.send_buffered_bytes = self.send_buffered_bytes.saturating_sub(data.len());
+                    self.conn_bytes_sent = self.conn_bytes_sent.saturating_add(data.len() as u64);
+                    self.stats.stream_sent_bytes =
+                        self.stats.stream_sent_bytes.saturating_add(data.len() as u64);
+                    let emptied = {
+                        #[cfg(not(feature = "stream_ring_buffer"))]
+                        {
+                            stream.send_buf.is_empty()
+                        }
+                        #[cfg(feature = "stream_ring_buffer")]
+                        {
+                            stream.send_ring.is_empty()
+                        }
+                    };
+                    if emptied {
+                        self.remove_front_writable_stream(*stream_id);
+                    }
+                    self.commit_stream_transmission(transmission_id, packet_number);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -535,16 +706,6 @@ impl Connection {
         } else {
             self.stream_retransmit_queue.retain(|id| *id != transmission_id);
         }
-    }
-
-    /// Remove a staged transmission from the retransmit queue without marking it sent.
-    ///
-    /// The admitted-run sealer frames several packets before `seal_batch`. A newly
-    /// staged transmission would otherwise sit at the queue head and be written
-    /// again into the next packet. `commit_stream_transmission` still records the
-    /// packet number after the seal. On seal failure the id is pushed back.
-    pub(super) fn unqueue_stream_transmission(&mut self, transmission_id: u64) {
-        self.remove_stream_retransmit_queue_entry(transmission_id);
     }
 
     pub(super) fn commit_stream_transmission(&mut self, transmission_id: u64, packet_number: u64) {

@@ -195,7 +195,6 @@ pub struct Connection {
     /// DATAGRAM queue index of the next unstaged payload in the open batch.
     pub(super) admitted_batch_dgram_skip: usize,
     pub(super) admitted_batch_frames: Vec<AdmittedShortHeader>,
-    pub(super) admitted_batch_held_streams: Vec<u64>,
     /// Original control-queue indices already framed by the open batch.
     pub(super) admitted_batch_control_indices: Vec<usize>,
     /// Ledger bytes reserved by unsealed packets in the open batch.
@@ -232,7 +231,7 @@ pub(crate) struct AdmittedShortHeader {
     pub(super) staged_wire_spend: u64,
     pub(super) emitted_chaff: bool,
     pub(super) wrote_ack_eliciting: bool,
-    pub(super) stream_transmission_id: Option<u64>,
+    pub(super) staged_stream: Option<StagedStreamFrame>,
     pub(super) packet_contents: crate::transport::recovery::SentPacketContents,
     pub(super) pmtu_probe_size: Option<usize>,
     pub(super) pmtu_probe_bypassed_congestion: bool,
@@ -252,6 +251,11 @@ pub(super) struct StagedControls {
     pub(super) indices: Vec<usize>,
     pub(super) ack_eliciting: bool,
     pub(super) terminal_close: bool,
+}
+
+pub(super) enum StagedStreamFrame {
+    Retained { source_id: u64, start: usize, len: usize, offset: u64, fin: bool },
+    Fresh { stream_id: u64, offset: u64, data: Arc<[u8]>, fin: bool, early_data: bool },
 }
 
 impl Connection {
@@ -380,6 +384,32 @@ impl StreamRingBuffer {
     }
 
     #[inline(always)]
+    pub(super) fn peek_from(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let to_read = buf.len().min(self.size.saturating_sub(offset));
+        if to_read == 0 {
+            return 0;
+        }
+        let capacity = self.buffer.len();
+        let head = (self.head + offset) & (capacity - 1);
+        let first = to_read.min(capacity - head);
+        buf[..first].copy_from_slice(&self.buffer[head..head + first]);
+        if first < to_read {
+            buf[first..to_read].copy_from_slice(&self.buffer[..to_read - first]);
+        }
+        to_read
+    }
+
+    #[inline(always)]
+    pub(super) fn discard(&mut self, len: usize) -> bool {
+        if len > self.size {
+            return false;
+        }
+        self.head = (self.head + len) & (self.buffer.len() - 1);
+        self.size -= len;
+        true
+    }
+
+    #[inline(always)]
     pub(super) fn len(&self) -> usize {
         self.size
     }
@@ -401,4 +431,27 @@ fn stream_ring_buffer_roundtrip() {
     let read = ring.read(&mut out);
     assert_eq!(read, payload.len());
     assert_eq!(out, payload);
+}
+
+#[cfg(all(test, feature = "stream_ring_buffer"))]
+#[test]
+fn stream_ring_buffer_peek_and_discard_across_wrap() {
+    let mut ring = StreamRingBuffer::new();
+    let fill = vec![0xA5; STREAM_RING_BUFFER_CAPACITY - 8];
+    assert_eq!(ring.write(&fill), fill.len());
+    assert!(ring.discard(fill.len() - 4));
+    let tail = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    assert_eq!(ring.write(&tail), tail.len());
+    let mut peeked = [0; 14];
+    assert_eq!(ring.peek_from(2, &mut peeked), 14);
+    assert_eq!(peeked, [0xA5, 0xA5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(ring.len(), 16, "peek must not consume");
+    assert_eq!(ring.peek_from(usize::MAX, &mut peeked), 0);
+    assert!(!ring.discard(17));
+    assert_eq!(ring.len(), 16);
+    assert!(ring.discard(2));
+    let mut actual = [0; 14];
+    assert_eq!(ring.read(&mut actual), actual.len());
+    assert_eq!(actual, peeked);
+    assert!(ring.is_empty());
 }

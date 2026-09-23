@@ -39,7 +39,7 @@ pub(crate) use pmtu::FecCallbackFeedback;
 use pmtu::{
     prefetch_frame_parse_window, prefetch_recv_packet_buffer, trace_send_packet,
     PathValidationOrigin, PendingPathFrame, PendingPathValidation, StreamTransmission,
-    StreamTransmissionEmission, MAX_PEER_MAX_DATA,
+    MAX_PEER_MAX_DATA,
 };
 pub use state::Connection;
 #[cfg(feature = "zero_copy_dgram")]

@@ -1,14 +1,6 @@
-use super::state::{AdmittedShortHeader, StagedApplicationAck, StagedControls};
+use super::state::{AdmittedShortHeader, StagedApplicationAck, StagedControls, StagedStreamFrame};
 use super::*;
 use crate::transport::DatagramClass;
-
-struct StagedStreamTransmission {
-    stream_id: u64,
-    offset: u64,
-    data: Arc<[u8]>,
-    fin: bool,
-    early_data: bool,
-}
 
 impl Connection {
     pub(super) fn enqueue_peer_stream_reset(
@@ -438,7 +430,6 @@ impl Connection {
                             }
                             // Flow-control tracking
                             let s = self.streams.entry(stream_id).or_insert_with(|| Stream {
-                                id: stream_id,
                                 #[cfg(not(feature = "stream_ring_buffer"))]
                                 send_buf: Vec::new(),
                                 #[cfg(not(feature = "stream_ring_buffer"))]
@@ -605,7 +596,6 @@ impl Connection {
                         Frame::MaxStreamData { stream_id, max } => {
                             // Peer increased per-stream send window
                             let s = self.streams.entry(stream_id).or_insert_with(|| Stream {
-                                id: stream_id,
                                 #[cfg(not(feature = "stream_ring_buffer"))]
                                 send_buf: Vec::new(),
                                 #[cfg(not(feature = "stream_ring_buffer"))]
@@ -925,9 +915,7 @@ impl Connection {
         }
     }
 
-    /// Flushes one retransmitted or new STREAM range. Returns `(new_off,
-    /// wrote_ack_eliciting, transmission emission)` - STREAM frames are always
-    /// ack-eliciting when emitted (RFC 9000 sec. 19.8).
+    /// Largest STREAM body that fits the remaining packet and AEAD tag budget.
     fn maximum_stream_payload(
         packet_len: usize,
         packet_offset: usize,
@@ -950,292 +938,214 @@ impl Connection {
         lower
     }
 
-    #[inline(always)]
-    pub(super) fn maybe_flush_one_writable_stream(
+    /// Frame one STREAM range without moving bytes, FIN, queue entries or send credit.
+    /// Earlier members of an open admitted run form the speculative cursor.
+    pub(super) fn stage_next_stream_frame(
         &mut self,
         out: &mut [u8],
-        mut off: usize,
+        off: usize,
         early_data_only: bool,
-    ) -> Result<(usize, bool, Option<StreamTransmissionEmission>), crate::error::ConnectionError>
-    {
+    ) -> Result<(usize, Option<StagedStreamFrame>), crate::error::ConnectionError> {
         use crate::error::ConnectionError;
 
-        loop {
-            let transmission_id = if early_data_only {
-                self.stream_retransmit_queue.iter().copied().find(|id| {
-                    self.stream_transmissions
-                        .get(id)
-                        .is_some_and(|transmission| transmission.queued && transmission.early_data)
-                })
-            } else {
-                while let Some(id) = self.stream_retransmit_queue.front().copied() {
-                    if self.stream_transmissions.get(&id).is_some_and(|t| t.queued) {
-                        break;
+        let tag_reserve =
+            if early_data_only { packet::AEAD_TAG_LEN } else { self.tag_reserve_1rtt() };
+        for &source_id in &self.stream_retransmit_queue {
+            let Some(source) = self.stream_transmissions.get(&source_id) else {
+                continue;
+            };
+            if !source.queued || (early_data_only && !source.early_data) {
+                continue;
+            }
+            let start: usize = self
+                .admitted_batch_frames
+                .iter()
+                .filter_map(|frame| match &frame.staged_stream {
+                    Some(StagedStreamFrame::Retained { source_id: id, len, .. })
+                        if *id == source_id =>
+                    {
+                        Some(*len)
                     }
-                    self.stream_retransmit_queue.pop_front();
-                }
-                self.stream_retransmit_queue.front().copied()
-            };
-            let Some(transmission_id) = transmission_id else {
-                break;
-            };
-            let Some(transmission) = self.stream_transmissions.get(&transmission_id) else {
-                if early_data_only {
-                    self.stream_retransmit_queue.retain(|id| *id != transmission_id);
-                } else {
-                    self.stream_retransmit_queue.pop_front();
-                }
-                continue;
-            };
-            if !transmission.queued || (early_data_only && !transmission.early_data) {
-                if early_data_only {
-                    self.stream_retransmit_queue.retain(|id| *id != transmission_id);
-                } else {
-                    self.stream_retransmit_queue.pop_front();
-                }
+                    _ => None,
+                })
+                .sum();
+            if start >= source.data.len()
+                && (start > 0 || !source.fin || self.admitted_batch_frames.iter().any(|frame| {
+                    matches!(&frame.staged_stream, Some(StagedStreamFrame::Retained { source_id: id, .. }) if *id == source_id)
+                }))
+            {
                 continue;
             }
-
-            let stream_id = transmission.stream_id;
-            let stream_offset = transmission.offset;
-            let data = Arc::clone(&transmission.data);
-            let fin = transmission.fin;
-            let need = frames::stream_frame_wire_len(stream_id, stream_offset, data.len());
-            let tag_reserve = if early_data_only {
-                crate::transport::packet::AEAD_TAG_LEN
-            } else {
-                self.tag_reserve_1rtt()
-            };
-            if out.len() < off + need + tag_reserve {
-                let prefix_len = Self::maximum_stream_payload(
-                    out.len(),
-                    off,
-                    tag_reserve,
-                    stream_id,
-                    stream_offset,
-                    data.len(),
-                );
-                if prefix_len == 0 || data.is_empty() {
-                    return Ok((off, false, None));
-                }
-                self.split_queued_stream_transmission(transmission_id, prefix_len)?;
-                continue;
+            let data = &source.data[start..];
+            let offset = source.offset.saturating_add(start as u64);
+            let len = Self::maximum_stream_payload(
+                out.len(),
+                off,
+                tag_reserve,
+                source.stream_id,
+                offset,
+                data.len(),
+            );
+            if (len == 0 && !data.is_empty())
+                || out.len().saturating_sub(off)
+                    < frames::stream_frame_wire_len(source.stream_id, offset, len)
+                        .saturating_add(tag_reserve)
+            {
+                return Ok((off, None));
             }
-            off += frames::write_stream_frame(
-                stream_id,
-                stream_offset,
-                data.as_ref(),
+            let staged_splits = self
+                .admitted_batch_frames
+                .iter()
+                .filter(|frame| match &frame.staged_stream {
+                    Some(StagedStreamFrame::Retained { source_id, start, len, .. }) => self
+                        .stream_transmissions
+                        .get(source_id)
+                        .is_some_and(|original| start + len < original.data.len()),
+                    _ => false,
+                })
+                .count();
+            if len < data.len()
+                && self.stream_transmissions.len().saturating_add(staged_splits)
+                    >= MAX_STREAM_TRANSMISSIONS
+            {
+                return Ok((off, None));
+            }
+            let fin = source.fin && start + len == source.data.len();
+            let written = frames::write_stream_frame(
+                source.stream_id,
+                offset,
+                &data[..len],
                 fin,
                 &mut out[off..],
             )?;
             return Ok((
-                off,
-                true,
-                Some(StreamTransmissionEmission { id: transmission_id, retransmission: true }),
+                off + written,
+                Some(StagedStreamFrame::Retained { source_id, start, len, offset, fin }),
             ));
         }
 
-        let ledger_bytes = self.stream_retransmit_bytes;
-        let ledger_entries = self.stream_transmissions.len();
-        let mut staged_transmission: Option<StagedStreamTransmission> = None;
-        let writable_stream_id = if early_data_only {
-            self.writable_streams
-                .iter()
-                .copied()
-                .find(|stream_id| self.zero_rtt_streams.contains(stream_id))
-        } else {
-            self.writable_streams.front().copied()
-        };
-        if let Some(stream_id) = writable_stream_id {
-            let early_data = self.zero_rtt_streams.contains(&stream_id);
-            let tag_reserve = if early_data_only {
-                crate::transport::packet::AEAD_TAG_LEN
-            } else {
-                self.tag_reserve_1rtt()
-            };
-            if let Some(s) = self.streams.get_mut(&stream_id) {
-                let available = {
-                    #[cfg(not(feature = "stream_ring_buffer"))]
-                    {
-                        s.send_buf.len()
-                    }
-                    #[cfg(feature = "stream_ring_buffer")]
-                    {
-                        s.send_ring.len()
-                    }
-                };
-                if available > 0 {
-                    let header_overhead = frames::stream_frame_wire_len(stream_id, s.send_off, 0);
-                    if off + header_overhead + tag_reserve <= out.len() {
-                        let conn_avail =
-                            self.peer_max_data.saturating_sub(self.conn_bytes_sent) as usize;
-                        let stream_avail = s.max_stream_data_tx.saturating_sub(s.send_off) as usize;
-                        let send_avail = conn_avail.min(stream_avail);
-                        if send_avail == 0 {
-                            Self::queue_control_frame(
-                                &mut self.pending_control,
-                                Frame::DataBlocked { limit: self.peer_max_data },
-                            );
-                            Self::queue_control_frame(
-                                &mut self.pending_control,
-                                Frame::StreamDataBlocked { stream_id, limit: s.max_stream_data_tx },
-                            );
-                            return Err(ConnectionError::Done);
-                        }
-                        let body_len = Self::maximum_stream_payload(
-                            out.len(),
-                            off,
-                            tag_reserve,
-                            stream_id,
-                            s.send_off,
-                            available.min(send_avail),
-                        );
-                        if body_len == 0 {
-                            return Ok((off, false, None));
-                        }
-                        if ledger_entries >= MAX_STREAM_TRANSMISSIONS
-                            || ledger_bytes.saturating_add(body_len) > MAX_STREAM_RETRANSMIT_BYTES
-                        {
-                            return Ok((off, false, None));
-                        }
-                        let stream_offset = s.send_off;
-                        let fin_now = {
-                            #[cfg(not(feature = "stream_ring_buffer"))]
-                            {
-                                s.send_fin && body_len == available
-                            }
-                            #[cfg(feature = "stream_ring_buffer")]
-                            {
-                                s.send_fin && body_len == available
-                            }
-                        };
-                        #[cfg(not(feature = "stream_ring_buffer"))]
-                        let data = {
-                            let data = Arc::<[u8]>::from(&s.send_buf[..body_len]);
-                            let written = frames::write_stream_frame(
-                                s.id,
-                                stream_offset,
-                                data.as_ref(),
-                                fin_now,
-                                &mut out[off..],
-                            )?;
-                            off += written;
-                            data
-                        };
-                        #[cfg(feature = "stream_ring_buffer")]
-                        let data = {
-                            // Reuse the connection-level scratch: the ring's
-                            // `read` needs a mutable contiguous target, but the
-                            // retained copy goes straight into the `Arc`
-                            // allocation - no per-packet staging Vec (TODO-917).
-                            if self.stream_tx_scratch.len() < body_len {
-                                self.stream_tx_scratch.resize(body_len, 0);
-                            }
-                            let read = s.send_ring.read(&mut self.stream_tx_scratch[..body_len]);
-                            let data = Arc::<[u8]>::from(&self.stream_tx_scratch[..read]);
-                            let written = frames::write_stream_frame(
-                                s.id,
-                                stream_offset,
-                                data.as_ref(),
-                                fin_now,
-                                &mut out[off..],
-                            )?;
-                            off += written;
-                            data
-                        };
-                        let data_len = data.len();
-                        s.send_off += data_len as u64;
-                        self.send_buffered_bytes =
-                            self.send_buffered_bytes.saturating_sub(data_len);
-                        #[cfg(not(feature = "stream_ring_buffer"))]
-                        {
-                            if data_len == s.send_buf.len() {
-                                s.send_buf.clear();
-                            } else {
-                                s.send_buf.drain(0..data_len);
-                            }
-                        }
-                        self.conn_bytes_sent = self.conn_bytes_sent.saturating_add(data_len as u64);
-                        self.stats.stream_sent_bytes += data_len as u64;
-                        let emptied = {
-                            #[cfg(not(feature = "stream_ring_buffer"))]
-                            {
-                                s.send_buf.is_empty()
-                            }
-                            #[cfg(feature = "stream_ring_buffer")]
-                            {
-                                s.send_ring.is_empty()
-                            }
-                        };
-                        if emptied && fin_now {
-                            self.remove_front_writable_stream(stream_id);
-                        }
-                        staged_transmission = Some(StagedStreamTransmission {
-                            stream_id,
-                            offset: stream_offset,
-                            data,
-                            fin: fin_now,
-                            early_data,
-                        });
-                    }
-                } else if s.send_fin {
-                    // Stream has no pending data but fin was requested: emit a
-                    // fin-only STREAM frame so the peer learns the stream is
-                    // half-closed. Without this, the fin flag would never reach
-                    // the peer and the stream would stay open forever.
-                    let header_overhead = 1
-                        + crate::transport::varint::varint_len(stream_id)
-                        + crate::transport::varint::varint_len(s.send_off)
-                        + 2;
-                    if off + header_overhead + tag_reserve < out.len() {
-                        if ledger_entries >= MAX_STREAM_TRANSMISSIONS {
-                            return Ok((off, false, None));
-                        }
-                        let stream_offset = s.send_off;
-                        let written = frames::write_stream_frame(
-                            s.id,
-                            stream_offset,
-                            &[],
-                            true,
-                            &mut out[off..],
-                        )?;
-                        off += written;
-                        self.remove_front_writable_stream(stream_id);
-                        staged_transmission = Some(StagedStreamTransmission {
-                            stream_id,
-                            offset: stream_offset,
-                            data: Arc::from([]),
-                            fin: true,
-                            early_data,
-                        });
-                    }
-                } else {
-                    // Stream has no pending data and no fin: remove it from the
-                    // writable queue so the next stream gets a turn. The stream
-                    // is re-added to the queue when stream_send() is called again.
-                    // Without this, an idle stream blocks all other streams
-                    // forever because maybe_flush_one_writable_stream only looks
-                    // at the front of the queue.
-                    self.remove_front_writable_stream(stream_id);
-                    return self.maybe_flush_one_writable_stream(out, off, early_data_only);
-                }
+        let staged_fresh_bytes: usize = self
+            .admitted_batch_frames
+            .iter()
+            .filter_map(|frame| match &frame.staged_stream {
+                Some(StagedStreamFrame::Fresh { data, .. }) => Some(data.len()),
+                _ => None,
+            })
+            .sum();
+        let staged_entries = self
+            .admitted_batch_frames
+            .iter()
+            .filter(|frame| match &frame.staged_stream {
+                Some(StagedStreamFrame::Fresh { .. }) => true,
+                Some(StagedStreamFrame::Retained { source_id, start, len, .. }) => self
+                    .stream_transmissions
+                    .get(source_id)
+                    .is_some_and(|original| start + len < original.data.len()),
+                None => false,
+            })
+            .count();
+        for &stream_id in &self.writable_streams {
+            if early_data_only && !self.zero_rtt_streams.contains(&stream_id) {
+                continue;
             }
-        }
-        if let Some(transmission) = staged_transmission {
-            let transmission_id = self.stage_stream_transmission(
-                transmission.stream_id,
-                transmission.offset,
-                transmission.data,
-                transmission.fin,
-                transmission.early_data,
-            )?;
+            let Some(stream) = self.streams.get(&stream_id) else {
+                continue;
+            };
+            let consumed: usize = self
+                .admitted_batch_frames
+                .iter()
+                .filter_map(|frame| match &frame.staged_stream {
+                    Some(StagedStreamFrame::Fresh { stream_id: id, data, .. })
+                        if *id == stream_id =>
+                    {
+                        Some(data.len())
+                    }
+                    _ => None,
+                })
+                .sum();
+            let fin_staged = self.admitted_batch_frames.iter().any(|frame| {
+                matches!(&frame.staged_stream, Some(StagedStreamFrame::Fresh { stream_id: id, fin: true, .. }) if *id == stream_id)
+            });
+            #[cfg(not(feature = "stream_ring_buffer"))]
+            let available = stream.send_buf.len().saturating_sub(consumed);
+            #[cfg(feature = "stream_ring_buffer")]
+            let available = stream.send_ring.len().saturating_sub(consumed);
+            if available == 0 && (!stream.send_fin || fin_staged) {
+                continue;
+            }
+            if self.stream_transmissions.len().saturating_add(staged_entries)
+                >= MAX_STREAM_ORIGINAL_TRANSMISSIONS
+            {
+                return Ok((off, None));
+            }
+            let offset = stream.send_off.saturating_add(consumed as u64);
+            let early_data = self.zero_rtt_streams.contains(&stream_id);
+            let body_len = if available == 0 {
+                0
+            } else {
+                let conn_avail = self
+                    .peer_max_data
+                    .saturating_sub(self.conn_bytes_sent.saturating_add(staged_fresh_bytes as u64))
+                    as usize;
+                let stream_avail = stream.max_stream_data_tx.saturating_sub(offset) as usize;
+                let send_avail = conn_avail.min(stream_avail);
+                if send_avail == 0 {
+                    Self::queue_control_frame(
+                        &mut self.pending_control,
+                        Frame::DataBlocked { limit: self.peer_max_data },
+                    );
+                    Self::queue_control_frame(
+                        &mut self.pending_control,
+                        Frame::StreamDataBlocked { stream_id, limit: stream.max_stream_data_tx },
+                    );
+                    return Err(ConnectionError::Done);
+                }
+                Self::maximum_stream_payload(
+                    out.len(),
+                    off,
+                    tag_reserve,
+                    stream_id,
+                    offset,
+                    available.min(send_avail),
+                )
+            };
+            if available > 0 && body_len == 0 {
+                return Ok((off, None));
+            }
+            if self
+                .stream_retransmit_bytes
+                .saturating_add(staged_fresh_bytes)
+                .saturating_add(body_len)
+                > MAX_STREAM_RETRANSMIT_BYTES
+            {
+                return Ok((off, None));
+            }
+            if out.len().saturating_sub(off)
+                < frames::stream_frame_wire_len(stream_id, offset, body_len)
+                    .saturating_add(tag_reserve)
+            {
+                return Ok((off, None));
+            }
+            let fin = stream.send_fin && body_len == available && !fin_staged;
+            #[cfg(not(feature = "stream_ring_buffer"))]
+            let data = Arc::<[u8]>::from(&stream.send_buf[consumed..consumed + body_len]);
+            #[cfg(feature = "stream_ring_buffer")]
+            let data = {
+                if self.stream_tx_scratch.len() < body_len {
+                    self.stream_tx_scratch.resize(body_len, 0);
+                }
+                let read =
+                    stream.send_ring.peek_from(consumed, &mut self.stream_tx_scratch[..body_len]);
+                Arc::<[u8]>::from(&self.stream_tx_scratch[..read])
+            };
+            let written =
+                frames::write_stream_frame(stream_id, offset, data.as_ref(), fin, &mut out[off..])?;
             return Ok((
-                off,
-                true,
-                Some(StreamTransmissionEmission { id: transmission_id, retransmission: false }),
+                off + written,
+                Some(StagedStreamFrame::Fresh { stream_id, offset, data, fin, early_data }),
             ));
         }
-        Ok((off, false, None))
+        Ok((off, None))
     }
 
     #[inline(always)]

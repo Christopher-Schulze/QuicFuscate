@@ -539,7 +539,7 @@ impl Connection {
         // CONNECTION_CLOSE, APPLICATION_CLOSE. All others (STREAM, DATAGRAM,
         // CRYPTO, PING, MAX_DATA, NEW_CONNECTION_ID, etc.) are ack-eliciting.
         let mut wrote_ack_eliciting = false;
-        let mut stream_transmission_id = None;
+        let mut staged_stream = None;
         let mut staged_datagram = false;
         let mut staged_bulk = false;
         let mut packet_contents = recovery::SentPacketContents::default();
@@ -609,15 +609,15 @@ impl Connection {
                     .filter(|reserve| off + reserve + self.tag_reserve_1rtt() <= out.len())
                     .unwrap_or(0);
                 let stream_limit = out.len().saturating_sub(datagram_reserve);
-                let (off_after_stream, stream_ack_eliciting, emitted_transmission) =
-                    self.maybe_flush_one_writable_stream(&mut out[..stream_limit], off, false)?;
+                let (off_after_stream, stream_frame) =
+                    self.stage_next_stream_frame(&mut out[..stream_limit], off, false)?;
                 off = off_after_stream;
+                let stream_ack_eliciting = stream_frame.is_some();
                 wrote_ack_eliciting |= stream_ack_eliciting;
                 packet_contents.stream |= stream_ack_eliciting;
-                if let Some(emission) = emitted_transmission {
-                    stream_transmission_id = Some(emission.id);
-                    packet_contents.stream_retransmission |= emission.retransmission;
-                }
+                packet_contents.stream_retransmission |=
+                    matches!(stream_frame, Some(super::state::StagedStreamFrame::Retained { .. }));
+                staged_stream = stream_frame;
                 // FEC feed removed (handled by core)
                 let (off_after_dgram, staged_class) =
                     self.maybe_stage_one_datagram_frame(out, off)?;
@@ -739,7 +739,7 @@ impl Connection {
             staged_wire_spend,
             emitted_chaff,
             wrote_ack_eliciting,
-            stream_transmission_id,
+            staged_stream,
             packet_contents,
             pmtu_probe_size,
             pmtu_probe_bypassed_congestion,
@@ -750,10 +750,6 @@ impl Connection {
         if self.admitted_batch_defer {
             off = self.layout_short_header_plaintext(out, pn, pn_off, pn_len, off)?;
             self.advance_send_packet_number(2)?;
-            if let Some(transmission_id) = frame.stream_transmission_id {
-                self.unqueue_stream_transmission(transmission_id);
-                self.admitted_batch_held_streams.push(transmission_id);
-            }
             if staged_datagram {
                 self.admitted_batch_dgram_skip = self.admitted_batch_dgram_skip.saturating_add(1);
             }
@@ -776,6 +772,9 @@ impl Connection {
                 },
             ));
         }
+        if let Some(stream_frame) = &frame.staged_stream {
+            self.preflight_staged_stream_frames(&[(pn, stream_frame)])?;
+        }
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
         self.commit_staged_short_header_effects(std::slice::from_ref(&frame))?;
         let info = self.account_admitted_short_header(off, &frame);
@@ -787,8 +786,8 @@ impl Connection {
 
     /// Frame up to eight already-admitted 1-RTT packets and seal them with one
     /// `seal_batch`. Handshake flights stay on the single-packet path. A seal
-    /// failure leaves DATAGRAM queue ownership and stream retransmissions in
-    /// place; packet numbers already taken are not reused.
+    /// failure leaves DATAGRAM and STREAM source ownership in place; packet
+    /// numbers already taken are not reused.
     pub(crate) fn send_admitted_batch(
         &mut self,
         outs: &mut [&mut [u8]],
@@ -802,7 +801,6 @@ impl Connection {
         self.admitted_batch_reserved = 0;
         self.admitted_batch_dgram_skip = 0;
         self.admitted_batch_frames.clear();
-        self.admitted_batch_held_streams.clear();
         self.admitted_batch_control_indices.clear();
         self.admitted_batch_wire_reserved = 0;
 
@@ -853,36 +851,30 @@ impl Connection {
         }
         let frames = std::mem::take(&mut self.admitted_batch_frames);
         let framed_len = frames.len();
-        let seal_result = self.seal_prepared_short_headers(&mut outs[..framed_len], &frames);
+        let staged_streams: smallvec::SmallVec<[_; 8]> = frames
+            .iter()
+            .filter_map(|frame| frame.staged_stream.as_ref().map(|stream| (frame.pn, stream)))
+            .collect();
+        let seal_result = self
+            .preflight_staged_stream_frames(&staged_streams)
+            .and_then(|()| self.seal_prepared_short_headers(&mut outs[..framed_len], &frames));
+        drop(staged_streams);
         self.admitted_batch_defer = false;
         self.admitted_batch_reserved = 0;
         self.admitted_batch_dgram_skip = 0;
         self.admitted_batch_control_indices.clear();
         self.admitted_batch_wire_reserved = 0;
-        let sealed_lengths = match seal_result {
-            Ok(lengths) => lengths,
-            Err(error) => {
-                self.restore_held_stream_transmissions();
-                return Err(error);
-            }
-        };
-        if let Err(error) = self.commit_staged_short_header_effects(&frames) {
-            self.restore_held_stream_transmissions();
-            return Err(error);
-        }
+        let sealed_lengths = seal_result?;
+        self.commit_staged_short_header_effects(&frames)?;
         let mut produced = Vec::with_capacity(sealed_now.len() + sealed_lengths.len());
         produced.extend(sealed_now);
         for (total, frame) in sealed_lengths.into_iter().zip(frames) {
             let info = self.account_admitted_short_header(total, &frame);
-            if let Some(transmission_id) = frame.stream_transmission_id {
-                self.admitted_batch_held_streams.retain(|held| *held != transmission_id);
-            }
             if let Some(ledger) = self.wire_ledger.as_mut() {
                 ledger.note_wire_send(frame.now);
             }
             produced.push((total, info));
         }
-        self.admitted_batch_held_streams.clear();
         Ok(produced)
     }
 
@@ -893,13 +885,6 @@ impl Connection {
         self.admitted_batch_frames.clear();
         self.admitted_batch_control_indices.clear();
         self.admitted_batch_wire_reserved = 0;
-        self.restore_held_stream_transmissions();
-    }
-
-    fn restore_held_stream_transmissions(&mut self) {
-        for transmission_id in self.admitted_batch_held_streams.drain(..) {
-            self.stream_retransmit_queue.push_back(transmission_id);
-        }
     }
 
     /// Emit one 0-RTT packet from a complete stream message explicitly marked
@@ -909,7 +894,7 @@ impl Connection {
     /// early-data transmissions are requeued through ordinary stream recovery.
     /// DATAGRAM frames and unmarked streams, including the VPN tunnel stream,
     /// are never offered early.
-    fn send_zero_rtt_packet(
+    pub(super) fn send_zero_rtt_packet(
         &mut self,
         out: &mut [u8],
         now: std::time::Instant,
@@ -949,10 +934,9 @@ impl Connection {
         let pn_off = hdr_len_wo_pn;
         let mut off = header_len;
 
-        let (off_after_stream, wrote_stream, emission) =
-            self.maybe_flush_one_writable_stream(out, off, true)?;
+        let (off_after_stream, staged_stream) = self.stage_next_stream_frame(out, off, true)?;
         off = off_after_stream;
-        if !wrote_stream {
+        if staged_stream.is_none() {
             // Nothing could be staged after all, so return Done rather than
             // emitting an empty early-data packet.
             return Err(ConnectionError::Done);
@@ -978,6 +962,10 @@ impl Connection {
             frames::write_padding(target_off - off, &mut out[off..])?;
         }
 
+        if let Some(stream_frame) = &staged_stream {
+            self.preflight_staged_stream_frames(&[(pn, stream_frame)])?;
+        }
+
         trace_send_packet(
             self.is_server,
             PacketType::ZeroRTT,
@@ -1000,6 +988,9 @@ impl Connection {
             )?
         };
         self.advance_send_packet_number(space_idx)?;
+        if let Some(stream_frame) = &staged_stream {
+            self.commit_staged_stream_frames(&[(pn, stream_frame)])?;
+        }
         self.stats.sent += 1;
         self.stats.sent_bytes += used as u64;
         self.recovery.on_packet_sent_in_space(
@@ -1019,9 +1010,6 @@ impl Connection {
         self.pmtu.on_packet_sent(used, now);
         if used > self.pmtu.min_mtu() {
             self.pmtu_above_floor_pns.insert(pn);
-        }
-        if let Some(emission) = emission {
-            self.commit_stream_transmission(emission.id, pn);
         }
         self.zero_rtt_sent_pns.insert(pn);
         if let Some(ledger) = self.wire_ledger.as_mut() {
@@ -1091,9 +1079,6 @@ impl Connection {
                     frame.now,
                 );
             }
-            if let Some(transmission_id) = frame.stream_transmission_id {
-                self.commit_stream_transmission(transmission_id, frame.pn);
-            }
             let outer_datagram_size = total.saturating_add(frame.datagram_overhead);
             self.pmtu.on_packet_sent(outer_datagram_size, frame.now);
             if outer_datagram_size > self.pmtu.min_mtu() {
@@ -1144,6 +1129,12 @@ impl Connection {
                 return Err(ConnectionError::InvalidState);
             }
         }
+
+        let staged_streams: smallvec::SmallVec<[_; 8]> = frames
+            .iter()
+            .filter_map(|frame| frame.staged_stream.as_ref().map(|stream| (frame.pn, stream)))
+            .collect();
+        self.commit_staged_stream_frames(&staged_streams)?;
 
         for _ in 0..staged_datagrams {
             self.commit_staged_datagram_frame()?;
