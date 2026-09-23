@@ -27,6 +27,14 @@ jobs:
         with:
           submodules: false
 
+      - name: Keep the local TODO registry out of the public tree
+        shell: bash
+        run: |
+          if git ls-files -- docs/todo.md docs/todo/ | grep -q .; then
+            echo 'Internal TODO files must not be tracked.' >&2
+            exit 1
+          fi
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:

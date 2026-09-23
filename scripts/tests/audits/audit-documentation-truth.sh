@@ -134,7 +134,7 @@ def historical_heading(heading: str) -> bool:
     )
 
 
-def check_document(path: Path, statuses: dict[str, str]) -> tuple[int, int]:
+def check_document(path: Path, statuses: dict[str, str] | None) -> tuple[int, int]:
     if not path.is_file():
         fail(f"missing canonical document: {path.relative_to(ROOT)}")
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -156,7 +156,7 @@ def check_document(path: Path, statuses: dict[str, str]) -> tuple[int, int]:
             historical = historical_heading(heading)
         ids = sorted(set(TASK_RE.findall(line)))
         task_refs += len(ids)
-        if len(ids) == 1 and not historical:
+        if statuses is not None and len(ids) == 1 and not historical:
             ident = ids[0]
             status = statuses.get(ident)
             if status is None:
@@ -211,7 +211,7 @@ def check_security_version() -> None:
         fail(f"SECURITY.md does not mark the current supported line {expected!r} as supported")
 
 
-statuses, detail_paths = load_task_registry()
+statuses = load_task_registry()[0] if TRACKER.is_file() else None
 for path in CANONICAL_DOCS:
     if path.name in {"DOCUMENTATION.md", "MAP.md"}:
         text = path.read_text(encoding="utf-8")
@@ -230,7 +230,8 @@ check_security_version()
 
 print(
     "PASS: documentation truth "
-    f"tasks={len(statuses)} references={task_count} links={link_count} "
+    f"task_status={'checked' if statuses is not None else 'unavailable-local-registry'} "
+    f"tasks={len(statuses) if statuses is not None else 0} references={task_count} links={link_count} "
     f"canonical_docs={len(CANONICAL_DOCS)}"
 )
 PY

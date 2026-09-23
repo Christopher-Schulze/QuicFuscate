@@ -58,6 +58,7 @@ expect_fail() {
 copy_fixture
 expect_pass
 
+if [[ -f "$TEMP_ROOT/repo/docs/todo.md" ]]; then
 python3 - "$TEMP_ROOT/repo/docs/DOCUMENTATION.md" <<'PY'
 from pathlib import Path
 import sys
@@ -67,6 +68,11 @@ needle = "- TODO-519 is complete:"
 path.write_text(text.replace(needle, "- TODO-519 remains open: native proof is pending.\n" + needle, 1), encoding="utf-8")
 PY
 expect_fail "TODO-519 is DONE"
+fi
+
+copy_fixture
+rm -rf "$TEMP_ROOT/repo/docs/todo" "$TEMP_ROOT/repo/docs/todo.md"
+expect_pass
 
 copy_fixture
 python3 - "$TEMP_ROOT/repo/README.md" <<'PY'

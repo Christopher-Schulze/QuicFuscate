@@ -32,7 +32,7 @@ QuicFuscate is a Cargo workspace. The product runtime stays in the root `quicfus
   - Audit entrypoints are under `scripts/tests/audits/`
 - Documentation (English only)
   - `docs/DOCUMENTATION.md` - single file of truth
-  - `docs/todo.md` and `docs/todo/*.md` - task and readiness truth
+  - `docs/todo.md` and `docs/todo/*.md` - local task and readiness truth, excluded from the public Git tree
   - `docs/MAP.md` - repository map and wiring index
 
 The design favors consolidation into well-organized module directories (`src/fec/`, `src/crypto/`, `src/stealth/`, `src/optimize/`, `src/transport/`). Each directory has a `mod.rs` root with focused sub-modules. Do not duplicate logic across modules or introduce parallel implementations.

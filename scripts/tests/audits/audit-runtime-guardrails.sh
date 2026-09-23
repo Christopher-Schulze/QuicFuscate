@@ -824,8 +824,6 @@ if rg -F -- 'write_interface_platform_negative_proof()' \
   && rg -F -- 'requires BFE or Fwpm failure injection plus residue verification' \
     .github/workflows/ci.yml >/dev/null \
   && rg -F -- 'interface_platform_negative_proof.v1' docs/DOCUMENTATION.md docs/MAP.md \
-    >/dev/null \
-  && rg -F -- 'status: DONE' docs/todo/done/todo-848-interface-platform-negative-proof.md \
     >/dev/null; then
   pass "Interface and platform negative-proof matrix declares local, conditional, and unavailable evidence"
   append_item "interface_platform_negative_proof_matrix" "ok" "exact local fault targets, host skips, Windows boundary statuses, evidence schema, and documentation are wired"
@@ -1076,7 +1074,7 @@ if rg -F -- 'pub type SensitiveKeyingMaterial = Zeroizing<Vec<u8>>;' src/qftls.r
   && rg -F -- 'preload_identity_duplicate_and_conflict_contract_is_isolated' src/qftls/tests.rs >/dev/null \
   && rg -F -- 'correspondence validation failed' src/qftls/tests.rs >/dev/null \
   && rg -F -- 'sensitive_keying_material_owner_zeroizes_before_drop' src/qftls/tests.rs >/dev/null \
-  && rg -F -- 'TLS Identity Consistency and Secret Output Ownership' docs/todo/done/todo-853-tls-identity-secret-output.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
+  && rg -F -- 'TLS Identity Consistency and Secret Output Ownership' docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
   pass "TLS certificate/key correspondence, preload lifecycle, and zeroizing exporter ownership are wired"
   append_item "tls_identity_and_secret_output" "ok" "rustls SPKI correspondence validation, isolated mismatch/duplicate/conflict preload coverage, and zeroizing key-export type/erasure test are present"
 else
@@ -1167,7 +1165,7 @@ if [[ -z "$WINDOWS_PROOF_ORDER_ERRORS" ]] \
   && rg -F -- 'root_regain_result_contract_is_deterministic_without_syscalls' crates/qf-privilege/src/drop/tests.rs >/dev/null \
   && rg -F -- 'process_memory_lock_guard_cleans_up_during_unwind' crates/qf-memory-lock/src/lib.rs >/dev/null \
   && rg -F -- 'deferred_process_lock_status_is_explicit_before_privilege_transition' crates/qf-memory-lock/src/lib.rs >/dev/null \
-  && rg -F -- 'Privilege, Lock, and TLS Negative-Proof Guardrails' docs/todo/done/todo-854-privilege-lock-negative-proof.md docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
+  && rg -F -- 'Privilege, Lock, and TLS Negative-Proof Guardrails' docs/MAP.md docs/DOCUMENTATION.md >/dev/null; then
   pass "Privilege, memory-lock, TLS, native-boundary, and Windows portability proof wiring is explicit"
   append_item "privilege_memory_tls_negative_proof" "ok" "deterministic local suite, required Linux sudo proof, startup ordering, and Windows compile-before-test CI gate are present"
 else
