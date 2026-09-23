@@ -380,6 +380,27 @@ out of the execution queue.
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
 
 ## Queue
+
+### TODO-1141 - Reconcile Desktop unit-test inventory floor
+- OPEN. The canonical Desktop unit run passes 38/38 files and 442/442 tests but exits 1 because its configured floor is 453 tests. Trace the 11-test difference, restore any lost assertions or justify the current count, and keep the fail-on-shrink gate effective. Coordinate with TODO-373/377.
+- Detail: `docs/todo/todo-1141-desktop-unit-inventory-contract.md`
+
+### TODO-1140 - Reconcile ten legacy module coverage findings
+- OPEN. TODO-379..388 were incorrectly excluded on the assumption that a coverage summary proves behavior. Map all ten findings to current owners and failable tests, close proven coverage, and give every real remaining gap a direct test or linked implementation task. Do not revive old tests-per-LOC targets.
+- Detail: `docs/todo/todo-1140-current-behavior-coverage-reconciliation.md`
+
+### TODO-373 - Complete Desktop clipboard path tests
+- OPEN. Existing tests cover navigator fallback but not successful `commands.clipboardReadText()`, native failure/empty-result handling, or the development bridge. Extend the current test family against the real exported function; TODO-1141 owns the separate Desktop inventory gate.
+- Detail: `docs/todo/todo-373-clipboard-ts-untested.md`
+
+### TODO-374 - Complete Admin anchor synchronization event tests
+- OPEN. Existing tests cover initial position, resize, and cleanup but not captured scroll or an invoked ResizeObserver callback. Prove updates and teardown on both paths in the existing test file.
+- Detail: `docs/todo/todo-374-use-anchor-sync-untested.md`
+
+### TODO-377 - Prove Desktop error-route retry action
+- OPEN. Existing route tests check text and button presence; the shared component tests its callback, but the route's hash-reset/reload action is untested. Add one real rendered-route click test and pass the Desktop gate after TODO-1141.
+- Detail: `docs/todo/todo-377-desktop-error-page-untested.md`
+
 ### TODO-901 - Server RX batching drain and sharding
 - PARTIAL. GRO-aware Linux `recvmmsg` batching and `SO_REUSEPORT` shards with coordinator, routed TUN/admin/expiry, and bounded channels are implemented. Historical Omega evidence covers 563/563 server tests, N=1/N=4 TUN E2E, dual-stack ingress, lifecycle and teardown. Remaining gate: repeated multicore server RX/TUN workload at N=1/2/4 with delivered pps, CPU, latency, drops, and shard distribution; select the measured default. The older 1M pps/3x claim and send-only benchmark are not acceptance evidence.
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
@@ -3353,7 +3374,7 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-307-iouring-full-exploitation.md`
 
 ### TODO-356 - "Update stale test counts in retired local worklog and todo.md"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP. The local worklog was retired and fixed test-count prose is not durable task truth; current gates report their own counts.
 - Detail: `docs/todo/todo-356-context-todo-stale-counts.md`
 
 ### TODO-357 - "CONTRIBUTING.md says "Rust stable (latest)" instead of pinned version"
@@ -3401,28 +3422,20 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-368-fatal-error-test-misplaced.md`
 
 ### TODO-369 - "Add tests for 5 untested packages/ui components + 2 utilities"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-369-packages-ui-test-gaps.md`
+- DONE. All seven named test files exist; the focused shared-UI run passes 7/7 files and 48/48 tests. The old UI exclusion is obsolete.
+- Detail: `docs/todo/done/todo-369-packages-ui-test-gaps.md`
 
 ### TODO-370 - "Remove fec_sim overlap between test-fec-simulation.sh and test-fec-e2e-loss.sh"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-370-fec-sim-overlap.md`
+- DONE. The simulation matrix no longer invokes `fec_sim`; the model-loss example runs in the separate E2E-loss suite.
+- Detail: `docs/todo/done/todo-370-fec-sim-overlap.md`
 
 ### TODO-371 - "Remove redundant smoke-fec-quick.sh"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-371-smoke-fec-redundant.md`
+- DONE. The wrapper is absent and has no non-document script references.
+- Detail: `docs/todo/done/todo-371-smoke-fec-redundant.md`
 
 ### TODO-372 - "Update README.md test count from "800+" to "900+""
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
 - Detail: `docs/todo/done/todo-372-readme-test-count.md`
-
-### TODO-373 - "Add tests for desktop clipboard.ts"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-373-clipboard-ts-untested.md`
-
-### TODO-374 - "Add tests for admin use-anchor-sync.ts"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-374-use-anchor-sync-untested.md`
 
 ### TODO-375 - "Replace unwrap() in quicfuscate-ctl with proper error handling"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
@@ -3432,52 +3445,48 @@ out of the execution queue.
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
 - Detail: `docs/todo/done/todo-376-simd-selfcheck-cross-platform-ci.md`
 
-### TODO-377 - "Add test for desktop +error.svelte page"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-377-desktop-error-page-untested.md`
-
 ### TODO-378 - "Review and resolve 7 TODO markers in Rust source code"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP. Counting source TODO comments is not a deliverable; the concrete cipher-reinstallation obligation moved to TODO-545 and obsolete PQ tombstones were removed.
 - Detail: `docs/todo/todo-378-code-todo-markers.md`
 
 ### TODO-379 - "Increase test coverage for stealth/mod.rs (5496 LOC, ~7 tests/1000 LOC)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated tests-per-LOC plan. TODO-1140 owns the current stealth behavior gap and proof audit.
 - Detail: `docs/todo/todo-379-coverage-stealth-mod.md`
 
 ### TODO-380 - "Increase test coverage for simd.rs (6224 LOC, ~5 tests/1000 LOC)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated tests-per-LOC plan. TODO-1140 owns current SIMD dispatch and parity coverage.
 - Detail: `docs/todo/todo-380-coverage-simd.md`
 
 ### TODO-381 - "Increase test coverage for transport/connection.rs (3399 LOC, ~7 tests/1000 LOC)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated single-file plan. TODO-1140 owns current connection behavior coverage.
 - Detail: `docs/todo/todo-381-coverage-transport-connection.md`
 
 ### TODO-382 - "Increase test coverage for transport/h3.rs (2033 LOC, ~8 tests/1000 LOC)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated single-file plan. TODO-1140 owns current H3 behavior coverage.
 - Detail: `docs/todo/todo-382-coverage-transport-h3.md`
 
 ### TODO-383 - "Increase test coverage for implementations/server/mod.rs (4511 LOC, ~4 tests/1000 LOC)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated single-file plan. TODO-1140 owns current server behavior coverage.
 - Detail: `docs/todo/todo-383-coverage-server-mod.md`
 
 ### TODO-384 - "Add inline tests for optimize/iter.rs (626 LOC, 0 inline)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated inline-test count. TODO-1140 owns current iterator behavior coverage.
 - Detail: `docs/todo/todo-384-coverage-optimize-iter.md`
 
 ### TODO-385 - "Add external tests for optimize/unsafe.rs (1511 LOC, 11 inline only)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated external-test count. TODO-1140 owns current unsafe-path proof.
 - Detail: `docs/todo/todo-385-coverage-optimize-unsafe.md`
 
 ### TODO-386 - "Add tests for server/fsutil.rs (50 LOC, 0 tests)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP because the zero-test premise is stale; TODO-1140 checks the existing fsutil tests against remaining atomicity risks.
 - Detail: `docs/todo/todo-386-coverage-fsutil.md`
 
 ### TODO-387 - "Add inline tests for transport/batch.rs (383 LOC, 0 inline)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as an outdated inline-test count. TODO-1140 owns current batch-path and native proof.
 - Detail: `docs/todo/todo-387-coverage-transport-batch.md`
 
 ### TODO-388 - "Add tests for client/subsystems.rs (61 LOC, 0 tests)"
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP because the zero-test premise is stale; TODO-1140 checks the existing subsystem tests against lifecycle behavior.
 - Detail: `docs/todo/todo-388-coverage-client-subsystems.md`
 
 ### TODO-389 - Retire aegis128x4/x8 config override mapping drift
@@ -3485,7 +3494,7 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-389-aegis-x4-x8-config-override.md`
 
 ### TODO-390 - AEAD selection uses MTU workload length
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP. Source inspection disproved the Initial-size premise; selection already used the 1-RTT-sized workload and retained a guard test.
 - Detail: `docs/todo/todo-390-aead-selection-mtu-workload.md`
 
 ### TODO-391 - Eliminate double header parse in Connection::recv
@@ -3509,15 +3518,15 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-395-morus-in-place-trait-path.md`
 
 ### TODO-396 - Brain apply_policy lock coalescing
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as a separate implementation; the completed TODO-417 owns the coordinated hot-path lock change.
 - Detail: `docs/todo/todo-396-brain-apply-policy-locks.md`
 
 ### TODO-397 - FEC encoder/decoder mutex contention
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as a separate implementation; the completed TODO-417 owns the coordinated hot-path lock change.
 - Detail: `docs/todo/todo-397-fec-mutex-contention.md`
 
 ### TODO-398 - CryptoContext RwLock scope reduction
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as a separate implementation; the completed TODO-417 owns the coordinated hot-path lock change.
 - Detail: `docs/todo/todo-398-crypto-rwlock-hot-path.md`
 
 ### TODO-399 - Criterion Connection send/recv bench
@@ -3561,7 +3570,7 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-408-vnni-aggregate-alloc-fix.md`
 
 ### TODO-409 - stream_ring_buffer throughput profile evaluation
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP as a separate evaluation; the completed TODO-414 absorbed this decision into the adaptive FEC work.
 - Detail: `docs/todo/todo-409-stream-ring-buffer-default.md`
 
 ### TODO-410 - Zstd compression streaming into pool
@@ -3693,7 +3702,7 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-442-windows-tun-wintun.md`
 
 ### TODO-443 - Mobile platform TUN (iOS NetworkExtension + Android VpnService) and mobile kill switch
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP by owner decision (2026-09-24): no iOS or Android application exists or is planned. The mobile TUN and kill-switch proposal is outside product scope.
 - Detail: `docs/todo/todo-443-mobile-platforms.md`
 
 ### TODO-444 - "nftables backend for kill switch and routing (auto-detection with iptables fallback)"
@@ -3997,7 +4006,7 @@ out of the execution queue.
 - Detail: `docs/todo/done/todo-524-interleaved-fec-recovery-proof.md`
 
 ### TODO-532 - Complete negotiated multipath wire and data-plane runtime
-- Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
+- SCRAP by the recorded product decision of 2026-07-24: WiFi/LTE bonding is outside the roadmap. This is not a current implementation prerequisite.
 - Detail: `docs/todo/todo-532-negotiated-multipath-runtime.md`
 
 ### TODO-546 - Restore Windows SIMD dispatch and native core gate
