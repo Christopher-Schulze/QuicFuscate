@@ -122,6 +122,62 @@ fn make_v2_server() -> Connection {
         .expect("valid test server configuration")
 }
 
+fn retry_packet_for_test(
+    version: u32,
+    dcid: &[u8],
+    scid: &[u8],
+    token: &[u8],
+    original_dcid: &[u8],
+) -> Vec<u8> {
+    let header = packet::Header {
+        ty: PacketType::Retry,
+        version,
+        dcid: dcid.to_vec(),
+        scid: scid.to_vec(),
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: Some(token.to_vec()),
+        versions: None,
+        key_phase: false,
+    };
+    let mut storage = [0u8; 256];
+    let header_len = packet::format_header(&header, &mut storage).unwrap();
+    let mut retry = storage[..header_len].to_vec();
+    packet::append_retry_tag(&mut retry, original_dcid, version).unwrap();
+    retry
+}
+
+fn assert_retry_discarded(mut client: Connection, mut retry: Vec<u8>) {
+    let dcid = client.dcid;
+    let token = client.config.initial_token.clone();
+    let next_pns = client.next_send_pn_by_space;
+    let tracked = client.recovery.tracked_sent_pns(recovery::PacketSpace::Initial);
+    let bytes_in_flight = client.recovery.bytes_in_flight;
+    let cwnd = client.recovery.cwnd;
+    let pto_count = client.recovery.pto_count;
+    let deadline = client.recovery_deadline();
+    let received_non_vn_packet = client.received_non_vn_packet;
+    let retry_accepted = client.retry_accepted;
+    let recv_count = client.stats.recv;
+    let recv_bytes = client.stats.recv_bytes;
+    let len = retry.len();
+
+    assert_eq!(client.recv(&mut retry, &recv_info()), Ok(len));
+    assert_eq!(client.dcid, dcid);
+    assert_eq!(client.config.initial_token, token);
+    assert_eq!(client.next_send_pn_by_space, next_pns);
+    assert_eq!(client.recovery.tracked_sent_pns(recovery::PacketSpace::Initial), tracked);
+    assert_eq!(client.recovery.bytes_in_flight, bytes_in_flight);
+    assert_eq!(client.recovery.cwnd, cwnd);
+    assert_eq!(client.recovery.pto_count, pto_count);
+    assert_eq!(client.recovery_deadline(), deadline);
+    assert_eq!(client.received_non_vn_packet, received_non_vn_packet);
+    assert_eq!(client.retry_accepted, retry_accepted);
+    assert_eq!(client.stats.recv, recv_count);
+    assert_eq!(client.stats.recv_bytes, recv_bytes);
+    assert!(client.local_error.is_none());
+}
+
 fn assert_reno_window_grows(connection: &mut Connection) {
     let initial_cwnd = connection.recovery.cwnd;
     let now = Instant::now();
@@ -269,14 +325,31 @@ fn peer_transport_limit_rejects_malformed_duplicate_and_out_of_range_parameters(
 }
 
 #[test]
-fn valid_retry_moves_token_adopts_cid_and_resets_initial_space() {
+fn valid_retry_adopts_cid_and_token_without_reusing_packet_numbers() {
     let mut client = make_conn();
     let original_dcid = ConnectionId::from_ref(b"original-dcid");
     let retry_scid = b"retry-scid";
     let token = vec![0x10, 0x20, 0x30, 0x40];
     client.set_initial_dcid(original_dcid);
     client.next_send_pn_by_space[0] = 9;
-    assert!(client.pkt_spaces[0].on_packet_recv(9));
+    client.recovery.on_packet_sent_in_space(
+        recovery::PacketSpace::Initial,
+        8,
+        1200,
+        true,
+        true,
+        Some((0, 10)),
+        client.clock.now(),
+    );
+    client.bytes_in_flight = client.recovery.bytes_in_flight;
+    client.recovery.pto_count = 3;
+    client.pending_probe_spaces.push_back(recovery::PacketSpace::Initial);
+    assert!(client.recovery_deadline().is_some());
+    client.crypto.write().crypto_initial.send(b"retained crypto").unwrap();
+    assert_eq!(
+        client.next_crypto_frame(qf_transport_types::QuicEncryptionLevel::Initial, 64).unwrap(),
+        Some((0, b"retained crypto".to_vec()))
+    );
 
     let header = packet::Header {
         ty: PacketType::Retry,
@@ -301,10 +374,173 @@ fn valid_retry_moves_token_adopts_cid_and_resets_initial_space() {
     let expected_dcid = ConnectionId::from_ref(retry_scid);
     assert_eq!(client.config.initial_token, Some(token));
     assert_eq!(client.dcid, expected_dcid);
+    assert!(client.retry_accepted);
     assert!(client.dest_cids.contains(&expected_dcid));
-    assert_eq!(client.next_send_pn_by_space[0], 0);
+    assert_eq!(client.next_send_pn_by_space[0], 9);
     assert!(client.pkt_spaces[0].largest_recv.is_none());
-    assert!(!client.pkt_spaces[0].contains(9));
+    assert!(!client.recovery.tracks_sent_packet(recovery::PacketSpace::Initial, 8));
+    assert_eq!(client.recovery.bytes_in_flight, 0);
+    assert_eq!(client.bytes_in_flight, 0);
+    assert_eq!(client.recovery.pto_count, 0);
+    assert_eq!(client.recovery_deadline(), None);
+    assert!(client.pending_probe_spaces.is_empty());
+    assert_eq!(
+        client.next_crypto_frame(qf_transport_types::QuicEncryptionLevel::Initial, 64).unwrap(),
+        Some((0, b"retained crypto".to_vec()))
+    );
+}
+
+#[test]
+fn invalid_or_repeated_retry_is_discarded_without_connection_mutation() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        for case in [
+            "invalid-tag",
+            "truncated-tag",
+            "empty-token",
+            "wrong-dcid",
+            "original-dcid-as-scid",
+            "wrong-version",
+        ] {
+            let mut config = Config::new_with_version(version).unwrap();
+            config.verify_peer = false;
+            let mut client =
+                Connection::new_client(b"retry-client-scid", local(), peer(), config).unwrap();
+            let original_dcid = ConnectionId::from_ref(b"retry-original");
+            client.set_initial_dcid(original_dcid);
+            client.next_send_pn_by_space[0] = 1;
+            client.recovery.on_packet_sent_in_space(
+                recovery::PacketSpace::Initial,
+                0,
+                1200,
+                true,
+                true,
+                Some((0, 10)),
+                client.clock.now(),
+            );
+            let packet_version = if case == "wrong-version" {
+                if version == PROTOCOL_VERSION {
+                    crate::transport::PROTOCOL_VERSION_V2
+                } else {
+                    PROTOCOL_VERSION
+                }
+            } else {
+                version
+            };
+            let dcid = if case == "wrong-dcid" {
+                b"wrong-client".as_slice()
+            } else {
+                client.scid.as_ref()
+            };
+            let scid = if case == "original-dcid-as-scid" {
+                original_dcid.as_ref()
+            } else {
+                b"retry-server-scid".as_slice()
+            };
+            let token = if case == "empty-token" { b"".as_slice() } else { b"token".as_slice() };
+            let mut retry =
+                retry_packet_for_test(packet_version, dcid, scid, token, original_dcid.as_ref());
+            if case == "invalid-tag" {
+                *retry.last_mut().unwrap() ^= 1;
+            } else if case == "truncated-tag" {
+                retry.truncate(6);
+            }
+            assert_retry_discarded(client, retry);
+        }
+
+        let mut config = Config::new_with_version(version).unwrap();
+        config.verify_peer = false;
+        let mut client =
+            Connection::new_client(b"retry-client-scid", local(), peer(), config).unwrap();
+        let original_dcid = ConnectionId::from_ref(b"retry-original");
+        client.set_initial_dcid(original_dcid);
+        let mut retry = retry_packet_for_test(
+            version,
+            client.scid.as_ref(),
+            b"retry-server-scid",
+            b"token",
+            original_dcid.as_ref(),
+        );
+        assert_eq!(client.recv(&mut retry, &recv_info()), Ok(retry.len()));
+        assert_retry_discarded(client, retry);
+
+        let mut config = Config::new_with_version(version).unwrap();
+        config.verify_peer = false;
+        let mut client =
+            Connection::new_client(b"retry-client-scid", local(), peer(), config).unwrap();
+        client.set_initial_dcid(original_dcid);
+        client.received_non_vn_packet = true;
+        let retry = retry_packet_for_test(
+            version,
+            client.scid.as_ref(),
+            b"retry-server-scid",
+            b"token",
+            original_dcid.as_ref(),
+        );
+        assert_retry_discarded(client, retry);
+    }
+}
+
+#[test]
+fn retry_requeues_early_stream_data_without_resetting_application_packet_numbers() {
+    let mut client = make_conn();
+    let original_dcid = ConnectionId::from_ref(b"retry-original");
+    client.set_initial_dcid(original_dcid);
+    client.config.enable_early_data = true;
+    client.set_environment_snapshot(std::sync::Arc::new(
+        crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_TLS_COVER", "0")]),
+    ));
+    client.enable_tls("retry-early-data-test").unwrap();
+    assert_eq!(client.stream_send_replay_safe_0rtt(4, b"queued", true), Ok(6));
+    assert!(client.has_sendable_early_stream_frame());
+    let transmission_id = client
+        .stage_stream_transmission(
+            0,
+            0,
+            std::sync::Arc::<[u8]>::from(&b"early-data"[..]),
+            false,
+            true,
+        )
+        .unwrap();
+    client.commit_stream_transmission(transmission_id, 7);
+    client.zero_rtt_sent_pns.insert(7);
+    client.next_send_pn_by_space[2] = 8;
+    client.recovery.on_packet_sent_in_space(
+        recovery::PacketSpace::Application,
+        7,
+        1200,
+        true,
+        true,
+        None,
+        client.clock.now(),
+    );
+    let mut retry = retry_packet_for_test(
+        PROTOCOL_VERSION,
+        client.scid.as_ref(),
+        b"retry-server-scid",
+        b"token",
+        original_dcid.as_ref(),
+    );
+
+    assert_eq!(client.recv(&mut retry, &recv_info()), Ok(retry.len()));
+    let transmission = client.stream_transmissions.get(&transmission_id).unwrap();
+    assert_eq!(transmission.data.as_ref(), b"early-data");
+    assert!(transmission.queued);
+    assert!(!transmission.early_data);
+    assert_eq!(transmission.active_packet, None);
+    assert!(client.stream_retransmit_queue.contains(&transmission_id));
+    assert!(client.zero_rtt_sent_pns.is_empty());
+    assert!(client.retry_accepted);
+    assert!(!client.has_sendable_early_stream_frame());
+    assert_eq!(
+        client.stream_send_replay_safe_0rtt(8, b"after retry", true),
+        Err(ConnectionError::InvalidState)
+    );
+    assert!(!client.streams.contains_key(&8));
+    assert!(client.stream_transmission_by_pn.is_empty());
+    assert!(client.lost_stream_transmission_by_pn.is_empty());
+    assert_eq!(client.next_send_pn_by_space[2], 8);
+    assert_eq!(client.recovery.bytes_in_flight, 0);
+    assert!(!client.recovery.tracks_sent_packet(recovery::PacketSpace::Application, 7));
 }
 
 #[test]
@@ -621,61 +857,132 @@ fn live_v2_to_v1_version_negotiation_validates_authenticated_server_versions() {
 }
 
 #[test]
-fn live_v2_retry_preserves_authenticated_version_information() {
-    let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
-    config.verify_peer = false;
-    let mut client = Connection::new_client(
-        b"version-client-scid",
-        "127.0.0.1:29101".parse().unwrap(),
-        "127.0.0.1:29102".parse().unwrap(),
-        config,
-    )
-    .unwrap();
-    let original_dcid = ConnectionId::from_ref(b"version-original");
-    client.set_initial_dcid(original_dcid);
-    client.set_environment_snapshot(std::sync::Arc::new(
-        crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_TLS_COVER", "0")]),
-    ));
-    client.enable_tls("version-retry-test").unwrap();
-    let mut profile = crate::qftls::TlsProfile::chrome_130();
-    profile.timing_jitter = None;
-    profile.sni = Some("localhost".to_string());
-    client.configure_tls(&profile, "localhost").unwrap();
-    let mut initial = [0u8; 4096];
-    let (initial_len, _) = client.send(&mut initial).expect("first v2 Initial flight");
-    assert!(initial_len >= MIN_CLIENT_INITIAL_LEN);
-    let retry_scid = b"version-retry-scid";
-    let header = packet::Header {
-        ty: PacketType::Retry,
-        version: crate::transport::PROTOCOL_VERSION_V2,
-        dcid: client.scid.to_vec(),
-        scid: retry_scid.to_vec(),
-        pkt_num: 0,
-        pkt_num_len: 0,
-        token: Some(vec![0x10, 0x20, 0x30, 0x40]),
-        versions: None,
-        key_phase: false,
-    };
-    let mut storage = [0u8; 256];
-    let header_len = packet::format_header(&header, &mut storage).unwrap();
-    let mut retry = storage[..header_len].to_vec();
-    packet::append_retry_tag(
-        &mut retry,
-        original_dcid.as_ref(),
-        crate::transport::PROTOCOL_VERSION_V2,
-    )
-    .unwrap();
-    let from_server = RecvInfo {
-        from: "127.0.0.1:29102".parse().unwrap(),
-        to: "127.0.0.1:29101".parse().unwrap(),
-        ecn: None,
-    };
-    assert_eq!(client.recv(&mut retry, &from_server), Ok(retry.len()));
-    assert_eq!(client.config.version, crate::transport::PROTOCOL_VERSION_V2);
-    assert!(!client.version_negotiation.peer_information_validated);
-    assert_eq!(client.initial_dcid, original_dcid);
-    assert_eq!(client.dcid, ConnectionId::from_ref(retry_scid));
-    complete_live_version_handshake(client, retry_scid, false);
+fn live_v1_and_v2_retry_recover_after_a_lost_post_retry_initial() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        let mut config = Config::new_with_version(version).unwrap();
+        config.verify_peer = false;
+        let mut client = Connection::new_client(
+            b"version-client-scid",
+            "127.0.0.1:29101".parse().unwrap(),
+            "127.0.0.1:29102".parse().unwrap(),
+            config,
+        )
+        .unwrap();
+        let original_dcid = ConnectionId::from_ref(b"version-original");
+        client.set_initial_dcid(original_dcid);
+        client.set_environment_snapshot(std::sync::Arc::new(
+            crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_TLS_COVER", "0")]),
+        ));
+        client.enable_tls("version-retry-test").unwrap();
+        let mut profile = crate::qftls::TlsProfile::chrome_130();
+        profile.timing_jitter = None;
+        profile.sni = Some("localhost".to_string());
+        client.configure_tls(&profile, "localhost").unwrap();
+        let mut initial = [0u8; 4096];
+        let (initial_len, _) = client.send(&mut initial).expect("first v2 Initial flight");
+        assert!(initial_len >= MIN_CLIENT_INITIAL_LEN);
+        let next_initial_pn = client.next_send_pn_by_space[0];
+        assert!(next_initial_pn > 0);
+        assert!(client
+            .recovery
+            .tracks_sent_packet(recovery::PacketSpace::Initial, next_initial_pn - 1));
+        let retry_scid = b"version-retry-scid";
+        let header = packet::Header {
+            ty: PacketType::Retry,
+            version,
+            dcid: client.scid.to_vec(),
+            scid: retry_scid.to_vec(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: Some(vec![0x10, 0x20, 0x30, 0x40]),
+            versions: None,
+            key_phase: false,
+        };
+        let mut storage = [0u8; 256];
+        let header_len = packet::format_header(&header, &mut storage).unwrap();
+        let mut retry = storage[..header_len].to_vec();
+        packet::append_retry_tag(&mut retry, original_dcid.as_ref(), version).unwrap();
+        let from_server = RecvInfo {
+            from: "127.0.0.1:29102".parse().unwrap(),
+            to: "127.0.0.1:29101".parse().unwrap(),
+            ecn: None,
+        };
+        assert_eq!(client.recv(&mut retry, &from_server), Ok(retry.len()));
+        assert_eq!(client.config.version, version);
+        assert!(!client.version_negotiation.peer_information_validated);
+        assert_eq!(client.initial_dcid, original_dcid);
+        assert_eq!(client.dcid, ConnectionId::from_ref(retry_scid));
+        assert_eq!(client.next_send_pn_by_space[0], next_initial_pn);
+        assert!(!client
+            .recovery
+            .tracks_sent_packet(recovery::PacketSpace::Initial, next_initial_pn - 1));
+        assert_eq!(client.recovery.bytes_in_flight, 0);
+        assert_eq!(client.recovery_deadline(), None);
+        let (dropped_len, _) = client.send(&mut initial).expect("requeued post-Retry Initial");
+        assert!(dropped_len >= MIN_CLIENT_INITIAL_LEN);
+        assert_eq!(client.next_send_pn_by_space[0], next_initial_pn + 1);
+        assert!(client
+            .recovery
+            .tracks_sent_packet(recovery::PacketSpace::Initial, next_initial_pn));
+        let deadline = client.recovery_deadline().expect("lost post-Retry Initial arms recovery");
+        client.on_recovery_timeout(deadline);
+        complete_live_version_handshake(client, retry_scid, false);
+    }
+}
+
+#[test]
+fn live_server_initial_prevents_later_retry_on_both_versions() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        let client_addr = "127.0.0.1:29101".parse().unwrap();
+        let server_addr = "127.0.0.1:29102".parse().unwrap();
+        let mut client_config = Config::new_with_version(version).unwrap();
+        client_config.verify_peer = false;
+        let mut server_config = Config::new_with_version(version).unwrap();
+        server_config.verify_peer = false;
+        let mut client =
+            Connection::new_client(b"retry-client-scid", client_addr, server_addr, client_config)
+                .unwrap();
+        let server_scid = b"retry-server-scid";
+        client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+        let mut server = packet::accept(
+            server_scid,
+            Some(server_scid),
+            server_addr,
+            client_addr,
+            &mut server_config,
+        )
+        .unwrap();
+        server.set_destination_cid(client.scid);
+        let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_TLS_COVER",
+            "0",
+        )]));
+        client.set_environment_snapshot(std::sync::Arc::clone(&environment));
+        server.set_environment_snapshot(environment);
+        client.enable_tls("retry-after-initial").unwrap();
+        server.enable_tls("retry-after-initial").unwrap();
+        let mut profile = crate::qftls::TlsProfile::chrome_130();
+        profile.timing_jitter = None;
+        profile.sni = Some("localhost".to_string());
+        client.configure_tls(&profile, "localhost").unwrap();
+        server.configure_tls(&profile, "localhost").unwrap();
+        let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
+        let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
+        let mut packet = [0u8; 4096];
+        let (client_len, _) = client.send(&mut packet).unwrap();
+        server.recv(&mut packet[..client_len], &client_to_server).unwrap();
+        let (server_len, _) = server.send(&mut packet).unwrap();
+        client.recv(&mut packet[..server_len], &server_to_client).unwrap();
+        assert!(client.received_non_vn_packet);
+        let retry = retry_packet_for_test(
+            version,
+            client.scid.as_ref(),
+            b"late-retry-scid",
+            b"token",
+            client.initial_dcid.as_ref(),
+        );
+        assert_retry_discarded(client, retry);
+    }
 }
 
 #[test]

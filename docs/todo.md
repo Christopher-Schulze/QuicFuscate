@@ -769,12 +769,16 @@
 - Detail: `docs/todo/todo-1117-h3-protocol-error-wire-close.md`
 
 ### TODO-1118 - Reset loss recovery and congestion state after authenticated Retry
-- OPEN. A real Initial-before-Retry v2 handshake now retransmits TLS CRYPTO, but the Retry receive path still leaves the old Initial in `Recovery` while resetting its packet number to zero. RFC 9002 Section 6.3 requires a full loss-recovery and congestion reset including timers. Preserve the TLS transcript, configured CC and callbacks; prove v1/v2 Retry, induced loss, 0-RTT disposition and negative Retry immutability with real peers.
-- Detail: `docs/todo/todo-1118-retry-recovery-state-reset.md`
+- DONE. Authenticated v1/v2 Retry retains the TLS transcript and monotonic packet numbers, requeues Initial CRYPTO, rejects outstanding 0-RTT transmissions for 1-RTT replay, forbids further 0-RTT admission/emission in the attempt, and retires old recovery/CC/timer/probe state while preserving controller policy and FEC callbacks. Invalid, duplicate, empty-token and late Retry inputs leave the connection unchanged. Real rustls packet pumps complete after induced post-Retry Initial loss; focused recovery 53/53, transport 160/160, core 91/91, TLS 57 passed (1 ignored), strict library Clippy and formatting pass. Peer CID parameter binding remains TODO-1120; independent standards-wire capture remains TODO-1095.
+- Detail: `docs/todo/done/todo-1118-retry-recovery-state-reset.md`
 
 ### TODO-1119 - Archive completed task details and repair their links
-- DONE. All 327 clearly completed active details were moved to `docs/todo/done/` with matching SHA-256 before reference repair; 133 retained Git tracking and 194 remain ignored local files. Eight moved details needed exact internal link updates. All 987 board detail links and 1,094 task paths resolve. TODO-720 through TODO-723 had stale archived `OPEN` metadata, reconciled against their completed board records. Open and ambiguous details stayed in place.
+- DONE. All 327 clearly completed active details were moved to `docs/todo/done/` with matching SHA-256 before reference repair; 133 retained Git tracking and 194 were ignored local files at archival time. Eight moved details needed exact internal link updates. All 987 board detail links and 1,094 task paths resolved at archival time. TODO-720 through TODO-723 had stale archived `OPEN` metadata, reconciled against their completed board records. Open and ambiguous details stayed in place.
 - Detail: `docs/todo/done/todo-1119-archive-completed-task-details.md`
+
+### TODO-1120 - Bind QUIC handshake transport parameters to observed connection IDs and Retry
+- OPEN. The persona parameter encoder emits only the local initial SCID; the server's original DCID and Retry SCID are absent, and neither role validates the authenticated peer CID parameters against observed packet history. Extend one typed transport/TLS identity boundary and reject missing or mismatched values before application readiness for v1/v2 direct and Retry handshakes.
+- Detail: `docs/todo/todo-1120-quic-retry-connection-id-transport-parameter-binding.md`
 
 ## Completed
 
@@ -898,7 +902,7 @@
 - Detail: `docs/todo/done/todo-637-wiedemann-repeated-allocations.md`
 
 ### TODO-638 - Remove Avoidable Receive-Side Retry Token and Destination-CID Allocations
-- DONE. The authenticated client Retry path moves the parsed token after integrity verification while preserving Retry SCID adoption, Initial key derivation, and packet-number reset. Destination-CID tracking stores fixed-size inline `ConnectionId` values without per-insert `Vec` conversion, and the normal 1-RTT path retains its pre-parsed-header move. Authenticated Retry/CID tests, transport 538/538, focused Criterion coverage, workspace all-target checking, and strict library Clippy pass. Clippy Matrix run `31471819294` is fully green, and Main CI run `31471819318`, macOS feature-matrix job `93716959602`, passes the default all-target Rust lane at a revision containing implementation commit `2b8c56a`.
+- DONE. The authenticated client Retry path moves the parsed token after integrity verification while preserving Retry SCID adoption and Initial key derivation. Its former packet-number reset was corrected in TODO-1118. Destination-CID tracking stores fixed-size inline `ConnectionId` values without per-insert `Vec` conversion, and the normal 1-RTT path retains its pre-parsed-header move. Historical proof: authenticated Retry/CID tests, transport 538/538, focused Criterion coverage, workspace all-target checking, and strict library Clippy passed. Clippy Matrix run `31471819294` was green, and Main CI run `31471819318`, macOS feature-matrix job `93716959602`, passed the default all-target Rust lane at a revision containing implementation commit `2b8c56a`.
 - Detail: `docs/todo/done/todo-638-transport-connid-clone-hotpath.md`
 
 ### TODO-639 - Define StealthShaper RNG Failure and Seed Lifecycle Semantics

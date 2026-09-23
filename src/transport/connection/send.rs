@@ -461,7 +461,7 @@ impl Connection {
             // nothing else to do this turn. Once the handshake completes we
             // fall through to the 1-RTT path below.
             if handshake_incomplete {
-                if !self.is_server {
+                if !self.is_server && !self.retry_accepted {
                     let zero_rtt_seal_ready = {
                         let crypto = self.crypto.read();
                         crypto.seal_0rtt.is_some() && crypto.hp_0rtt.is_some()

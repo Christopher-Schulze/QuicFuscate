@@ -103,6 +103,120 @@ fn reno_stealth_wrapper_does_not_require_entropy() {
 }
 
 #[test]
+fn retry_reset_retires_packets_and_timers_but_preserves_cc_policy_and_callbacks() {
+    let mut recovery = Recovery::with_algorithm(12_000, 1200, super::cc::Algorithm::Reno);
+    recovery.set_stealth_mode(true, super::BrowserProfile::Chrome).unwrap();
+    recovery.set_pto_backoff_cap(5);
+    recovery.set_batch_size(32);
+    recovery.hystart = false;
+    recovery.pacing = false;
+    let sent = Arc::new(AtomicUsize::new(0));
+    let lost = Arc::new(AtomicUsize::new(0));
+    let sent_callback = Arc::clone(&sent);
+    let lost_callback = Arc::clone(&lost);
+    recovery.set_fec_callbacks(
+        move |_, _| {
+            sent_callback.fetch_add(1, Ordering::Relaxed);
+        },
+        move |_, _| {
+            lost_callback.fetch_add(1, Ordering::Relaxed);
+        },
+    );
+    let now = Instant::now();
+    recovery.on_packet_sent_in_space(
+        super::PacketSpace::Initial,
+        8,
+        1200,
+        true,
+        true,
+        Some((0, 10)),
+        now,
+    );
+    recovery.on_packet_sent_in_space(
+        super::PacketSpace::Application,
+        4,
+        1200,
+        true,
+        true,
+        None,
+        now,
+    );
+    recovery.pto_count = 3;
+    assert_eq!(recovery.bytes_in_flight, 2400);
+    assert!(recovery.loss_detection_timeout(false, false, true).is_some());
+
+    recovery.reset_for_retry(Duration::from_millis(75), now);
+
+    assert_eq!(recovery.tracked_sent_pns(super::PacketSpace::Initial), Vec::<u64>::new());
+    assert_eq!(recovery.tracked_sent_pns(super::PacketSpace::Application), Vec::<u64>::new());
+    assert_eq!(recovery.bytes_in_flight, 0);
+    assert_eq!(recovery.pto_count, 0);
+    assert_eq!(recovery.loss_detection_timeout(false, false, true), None);
+    assert_eq!(recovery.cwnd, 12_000);
+    assert_eq!(recovery.rtt, Duration::from_millis(75));
+    assert_eq!(recovery.get_batch_size(), 32);
+    assert_eq!(recovery.pto_deadline_growth_cap(), 5);
+    assert!(!recovery.hystart);
+    assert!(!recovery.pacing);
+    assert!(recovery.stealth_mode_active());
+    assert_eq!(lost.load(Ordering::Relaxed), 0);
+    recovery.on_packet_sent_in_space(super::PacketSpace::Initial, 9, 1200, true, true, None, now);
+    assert_eq!(sent.load(Ordering::Relaxed), 3);
+    let old_ack = recovery.on_ack_received(
+        super::PacketSpace::Initial,
+        &[(8, 9)],
+        Duration::ZERO,
+        false,
+        false,
+        now + Duration::from_millis(1),
+    );
+    assert!(old_ack.newly_acked.is_empty());
+    assert!(recovery.tracks_sent_packet(super::PacketSpace::Initial, 9));
+    let new_ack = recovery.on_ack_received(
+        super::PacketSpace::Initial,
+        &[(9, 10)],
+        Duration::ZERO,
+        false,
+        false,
+        now + Duration::from_millis(2),
+    );
+    assert_eq!(new_ack.newly_acked.as_slice(), &[(9, 1200)]);
+    assert!(!recovery.tracks_sent_packet(super::PacketSpace::Initial, 9));
+}
+
+#[test]
+fn retry_reset_preserves_each_configured_congestion_algorithm() {
+    for algorithm in [
+        super::cc::Algorithm::Reno,
+        super::cc::Algorithm::Cubic,
+        super::cc::Algorithm::Bbr2,
+        super::cc::Algorithm::Bbr3,
+    ] {
+        let mut recovery = Recovery::with_algorithm(12_000, 1200, algorithm);
+        let now = Instant::now();
+        recovery.on_packet_sent_in_space(
+            super::PacketSpace::Initial,
+            0,
+            1200,
+            true,
+            true,
+            None,
+            now,
+        );
+        recovery.reset_for_retry(Duration::from_millis(100), now);
+        assert_eq!(recovery.cwnd, 12_000, "{algorithm:?}");
+        assert_eq!(recovery.bytes_in_flight, 0, "{algorithm:?}");
+        assert!(matches!(
+            (algorithm, &recovery.cc),
+            (super::cc::Algorithm::Reno, super::cc::CcImpl::Reno(_))
+                | (super::cc::Algorithm::Cubic, super::cc::CcImpl::Cubic(_))
+                | (super::cc::Algorithm::Bbr2, super::cc::CcImpl::Bbr2(_))
+                | (super::cc::Algorithm::Bbr3, super::cc::CcImpl::Bbr3(_))
+        ));
+    }
+}
+
+#[test]
 fn test_rtt_ewma_smoothing() {
     let mut recovery = Recovery::new(12_000, 1200);
     // First sample initializes

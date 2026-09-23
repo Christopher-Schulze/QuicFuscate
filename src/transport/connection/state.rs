@@ -27,6 +27,8 @@ pub struct Connection {
     pub(super) is_closed: bool,
     pub(super) is_draining: bool,
     pub(super) received_non_vn_packet: bool,
+    /// An accepted Retry permanently disables 0-RTT for this connection attempt.
+    pub(super) retry_accepted: bool,
     /// Stream storage. HashMap provides O(1) amortized lookup but poor cache locality
     /// at high stream counts (>10k). Hash table entries scatter across memory, causing
     /// L1/L2 cache misses during iteration and lookup. Consider replacing with a slot map
@@ -64,9 +66,8 @@ pub struct Connection {
     pub(super) pkt_spaces: [pnspace::PktNumSpace; 3],
     /// Next outbound packet number for each QUIC packet-number space.
     ///
-    /// The connection owner never resets these counters during a 1-RTT key update. A
-    /// reset is valid only when a new packet-number/key epoch is installed, such as
-    /// connection/version restart or Retry Initial-key derivation.
+    /// The connection owner never resets these counters during a 1-RTT key update or
+    /// after Retry. Only a new connection attempt after Version Negotiation resets them.
     pub(super) next_send_pn_by_space: [u64; 3],
     // Current key phase (short-header KEY_PHASE bit); key updates keep packet numbers.
     pub(super) key_phase: bool,

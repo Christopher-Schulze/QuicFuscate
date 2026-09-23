@@ -130,7 +130,23 @@ impl Connection {
                     };
                     (t, self.pkt_spaces[idx].largest_recv.unwrap_or(0), Some((hdr_native, pn_off)))
                 }
-                Err(_) => (PacketType::Short, 0, None),
+                Err(_) => {
+                    // A truncated Retry cannot pass header parsing, but RFC 9000
+                    // still requires discarding it without changing the connection.
+                    if buf.len() >= 5 && buf[0] & packet::FORM_BIT != 0 {
+                        let version = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                        if matches!(
+                            crate::transport::version::packet_type_from_long_header(
+                                version,
+                                buf[0] & packet::TYPE_MASK,
+                            ),
+                            Ok(PacketType::Retry)
+                        ) {
+                            return Ok(buf.len());
+                        }
+                    }
+                    (PacketType::Short, 0, None)
+                }
             };
 
         if pre_ty == PacketType::VersionNegotiation {
@@ -142,10 +158,16 @@ impl Connection {
 
         // Retry verification (no payload decrypt)
         if let PacketType::Retry = pre_ty {
-            let retry_version_matches = pre_parsed_hdr
-                .as_ref()
-                .is_some_and(|(header, _)| header.version == self.version_negotiation.chosen);
-            if self.is_server || !retry_version_matches {
+            let Some((retry_hdr, _)) = pre_parsed_hdr.take() else {
+                return Ok(buf.len());
+            };
+            if self.is_server
+                || self.received_non_vn_packet
+                || retry_hdr.version != self.version_negotiation.chosen
+                || retry_hdr.dcid != self.scid.as_ref()
+                || retry_hdr.scid == self.initial_dcid.as_ref()
+                || retry_hdr.token.as_ref().is_none_or(Vec::is_empty)
+            {
                 return Ok(buf.len());
             }
             let odcid = if !self.initial_dcid.is_empty() {
@@ -153,40 +175,39 @@ impl Connection {
             } else {
                 self.dcid.as_ref()
             };
-            if let Err(e) = packet::verify_retry_tag(buf, odcid, self.config.version) {
-                self.record_local_error(e);
-                if let Some(err) = self.local_error.clone() {
-                    return Err(err);
-                }
-                return Err(ConnectionError::InvalidState);
+            if packet::verify_retry_tag(buf, odcid, self.config.version).is_err() {
+                return Ok(buf.len());
             }
 
             // Client-side Retry handling: adopt token/DCID and re-derive Initial keys.
-            // Reuse the pre-parsed header instead of re-parsing (TODO-391).
-            if !self.is_server {
-                let Some((retry_hdr, _)) = pre_parsed_hdr.take() else {
-                    return Ok(buf.len());
-                };
-                if !retry_hdr.scid.is_empty() {
-                    self.set_destination_cid(ConnectionId::from_ref(&retry_hdr.scid));
-                }
-                self.config.initial_token = retry_hdr.token;
-                let (client_secret, server_secret) =
-                    packet::derive_initial_secrets(self.dcid.as_ref(), self.config.version)?;
-                let (read_secret, write_secret) =
-                    (server_secret.as_slice(), client_secret.as_slice());
-                let mut crypto = self.crypto.write();
-                crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version)?;
-                crypto.install_hp_initial(read_secret, write_secret, self.config.version)?;
-                drop(crypto);
-                self.refresh_short_header_tag_reserve();
-                self.next_send_pn_by_space[0] = 0;
-                self.pkt_spaces[0] = pnspace::PktNumSpace::new_with_clock(self.clock.clone());
-                if let Some(provider) = &mut self.tls_provider {
-                    provider.requeue_all_crypto(qf_transport_types::QuicEncryptionLevel::Initial);
-                }
-            }
+            let (client_secret, server_secret) =
+                packet::derive_initial_secrets(&retry_hdr.scid, self.config.version)?;
+            let (read_secret, write_secret) = (server_secret.as_slice(), client_secret.as_slice());
+            let mut crypto = self.crypto.write();
+            crypto.install_aes_gcm_initial(read_secret, write_secret, self.config.version)?;
+            crypto.install_hp_initial(read_secret, write_secret, self.config.version)?;
+            drop(crypto);
+            self.finish_zero_rtt(false);
+            self.recovery.reset_for_retry(
+                Duration::from_millis(self.config.initial_rtt_ms),
+                self.clock.now(),
+            );
+            self.bytes_in_flight = self.recovery.bytes_in_flight;
+            self.bytes_in_flight_started = None;
+            self.cwnd = self.recovery.cwnd;
+            self.rtt = self.recovery.rtt;
+            self.timeout_count = 0;
+            self.pending_probe_spaces.clear();
+            self.pmtu_probe_pn = None;
+            self.pmtu_above_floor_pns.clear();
+            self.stream_transmission_by_pn.clear();
+            self.lost_stream_transmission_by_pn.clear();
+            self.set_destination_cid(ConnectionId::from_ref(&retry_hdr.scid));
+            self.config.initial_token = retry_hdr.token;
+            self.refresh_short_header_tag_reserve();
+            self.requeue_all_crypto(recovery::PacketSpace::Initial);
             // For Retry we do not parse further.
+            self.retry_accepted = true;
             self.received_non_vn_packet = true;
             self.stats.recv += 1;
             self.stats.recv_bytes += buf.len() as u64;

@@ -219,6 +219,7 @@ impl Connection {
     ) -> Result<usize, crate::error::ConnectionError> {
         if self.is_server
             || !self.config.enable_early_data
+            || self.retry_accepted
             || self.tls_handshake_complete()
             || self.is_closed
             || stream_id & 0x3 != 0

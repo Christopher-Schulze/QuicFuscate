@@ -1706,6 +1706,24 @@ impl Recovery {
         self.spaces[space.index()].sent.contains(pn)
     }
 
+    /// Restart loss and congestion state after an authenticated QUIC Retry.
+    /// Packet numbers and CRYPTO data belong to the connection and are not reset here.
+    /// The existing CC owner retains its algorithm, stealth wrapper, configuration,
+    /// and FEC callbacks while its measurements restart at the initial window.
+    pub fn reset_for_retry(&mut self, initial_rtt: Duration, now: Instant) {
+        self.discard_all_spaces();
+        self.on_path_change(
+            PathChangeKind::NewAddress,
+            initial_rtt,
+            MigrationPolicy::default(),
+            now,
+        );
+        self.acked_scratch.clear();
+        self.lost_scratch.clear();
+        self.lost_pn_scratch.clear();
+        self.acked_times_scratch.clear();
+    }
+
     /// Discards a packet number space (RFC 9002 sec. 6.2.2 key-discard rule): the
     /// space's packets leave bytes-in-flight without a loss response, and all
     /// loss/PTO timers for the space are reset.

@@ -287,7 +287,10 @@ impl Connection {
         stream.requeue_crypto(offset, length)
     }
 
-    pub(super) fn requeue_all_crypto(&mut self, space: recovery::PacketSpace) {
+    pub(in crate::transport::connection) fn requeue_all_crypto(
+        &mut self,
+        space: recovery::PacketSpace,
+    ) {
         if let Some(provider) = &mut self.tls_provider {
             provider.requeue_all_crypto(Self::encryption_level_for_space(space));
             return;
@@ -368,6 +371,7 @@ impl Connection {
         self.handshake_done_queued = false;
         self.is_closed = false;
         self.is_draining = false;
+        self.retry_accepted = false;
         self.local_error = None;
         self.remote_error = None;
         self.pkt_spaces = [

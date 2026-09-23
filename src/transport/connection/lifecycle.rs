@@ -215,6 +215,7 @@ impl Connection {
             is_closed: false,
             is_draining: false,
             received_non_vn_packet: false,
+            retry_accepted: false,
             streams: HashMap::new(),
             local_addr: local,
             peer_addr: peer,
