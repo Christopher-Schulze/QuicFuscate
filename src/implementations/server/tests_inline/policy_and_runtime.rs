@@ -250,6 +250,74 @@ fn auth_policy_rejects_before_qkey_registry_lookup() {
 }
 
 #[test]
+fn tls_construction_failure_abandons_server_auth_attempt_once() {
+    use crate::implementations::server::limits::{
+        AuthAdmission, AuthPolicyConfig, AuthRateLimiter,
+    };
+    use crate::transport::packet::{format_header, Header};
+
+    let token_hex = "a".repeat(64);
+    let qkey = qf_engine_types::generate(
+        &qf_engine_types::QKeyConfig::new("127.0.0.1:4433", "example.com")
+            .with_stealth("dynamic")
+            .with_fec("auto")
+            .with_token(&token_hex),
+    );
+    let qkey_id = qkey_registry::qkey_id(&qkey);
+    let mut registry = QKeyRegistry::new_in_memory(4, None);
+    registry.insert(qkey, token_hex.into(), None).expect("QKey insert");
+    let registry = std::sync::Mutex::new(registry);
+    let header = Header {
+        ty: crate::transport::PacketType::Initial,
+        version: crate::transport::PROTOCOL_VERSION,
+        dcid: b"original-dcid".to_vec(),
+        scid: b"client-scid".to_vec(),
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: Some(qkey_id.into_bytes()),
+        versions: None,
+        key_phase: false,
+    };
+    let mut packet = [0u8; 256];
+    let packet_len = format_header(&header, &mut packet).expect("Initial header");
+    let metrics = Metrics::new();
+    let stealth_config = Arc::new(std::sync::Mutex::new(StealthConfig::default()));
+    let fec_config = Arc::new(std::sync::Mutex::new(FecConfig::default()));
+    let optimize_config = Arc::new(std::sync::Mutex::new(OptimizeConfig::default()));
+    let mut transport =
+        crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+    transport.set_max_send_udp_payload_size(1199);
+    let runtime_policy_generation = RuntimePolicyGeneration::new();
+    let auth_policy =
+        AuthPolicyConfig { max_pending_attempts_per_ip: 1, ..AuthPolicyConfig::default() };
+    let auth_rate_limiter = Arc::new(std::sync::Mutex::new(AuthRateLimiter::new(auth_policy)));
+    let remote_addr: SocketAddr = "192.0.2.10:54321".parse().unwrap();
+    let result = build_live_server_client_init(LiveClientBuildRequest {
+        packet: &packet[..packet_len],
+        local_addr: "127.0.0.1:4433".parse().unwrap(),
+        remote_addr,
+        qkey_registry: &registry,
+        revocation_manager: &crate::implementations::server::revocation::RevocationManager::new(),
+        metrics: &metrics,
+        stealth_config: &stealth_config,
+        fec_cfg_shared: &fec_config,
+        opt_params_shared: &optimize_config,
+        transport_config: &transport,
+        runtime_policy_generation: &runtime_policy_generation,
+        stealth_runtime: None,
+        auth_rate_limiter: Arc::clone(&auth_rate_limiter),
+        retry_token_manager: None,
+        clock: crate::time_source::ProtocolClock::default(),
+        crypto_config: &qf_crypto::CryptoConfig::default(),
+    });
+    assert!(result.is_none());
+    assert_eq!(metrics.auth_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.auth_abandoned.load(Ordering::Relaxed), 1);
+    let mut limiter = auth_rate_limiter.lock().unwrap_or_else(|error| error.into_inner());
+    assert!(matches!(limiter.begin(remote_addr.ip()), AuthAdmission::Allowed(_)));
+}
+
+#[test]
 fn test_enforce_qkey_auth_timeouts_updates_exported_auth_failed_metrics() {
     let mut live_state = LiveServerState::try_new(ServerConfig::default())
         .unwrap_or_else(|error| panic!("live server state construction failed: {error}"));

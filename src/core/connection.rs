@@ -307,7 +307,7 @@ impl QuicFuscateConnection {
         qkey_auth_token_hex: Option<qf_engine_types::QKeyToken>,
         qkey_initial_token: Option<Vec<u8>>,
         use_utls: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_client_with_runtime(
             server_name,
             local_addr,
@@ -339,7 +339,7 @@ impl QuicFuscateConnection {
         use_utls: bool,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         http_authority: Option<&str>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_client_with_runtime_and_clock(
             server_name,
             local_addr,
@@ -373,7 +373,7 @@ impl QuicFuscateConnection {
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         http_authority: Option<&str>,
         clock: crate::time_source::ProtocolClock,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         let crypto_manager = Arc::new(CryptoManager::new());
         let optimization_manager = Arc::new(OptimizationManager::from_cfg(opt_cfg));
         let stealth_manager = Arc::new(StealthManager::new_with_runtime_owner_and_clock(
@@ -414,14 +414,13 @@ impl QuicFuscateConnection {
             remote_addr,
             &mut config,
             clock.clone(),
-        )
-        .map_err(|e| format!("Failed to create QUIC connection: {}", e))?;
+        )?;
 
         // TODO-1052: one shared wire budget for repairs, padding, and cover.
         // Modes without stealth padding install no ledger at all.
         conn.set_wire_ledger(stealth_manager.build_wire_ledger(clock.now()));
 
-        Ok(Self::new(ConnectionParams {
+        Self::new(ConnectionParams {
             clock,
             conn: Box::new(conn),
             local_addr,
@@ -436,7 +435,7 @@ impl QuicFuscateConnection {
             private_packet_protection_mode: qf_crypto::PacketProtectionMode::Standard,
             private_packet_protection_family: None,
             private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
-        }))
+        })
     }
 
     /// Creates a new server-side connection accepted from a remote client.
@@ -450,7 +449,7 @@ impl QuicFuscateConnection {
         stealth_config: StealthConfig,
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_server_with_runtime(
             scid,
             initial_key_dcid,
@@ -476,7 +475,7 @@ impl QuicFuscateConnection {
         fec_config: FecConfig,
         opt_cfg: OptimizeConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_server_with_runtime_and_clock(
             scid,
             initial_key_dcid,
@@ -504,7 +503,7 @@ impl QuicFuscateConnection {
         opt_cfg: OptimizeConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         clock: crate::time_source::ProtocolClock,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         Self::new_server_with_runtime_and_clock_and_original(
             scid,
             initial_key_dcid,
@@ -537,19 +536,25 @@ impl QuicFuscateConnection {
         opt_cfg: OptimizeConfig,
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         clock: crate::time_source::ProtocolClock,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::ConnectionError> {
         if initial_key_dcid.is_none_or(crate::transport::ConnectionId::is_empty) {
-            return Err("server Initial destination connection ID is unavailable".to_string());
+            return Err(crate::error::ConnectionError::TlsError(
+                "server Initial destination connection ID is unavailable".to_string(),
+            ));
         }
         if original_dcid.is_some_and(crate::transport::ConnectionId::is_empty) {
-            return Err("server original destination connection ID is unavailable".to_string());
+            return Err(crate::error::ConnectionError::TlsError(
+                "server original destination connection ID is unavailable".to_string(),
+            ));
         }
         if retry_source_cid.is_some()
             && (retry_source_cid.is_some_and(crate::transport::ConnectionId::is_empty)
                 || original_dcid.is_none()
                 || retry_source_cid != initial_key_dcid)
         {
-            return Err("validated Retry connection ID history is incomplete".to_string());
+            return Err(crate::error::ConnectionError::TlsError(
+                "validated Retry connection ID history is incomplete".to_string(),
+            ));
         }
         let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
             || matches!(stealth_config.mode, StealthMode::Off)
@@ -581,8 +586,7 @@ impl QuicFuscateConnection {
             remote_addr,
             config,
             clock.clone(),
-        )
-        .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
+        )?;
 
         if let Some(retry_source_cid) = retry_source_cid {
             conn.set_retry_source_cid(*retry_source_cid);
@@ -593,7 +597,7 @@ impl QuicFuscateConnection {
         // bytes come out of one account as well.
         conn.set_wire_ledger(stealth_manager.build_wire_ledger(clock.now()));
 
-        Ok(Self::new(ConnectionParams {
+        Self::new(ConnectionParams {
             clock,
             conn: Box::new(conn),
             local_addr,
@@ -611,10 +615,10 @@ impl QuicFuscateConnection {
             private_packet_protection_mode: qf_crypto::PacketProtectionMode::Standard,
             private_packet_protection_family: None,
             private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
-        }))
+        })
     }
 
-    fn new(params: ConnectionParams) -> Self {
+    fn new(params: ConnectionParams) -> Result<Self, crate::error::ConnectionError> {
         let clock = params.clock.clone();
         let environment = params.stealth_manager.environment_snapshot();
         let obs = FecTransportObserver::new_with_snapshot(&environment);
@@ -738,14 +742,10 @@ impl QuicFuscateConnection {
         // Enable and configure RealTLS (always on, including Performance mode)
         // Map stealth fingerprint to TLS profile and apply the connection SNI
         s.conn.set_environment_snapshot(environment.clone());
-        if let Err(e) = s.conn.enable_tls("unified") {
-            warn!("Failed to enable unified TLS provider: {:?}", e);
-        }
+        s.conn.enable_tls("unified")?;
         let tls_prof = s.stealth_manager.runtime_tls_profile(params.sni_host.as_deref());
         let sni_str = tls_prof.sni.as_deref().unwrap_or(s.host_header.as_str());
-        if let Err(e) = s.conn.configure_tls(&tls_prof, sni_str) {
-            warn!("Failed to configure TLS profile for SNI {}: {:?}", sni_str, e);
-        }
+        s.conn.configure_tls(&tls_prof, sni_str)?;
 
         // Initialize DeepIntegrationOrchestrator if feature enabled
         #[cfg(feature = "orchestrator")]
@@ -768,7 +768,7 @@ impl QuicFuscateConnection {
             }
         }
 
-        s
+        Ok(s)
     }
 
     #[cfg(feature = "orchestrator")]

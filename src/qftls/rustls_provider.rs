@@ -1483,9 +1483,12 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
                 }
             }
         }
-        if self.peer_transport_params.is_none() {
-            self.peer_transport_params =
-                self.connection.quic_transport_parameters().map(<[u8]>::to_vec);
+        if !self.handshake_complete || self.peer_transport_params.is_none() {
+            if let Some(parameters) = self.connection.quic_transport_parameters() {
+                // A resumption ticket can expose cached parameters before this handshake.
+                // Capture the current peer block on completion, then stop copying on every poll.
+                self.peer_transport_params = Some(parameters.to_vec());
+            }
         }
         let have_1rtt = installer.has_one_rtt_keys();
         if !self.handshake_complete && !self.connection.is_handshaking() && have_1rtt {

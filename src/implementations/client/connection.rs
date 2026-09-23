@@ -213,7 +213,7 @@ impl ClientConnection {
             None,
             clock.clone(),
         )
-        .map_err(EngineError::Connection)?;
+        .map_err(|error| EngineError::Connection(error.to_string()))?;
         let (mode, family) =
             qf_crypto::payload_protection_pin(crate::engine::engine_mode_uses_libaegis(
                 config.stealth.mode,

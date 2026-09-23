@@ -225,7 +225,7 @@ impl Connection {
         // handshake completion and key installation are not dependent on receiving more CRYPTO.
         self.poll_tls_and_validate_versions()?;
 
-        let handshake_incomplete = self.tls_provider.is_some() && !self.tls_handshake_complete();
+        let handshake_incomplete = !self.tls_handshake_complete();
 
         // Always flush any pending Initial/Handshake CRYPTO before falling through to the
         // 1-RTT path, even if rustls has just reported the handshake complete. The client's

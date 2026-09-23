@@ -303,6 +303,7 @@ fn zero_rtt_sends_only_explicit_safe_stream_data() {
 
     client.finish_zero_rtt(false);
     client.tls_provider = None;
+    client.test_only_transport_fixture = true;
     let one_rtt_secret = [0xA7u8; 32];
     client
         .crypto

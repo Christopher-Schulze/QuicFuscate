@@ -43,6 +43,13 @@ where duplication is proven — never cosmetic churn.
   protocol/carrier differences. Delete a variant only after a behavior and
   performance comparison proves the surviving path subsumes it; route any
   behavioral fix to its owning task instead of bundling it into a refactor.
+- Rust 1.98 strict all-target `cargo clippy --all-targets --features rust-tests
+  -- -D warnings` currently fails on `manual_range_patterns` at
+  `scripts/tests/rust/rt-qftls-profiles.rs:10`, `manual_is_multiple_of` at
+  `src/brain.rs:868`, and `identity_op` at
+  `src/stealth/manager/coverage_tests.rs:183`. Update these three independent
+  test expressions without changing their assertions or production behavior;
+  rerun the exact command and retain the existing green root-library gate.
 
 ## Non-goals
 

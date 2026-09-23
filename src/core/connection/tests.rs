@@ -42,6 +42,7 @@ fn wrap_test_connection(
         private_packet_protection_family: None,
         private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
     })
+    .expect("test core TLS connection")
 }
 
 #[test]
@@ -78,6 +79,86 @@ fn server_constructor_rejects_missing_or_inconsistent_handshake_cids() {
         )
         .is_err());
     }
+}
+
+#[test]
+fn invalid_tls_provider_budget_rejects_client_and_server_construction() {
+    let local = "127.0.0.1:29101".parse().unwrap();
+    let peer = "127.0.0.1:29102".parse().unwrap();
+    let runtime_owner = Arc::new(
+        StealthRuntimeOwner::new(crate::reality::RealityConfig::default())
+            .expect("test stealth runtime owner"),
+    );
+    let mut client_config =
+        crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+    client_config.set_max_send_udp_payload_size(1199);
+    assert!(matches!(
+        QuicFuscateConnection::new_client_with_runtime(
+            "localhost",
+            local,
+            peer,
+            client_config,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            None,
+            None,
+            false,
+            Some(Arc::clone(&runtime_owner)),
+            None,
+        ),
+        Err(crate::error::ConnectionError::InvalidState)
+    ));
+    assert_eq!(Arc::strong_count(&runtime_owner), 1);
+
+    let mut server_config =
+        crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+    server_config.set_max_send_udp_payload_size(1199);
+    let scid = crate::transport::ConnectionId::from_ref(b"server-cid");
+    let original = crate::transport::ConnectionId::from_ref(b"original-cid");
+    assert!(matches!(
+        QuicFuscateConnection::new_server_with_runtime_and_clock_and_original(
+            &scid,
+            Some(&original),
+            Some(&original),
+            None,
+            peer,
+            local,
+            &mut server_config,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            Some(Arc::clone(&runtime_owner)),
+            crate::time_source::ProtocolClock::default(),
+        ),
+        Err(crate::error::ConnectionError::InvalidState)
+    ));
+    assert_eq!(Arc::strong_count(&runtime_owner), 1);
+}
+
+#[test]
+fn invalid_ech_configuration_rejects_client_after_provider_creation() {
+    let local = "127.0.0.1:29101".parse().unwrap();
+    let peer = "127.0.0.1:29102".parse().unwrap();
+    let mut config =
+        crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+    config.ech_config_list = Some(vec![0, 1, 2]);
+    assert!(matches!(
+        QuicFuscateConnection::new_client(
+            "localhost",
+            local,
+            peer,
+            config,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            None,
+            None,
+            false,
+        ),
+        Err(crate::error::ConnectionError::TlsError(message))
+            if message.contains("ECHConfigList rejected")
+    ));
 }
 
 fn test_tls_connection_pair(
@@ -337,6 +418,7 @@ fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
             private_packet_protection_family: None,
             private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
         })
+        .expect("test core TLS connection")
     };
 
     let mut server_config = StealthConfig::stealth();
@@ -2160,7 +2242,8 @@ fn test_connection_pair_with(
         private_packet_protection_mode: qf_crypto::PacketProtectionMode::Auto,
         private_packet_protection_family: None,
         private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
-    });
+    })
+    .expect("test core TLS connection");
     (connection, server)
 }
 

@@ -365,7 +365,7 @@ pub fn create_live_server_connection(
     fec_config: crate::fec::FecConfig,
     opt_params: crate::optimize::OptimizeConfig,
     initial_key_dcid: &crate::transport::ConnectionId,
-) -> Result<QuicFuscateConnection, String> {
+) -> Result<QuicFuscateConnection, crate::error::ConnectionError> {
     create_live_server_connection_with_runtime(
         local_addr,
         remote_addr,
@@ -388,7 +388,7 @@ pub fn create_live_server_connection_with_runtime(
     opt_params: crate::optimize::OptimizeConfig,
     initial_key_dcid: &crate::transport::ConnectionId,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
-) -> Result<QuicFuscateConnection, String> {
+) -> Result<QuicFuscateConnection, crate::error::ConnectionError> {
     create_live_server_connection_with_runtime_and_clock(
         local_addr,
         remote_addr,
@@ -413,7 +413,7 @@ pub fn create_live_server_connection_with_runtime_and_clock(
     initial_key_dcid: &crate::transport::ConnectionId,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     clock: crate::time_source::ProtocolClock,
-) -> Result<QuicFuscateConnection, String> {
+) -> Result<QuicFuscateConnection, crate::error::ConnectionError> {
     create_live_server_connection_with_runtime_and_clock_and_original(
         local_addr,
         remote_addr,
@@ -442,7 +442,7 @@ pub fn create_live_server_connection_with_runtime_and_clock_and_original(
     retry_source_cid: Option<&crate::transport::ConnectionId>,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     clock: crate::time_source::ProtocolClock,
-) -> Result<QuicFuscateConnection, String> {
+) -> Result<QuicFuscateConnection, crate::error::ConnectionError> {
     let mut scid_bytes = [0u8; crate::transport::MAX_CONN_ID_LEN];
     crate::transport::rand::rand_bytes(&mut scid_bytes);
     let scid = crate::transport::ConnectionId::from_ref(&scid_bytes);

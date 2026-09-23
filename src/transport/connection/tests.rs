@@ -101,6 +101,21 @@ fn authenticated_cid_parameters_match_presence_values_and_retry_history() {
 }
 
 #[test]
+fn providerless_transport_never_reports_authenticated_readiness() {
+    let mut connection = make_conn();
+    connection.is_established = true;
+    assert!(!connection.tls_handshake_complete());
+    assert!(!connection.is_established());
+    assert_eq!(connection.do_tls_handshake(None), Err(ConnectionError::InvalidState));
+
+    let mut pair = super::bench_paired_1rtt_connections();
+    pair.client.test_only_transport_fixture = false;
+    pair.client.stream_send(0, b"application data", true).unwrap();
+    let mut packet = [0u8; 2048];
+    assert!(matches!(pair.client.send(&mut packet), Err(ConnectionError::Done)));
+}
+
+#[test]
 fn invalid_authenticated_cid_parameters_queue_one_transport_parameter_close() {
     let valid = cid_transport_parameters(b"server-scid", Some(b"original-cid"), None);
     let mut duplicate = valid.clone();
@@ -407,11 +422,29 @@ fn peer_transport_limit_clamps_datagram_packetization() {
 
     assert_eq!(connection.dgram_send_max_size, 1500);
     connection
-        .apply_peer_transport_limits(&max_udp_payload_transport_parameter(1413))
+        .apply_peer_transport_limits(&max_udp_payload_transport_parameter(1413), true)
         .expect("valid peer max_udp_payload_size");
     assert_eq!(connection.dgram_send_max_size, 1413);
     assert_eq!(connection.dgram_send(&vec![0u8; 1413]), Ok(()));
     assert_eq!(connection.dgram_send(&vec![0u8; 1414]), Err(ConnectionError::InvalidState));
+}
+
+#[test]
+fn authenticated_udp_limit_replaces_remembered_resumption_limit() {
+    let mut config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    config.set_max_send_udp_payload_size(1500);
+    let mut connection = Connection::new_with_role(b"client-scid", local(), peer(), config, false)
+        .expect("valid test connection configuration");
+    connection
+        .apply_peer_transport_limits(&max_udp_payload_transport_parameter(1213), false)
+        .expect("remembered 0-RTT limit");
+    assert_eq!(connection.dgram_send_max_size, 1213);
+    connection
+        .apply_peer_transport_limits(&max_udp_payload_transport_parameter(1490), true)
+        .expect("authenticated current limit");
+    assert_eq!(connection.dgram_send_max_size, 1490);
+    connection.apply_peer_transport_limits(&[], true).expect("default peer limit");
+    assert_eq!(connection.dgram_send_max_size, 1500);
 }
 
 #[test]
@@ -420,7 +453,7 @@ fn peer_transport_limit_rejects_malformed_duplicate_and_out_of_range_parameters(
     let initial_max = connection.dgram_send_max_size;
 
     assert_eq!(
-        connection.apply_peer_transport_limits(&[0x03, 0x02, 0x40]),
+        connection.apply_peer_transport_limits(&[0x03, 0x02, 0x40], true),
         Err(ConnectionError::InvalidPacket)
     );
     assert_eq!(connection.dgram_send_max_size, initial_max);
@@ -428,13 +461,13 @@ fn peer_transport_limit_rejects_malformed_duplicate_and_out_of_range_parameters(
     let mut duplicate = max_udp_payload_transport_parameter(1413);
     duplicate.extend(max_udp_payload_transport_parameter(1414));
     assert_eq!(
-        connection.apply_peer_transport_limits(&duplicate),
+        connection.apply_peer_transport_limits(&duplicate, true),
         Err(ConnectionError::InvalidPacket)
     );
     assert_eq!(connection.dgram_send_max_size, initial_max);
 
     assert_eq!(
-        connection.apply_peer_transport_limits(&max_udp_payload_transport_parameter(1199)),
+        connection.apply_peer_transport_limits(&max_udp_payload_transport_parameter(1199), true),
         Err(ConnectionError::InvalidPacket)
     );
     assert_eq!(connection.dgram_send_max_size, initial_max);
@@ -1929,6 +1962,7 @@ fn handshake_done_control_frames_coalesce() {
 #[test]
 fn post_handshake_envelope_waits_for_pending_handshake_flight() {
     let mut c = make_conn();
+    c.test_only_transport_fixture = true;
     c.is_established = true;
     c.crypto.write().crypto_handshake.send(b"client-finished").expect("queue handshake flight");
 

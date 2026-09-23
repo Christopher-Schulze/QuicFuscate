@@ -805,6 +805,78 @@ fn rustls_ticket_resumption_is_reported_without_0rtt_keys() {
 }
 
 #[test]
+fn resumed_quic_parameters_replace_cached_connection_ids() {
+    use qf_stealth::transport_params::HandshakeConnectionIds;
+
+    static TEST_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let mut profile = TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some(format!(
+        "cid-resumption-{}-{}.example",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    let clock = crate::time_source::ProtocolClock::default();
+    let provider = |is_server, ids: HandshakeConnectionIds| {
+        RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+            is_server,
+            false,
+            PROTOCOL_VERSION,
+            &[],
+            None,
+            &environment,
+            &clock,
+            1350,
+            &ids,
+            None,
+            false,
+        )
+        .expect("CID resumption provider")
+    };
+    let mut first_client = provider(false, HandshakeConnectionIds::client(b"client-first"));
+    let mut first_server =
+        provider(true, HandshakeConnectionIds::server(b"server-first", b"original-first", None));
+    first_client.configure(&profile).expect("first client profile");
+    let first_parameters = first_server.get_quic_transport_params();
+    let first_client_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let first_server_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    drive_provider_handshake(
+        &mut first_client,
+        &mut first_server,
+        &first_client_keys,
+        &first_server_keys,
+    );
+
+    let mut resumed_client = provider(false, HandshakeConnectionIds::client(b"client-second"));
+    let mut resumed_server =
+        provider(true, HandshakeConnectionIds::server(b"server-second", b"original-second", None));
+    resumed_client.configure(&profile).expect("resumed client profile");
+    let current_parameters = resumed_server.get_quic_transport_params();
+    let resumed_client_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let resumed_server_keys =
+        parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    resumed_client
+        .poll_secrets_and_install(&resumed_client_keys)
+        .expect("poll cached resumption parameters");
+    assert!(!resumed_client.handshake_complete());
+    assert_eq!(resumed_client.peer_quic_transport_params(), Some(first_parameters));
+    assert_ne!(resumed_client.peer_quic_transport_params(), Some(current_parameters.clone()));
+
+    drive_provider_handshake(
+        &mut resumed_client,
+        &mut resumed_server,
+        &resumed_client_keys,
+        &resumed_server_keys,
+    );
+    assert!(resumed_client.handshake_resumed());
+    assert_eq!(resumed_client.peer_quic_transport_params(), Some(current_parameters));
+}
+
+#[test]
 fn rustls_quic_0rtt_resumption_installs_directional_standard_keys() {
     use crate::crypto::aead::{AeadOpen, AeadSeal};
 

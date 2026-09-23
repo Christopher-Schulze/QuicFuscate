@@ -95,6 +95,8 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
 
     client.is_established = true;
     server.is_established = true;
+    client.test_only_transport_fixture = true;
+    server.test_only_transport_fixture = true;
     client.stats.recv = 1;
     server.stats.recv = 1;
     client.stats.sent = 1;

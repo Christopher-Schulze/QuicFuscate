@@ -225,6 +225,8 @@ impl Connection {
             retry_source_cid: None,
             peer_initial_scid: None,
             peer_cids_validated: false,
+            #[cfg(any(test, feature = "benches"))]
+            test_only_transport_fixture: false,
             streams: HashMap::new(),
             local_addr: local,
             peer_addr: peer,
@@ -1330,8 +1332,11 @@ impl Connection {
                 && self.version_negotiation.peer_information_validated
                 && self.peer_cids_validated)
         } else {
-            // No TLS provider configured, consider handshake complete
-            Ok(true)
+            #[cfg(any(test, feature = "benches"))]
+            if self.test_only_transport_fixture {
+                return Ok(true);
+            }
+            Err(crate::error::ConnectionError::InvalidState)
         }
     }
 
@@ -1345,7 +1350,13 @@ impl Connection {
                     && self.version_negotiation.peer_information_validated
                     && self.peer_cids_validated
             })
-            .unwrap_or(true)
+            .unwrap_or_else(|| {
+                #[cfg(any(test, feature = "benches"))]
+                if self.test_only_transport_fixture {
+                    return true;
+                }
+                false
+            })
     }
 
     /// Enable HTTP/3 connection bound to this transport (idempotent)

@@ -613,7 +613,7 @@
 - Detail: none — standing rule, enforced per commit.
 
 ### TODO-1079 - Refactoring and code-quality cluster
-- OPEN. Cluster parent. Structural improvements only where they pay: module clarity, ownership boundaries, feature-gate correctness (TODO-1070 class of bugs), dead-path removal, shared-abstraction extraction. Hard gate: a refactor lands only with the behavior test suite green and a TODO-1071 baseline showing no dataplane regression. No cosmetic rewrites.
+- OPEN. Cluster parent. Structural improvements only where they pay: module clarity, ownership boundaries, feature-gate correctness (TODO-1070 class of bugs), dead-path removal, shared-abstraction extraction. Rust 1.98 strict all-target Clippy additionally reports three pre-existing test-source diagnostics, recorded in the detail file. Hard gate: a refactor lands only with the behavior test suite green and a TODO-1071 baseline showing no dataplane regression. No cosmetic rewrites.
 - Detail: `docs/todo/todo-1079-refactoring-code-quality.md`
 
 ### TODO-1080 - Reality probe fallback correctness
@@ -777,12 +777,12 @@
 - Detail: `docs/todo/done/todo-1119-archive-completed-task-details.md`
 
 ### TODO-1120 - Bind QUIC handshake transport parameters to observed connection IDs and Retry
-- DONE. The client adopts the first server Initial SCID after Retry and discards conflicting later Initials. One persona encoder receives role-typed CID history; live server admission passes original DCID and validated Retry SCID before TLS construction, and both peers validate authenticated CID parameters before handshake readiness. Paired v1/v2 direct, Retry, VN, and wrong-value tests pass, including peer-received `0x08`; parser tests cover missing, duplicate, malformed, role-forbidden, oversized, and mismatched CIDs. Focused transport 160/160, core 77/77 plus constructor guard, qftls 33 passed (one ignored) plus provider guard, qf-stealth parameter 6/6, strict Clippy and formatting pass. Independent standards-wire capture remains TODO-1095; core TLS setup failure remains TODO-1121.
+- DONE. The client adopts the first server Initial SCID after Retry and discards conflicting later Initials. One persona encoder receives role-typed CID history; live server admission passes original DCID and validated Retry SCID before TLS construction, and both peers validate authenticated CID parameters before handshake readiness. Paired v1/v2 direct, Retry, VN, and wrong-value tests pass, including peer-received `0x08`; parser tests cover missing, duplicate, malformed, role-forbidden, oversized, and mismatched CIDs. Focused transport 160/160, core 77/77 plus constructor guard, qftls 33 passed (one ignored) plus provider guard, qf-stealth parameter 6/6, strict Clippy and formatting pass. TODO-1121 closes the later-discovered TLS-construction and resumed-parameter gaps; independent standards-wire capture remains TODO-1095.
 - Detail: `docs/todo/done/todo-1120-quic-retry-connection-id-transport-parameter-binding.md`
 
 ### TODO-1121 - Fail closed when core TLS provider setup fails
-- OPEN. Core construction logs and swallows TLS provider creation/profile errors, while provider-less transport reports TLS handshake completion. Make construction fallible end to end and prevent provider-less production readiness, with client/server failure regression and cleanup proof.
-- Detail: `docs/todo/todo-1121-fail-closed-core-tls-provider-initialization.md`
+- DONE. Core client/server construction returns the original typed TLS error and never publishes a failed connection; provider-less product transport cannot report completion or emit 1-RTT application data. Live server failure abandons its auth attempt once. Cached resumption parameters no longer masquerade as the current CID/version identity, and the authenticated UDP limit replaces the remembered 0-RTT value. Focused core, transport, QKey integration, and full root-library tests pass; strict all-target Clippy's unrelated Rust 1.98 diagnostics remain in TODO-1079.
+- Detail: `docs/todo/done/todo-1121-fail-closed-core-tls-provider-initialization.md`
 
 ## Completed
 

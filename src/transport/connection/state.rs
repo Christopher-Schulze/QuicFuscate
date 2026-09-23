@@ -35,6 +35,9 @@ pub struct Connection {
     pub(super) peer_initial_scid: Option<ConnectionId>,
     /// Authenticated peer CID parameters match the observed Initial and Retry history.
     pub(super) peer_cids_validated: bool,
+    /// Explicitly unauthenticated transport-only test/benchmark fixture.
+    #[cfg(any(test, feature = "benches"))]
+    pub(super) test_only_transport_fixture: bool,
     /// Stream storage. HashMap provides O(1) amortized lookup but poor cache locality
     /// at high stream counts (>10k). Hash table entries scatter across memory, causing
     /// L1/L2 cache misses during iteration and lookup. Consider replacing with a slot map

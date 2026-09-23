@@ -163,22 +163,30 @@ impl Connection {
     pub(in crate::transport::connection) fn poll_tls_and_validate_versions(
         &mut self,
     ) -> Result<(), crate::error::ConnectionError> {
-        let (peer_parameters, early_data_accepted) = {
+        let (peer_parameters, tls_complete, early_data_accepted) = {
             let Some(provider) = &mut self.tls_provider else {
                 return Ok(());
             };
             provider.poll_secrets_and_install(&*self.crypto)?;
-            (provider.peer_quic_transport_params(), provider.early_data_accepted())
+            (
+                provider.peer_quic_transport_params(),
+                provider.handshake_complete(),
+                provider.early_data_accepted(),
+            )
         };
         if let Some(accepted) = early_data_accepted {
             self.finish_zero_rtt(accepted);
         }
         if let Some(parameters) = peer_parameters.as_deref() {
-            self.validate_peer_connection_ids(parameters)?;
-            self.apply_peer_transport_limits(parameters)?;
+            if tls_complete {
+                self.validate_peer_connection_ids(parameters)?;
+            }
+            self.apply_peer_transport_limits(parameters, tls_complete)?;
         }
         self.refresh_short_header_tag_reserve();
-        self.validate_peer_version_information(peer_parameters)?;
+        if tls_complete {
+            self.validate_peer_version_information(peer_parameters)?;
+        }
         self.maybe_queue_handshake_done();
         Ok(())
     }
@@ -221,10 +229,12 @@ impl Connection {
     pub(in crate::transport::connection) fn apply_peer_transport_limits(
         &mut self,
         parameters: &[u8],
+        authenticated_current: bool,
     ) -> Result<(), crate::error::ConnectionError> {
         let peer_max = peer_max_udp_payload_size(parameters)?;
         let local_max = self.config.max_udp_payload_size as usize;
-        let current_max = self.dgram_send_max_size.min(local_max);
+        let current_max =
+            if authenticated_current { local_max } else { self.dgram_send_max_size.min(local_max) };
         let effective_max = peer_max.map_or(current_max, |peer_max| current_max.min(peer_max));
         if effective_max != self.dgram_send_max_size {
             log::debug!(

@@ -192,7 +192,8 @@ fn simulate_qkey_http3_auth(
         Some(qkey::QKeyToken::new(client_token_hex.trim().to_lowercase())),
         None,
         false,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
 
     let mut server: Option<QuicFuscateConnection> = None;
     let mut server_transport =
@@ -290,7 +291,8 @@ fn simulate_qkey_http3_auth(
                         stealth_config.clone(),
                         fec_config.clone(),
                         opt_config,
-                    )?;
+                    )
+                    .map_err(|error| error.to_string())?;
 
                     // Feed first packet into server.
                     match srv.recv(&out_client[..len]) {
