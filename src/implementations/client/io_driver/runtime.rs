@@ -1,5 +1,7 @@
 use super::*;
 
+const ASSIGNMENT_CLOSE_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Borrowed view of the TUN descriptor so `AsyncFd` can register it for
 /// readiness without taking ownership of the device.
 #[cfg(target_os = "linux")]
@@ -67,6 +69,8 @@ impl IoDriver {
             #[cfg(target_os = "linux")]
             flush_scratch: tokio::sync::Mutex::new(FlushScratch::default()),
             wide_batch_cpu,
+            #[cfg(test)]
+            assignment_receive_barrier: None,
         }
     }
 
@@ -395,6 +399,48 @@ impl IoDriver {
         Ok(())
     }
 
+    /// Emit only the physical hop's already queued terminal close. Circuit
+    /// drive and ordinary outbound queues cannot delay this last packet.
+    async fn flush_physical_close(
+        &self,
+        conn: &Arc<parking_lot::Mutex<ClientDataPlane>>,
+        socket: &Arc<UdpSocket>,
+        out: &mut [u8],
+    ) -> Result<bool, EngineError> {
+        let length = {
+            let mut guard = conn.lock();
+            match guard.physical_mut().send(out) {
+                Ok(length) => length,
+                Err(crate::error::ConnectionError::Done) => return Ok(false),
+                Err(error) => {
+                    return Err(self.transport_send_error("client assignment close seal", error))
+                }
+            }
+        };
+        if length == 0 {
+            return Ok(false);
+        }
+        let sent = tokio::time::timeout(ASSIGNMENT_CLOSE_SEND_TIMEOUT, socket.send(&out[..length]))
+            .await
+            .map_err(|_| {
+                self.transport_send_error("client assignment close UDP send", "send timed out")
+            })?
+            .map_err(|error| {
+                self.transport_send_error("client assignment close UDP send", error)
+            })?;
+        if sent != length {
+            return Err(self.transport_send_error(
+                "client assignment close UDP send",
+                format!("short send: {sent} of {length} bytes"),
+            ));
+        }
+        self.stats.udp_packets_sent.fetch_add(1, Ordering::Relaxed);
+        let global = crate::instrumentation::global();
+        global.transport.record_bytes_out(length as u64);
+        global.transport.record_packet_out();
+        Ok(true)
+    }
+
     /// Drive QUIC and H3 until the authenticated server assignment arrives.
     /// No TUN handle is needed or opened during this phase.
     pub async fn negotiate_assignment(
@@ -487,35 +533,39 @@ impl IoDriver {
             if wait.is_zero() {
                 break;
             }
+            #[cfg(test)]
+            if let Some(barrier) = &self.assignment_receive_barrier {
+                barrier.notify_one();
+            }
+            let mut terminal_receive_error = None;
             match tokio::time::timeout(wait, socket.recv(&mut recv_buf)).await {
                 Ok(Ok(length)) if length > 0 => {
                     let mut guard = conn.lock();
                     let recv_result = guard.recv_mut(&mut recv_buf[..length]);
-                    match &recv_result {
-                        Ok(_) => {}
-                        Err(EngineError::Connection(msg))
-                            if msg == "Connection done" || msg == "Buffer too short" =>
-                        {
-                            // Under netem impairment (loss + reorder) a truncated or
-                            // coalesced packet fragment can reach the QUIC parser before
-                            // the complete datagram arrives. "Connection done" is a benign
-                            // no-progress signal. Both are transient: the connection is
-                            // still alive (the is_closed check below catches a real close)
-                            // and the next recv will carry the full packet. Treating either
-                            // as fatal drops the circuit during the assignment handshake
-                            // under impairment. Continue.
+                    if guard.physical().conn.is_closed() {
+                        terminal_receive_error = recv_result.err();
+                    } else {
+                        match &recv_result {
+                            Ok(_) => {}
+                            Err(EngineError::Connection(msg))
+                                if msg == "Connection done" || msg == "Buffer too short" =>
+                            {
+                                // Under netem impairment (loss + reorder) a truncated or
+                                // coalesced packet fragment can reach the QUIC parser before
+                                // the complete datagram arrives. Both are transient while open.
+                            }
+                            Err(_) => {
+                                Err(self.transport_receive_error(
+                                    "client assignment QUIC receive",
+                                    recv_result.unwrap_err(),
+                                ))?;
+                            }
                         }
-                        Err(_) => {
-                            Err(self.transport_receive_error(
-                                "client assignment QUIC receive",
-                                recv_result.unwrap_err(),
-                            ))?;
+                        if control_started {
+                            guard.poll_http3().map_err(|error| {
+                                self.transport_receive_error("client assignment H3 poll", error)
+                            })?;
                         }
-                    }
-                    if control_started {
-                        guard.poll_http3().map_err(|error| {
-                            self.transport_receive_error("client assignment H3 poll", error)
-                        })?;
                     }
                 }
                 Ok(Ok(_)) => {}
@@ -525,6 +575,29 @@ impl IoDriver {
                     );
                 }
                 Err(_) => {}
+            }
+            if conn.lock().physical().conn.is_closed() {
+                let original = terminal_receive_error.unwrap_or_else(|| {
+                    let cause = conn
+                        .lock()
+                        .physical()
+                        .conn
+                        .error()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "transport closed".to_string());
+                    EngineError::Connection(format!(
+                        "client closed before server assignment: {cause}"
+                    ))
+                });
+                let close_send = self.flush_physical_close(conn, socket, &mut send_buf).await;
+                conn.lock().mark_failed();
+                if let Err(send_error) = close_send {
+                    return Err(self.transport_send_error(
+                        "client assignment terminal close",
+                        format!("{original}; close send failed: {send_error}"),
+                    ));
+                }
+                return Err(original);
             }
             if conn.lock().is_closed() {
                 conn.lock().mark_failed();
@@ -1419,5 +1492,164 @@ impl IoDriver {
         }
         flush_batch(batch_bytes, batch_packets);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod assignment_close_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn physical_close_is_sent_after_assignment_receive_before_teardown() {
+        let client_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("client UDP"));
+        let server_socket = UdpSocket::bind("127.0.0.1:0").await.expect("server UDP");
+        let client_addr = client_socket.local_addr().expect("client address");
+        let server_addr = server_socket.local_addr().expect("server address");
+        client_socket.connect(server_addr).await.expect("connect client UDP");
+        server_socket.connect(client_addr).await.expect("connect server UDP");
+
+        let server_cid = b"assignment-server";
+        let transport_config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("transport config");
+        let client = crate::core::QuicFuscateConnection::new_client(
+            "localhost",
+            client_addr,
+            server_addr,
+            transport_config,
+            crate::stealth::StealthConfig::default(),
+            crate::fec::FecConfig::default(),
+            crate::optimize::OptimizeConfig::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("Core client");
+        let connection = Arc::new(parking_lot::Mutex::new(ClientDataPlane::single(client)));
+        let barrier = Arc::new(tokio::sync::Notify::new());
+        let mut driver = IoDriver::new(IoDriverConfig::default());
+        driver.assignment_receive_barrier = Some(Arc::clone(&barrier));
+        let assignment_connection = Arc::clone(&connection);
+        let assignment_socket = Arc::clone(&client_socket);
+        let task = tokio::spawn(async move {
+            driver
+                .negotiate_assignment(
+                    &assignment_connection,
+                    &assignment_socket,
+                    1,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), barrier.notified())
+            .await
+            .expect("assignment reached UDP receive");
+        let recv_info =
+            crate::transport::RecvInfo { from: client_addr, to: server_addr, ecn: None };
+        let mut packet = [0u8; 65_535];
+        let first_length =
+            tokio::time::timeout(Duration::from_secs(1), server_socket.recv(&mut packet))
+                .await
+                .expect("client Initial reaches server socket")
+                .expect("receive client Initial");
+        let (initial, _) = crate::transport::packet::parse_header(&packet[..first_length], 0)
+            .expect("parse client Initial");
+        let mut server_config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("server config");
+        let mut peer = crate::transport::packet::accept(
+            server_cid,
+            Some(&initial.dcid),
+            server_addr,
+            client_addr,
+            &mut server_config,
+        )
+        .expect("server transport");
+        peer.set_destination_cid(crate::transport::ConnectionId::from_ref(&initial.scid));
+        peer.enable_tls("unified").expect("install server Initial keys");
+        peer.recv(&mut packet[..first_length], &recv_info).expect("open client Initial");
+        while let Ok(Ok(length)) =
+            tokio::time::timeout(Duration::from_millis(5), server_socket.recv(&mut packet)).await
+        {
+            let _ = peer.recv(&mut packet[..length], &recv_info);
+        }
+
+        assert_eq!(
+            connection.lock().physical_mut().conn.process_crypto_frame(
+                qf_transport_types::QuicEncryptionLevel::Initial,
+                65_536,
+                std::borrow::Cow::Borrowed(b"x"),
+            ),
+            Err(crate::error::ConnectionError::CryptoBufferExceeded)
+        );
+        server_socket.send(&[0xA5; 32]).await.expect("wake assignment receive");
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("assignment terminates")
+            .expect("assignment task joins");
+        assert!(result.is_err());
+        assert!(matches!(
+            connection.lock().physical().conn.local_error(),
+            Some(crate::error::ConnectionError::CryptoBufferExceeded)
+        ));
+
+        let length = tokio::time::timeout(Duration::from_secs(1), server_socket.recv(&mut packet))
+            .await
+            .expect("terminal close reaches server socket")
+            .expect("receive protected close");
+        peer.recv(&mut packet[..length], &recv_info).expect("peer opens terminal close");
+        assert!(matches!(
+            peer.remote_error(),
+            Some(crate::error::ConnectionError::PeerConnectionClosed { error_code: 0x0d, .. })
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(30), server_socket.recv(&mut packet))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn physical_close_reports_unconnected_udp_socket_without_losing_cause() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("client UDP"));
+        let local_addr = socket.local_addr().expect("client address");
+        let peer_addr = "127.0.0.1:443".parse().expect("peer address");
+        let config = crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+            .expect("transport config");
+        let client = crate::core::QuicFuscateConnection::new_client(
+            "localhost",
+            local_addr,
+            peer_addr,
+            config,
+            crate::stealth::StealthConfig::default(),
+            crate::fec::FecConfig::default(),
+            crate::optimize::OptimizeConfig::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("Core client");
+        let connection = Arc::new(parking_lot::Mutex::new(ClientDataPlane::single(client)));
+        assert_eq!(
+            connection.lock().physical_mut().conn.process_crypto_frame(
+                qf_transport_types::QuicEncryptionLevel::Initial,
+                65_536,
+                std::borrow::Cow::Borrowed(b"x"),
+            ),
+            Err(crate::error::ConnectionError::CryptoBufferExceeded)
+        );
+
+        let mut out = [0u8; 65_535];
+        let result = IoDriver::new(IoDriverConfig::default())
+            .flush_physical_close(&connection, &socket, &mut out)
+            .await;
+        assert!(matches!(
+            result,
+            Err(EngineError::DataPlane(DataPlaneFault::TransportSend { component, .. }))
+                if component == "client assignment close UDP send"
+        ));
+        assert_eq!(
+            connection.lock().physical().conn.local_error(),
+            Some(&crate::error::ConnectionError::CryptoBufferExceeded)
+        );
     }
 }

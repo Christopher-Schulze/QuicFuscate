@@ -372,6 +372,8 @@ pub struct IoDriver {
     #[cfg(target_os = "linux")]
     flush_scratch: tokio::sync::Mutex<FlushScratch>,
     wide_batch_cpu: bool,
+    #[cfg(test)]
+    assignment_receive_barrier: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Flat staging buffer + packet span table for `IoDriver::flush_outbound`.

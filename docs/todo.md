@@ -830,12 +830,24 @@
 - Detail: `docs/todo/done/todo-1132-inbound-crypto-error-close.md`
 
 ### TODO-1133 - Keep authenticated QUIC failures out of Reality probe fallback
-- DONE. Transport now reports whether QUIC opened the packet; Core routes only pre-open failures to Reality fallback and gives a queued terminal QUIC close priority over a cached cover response. Paired tests verify zero fallback on a protected invalid frame, one on an unopenable probe, and peer-opened `0x0d` close. Default root `1,872 passed, 1 ignored`, feature root `1,877 passed, 1 ignored`, strict Clippy and formatting pass. Initial opening does not prove peer identity; packet-commit issues remain TODO-1129 and live client assignment close flush remains TODO-1134.
+- DONE. Transport now reports whether QUIC opened the packet; Core routes only pre-open failures to Reality fallback and gives a queued terminal QUIC close priority over a cached cover response. Paired tests verify zero fallback on a protected invalid frame, one on an unopenable probe, and peer-opened `0x0d` close. Default root `1,872 passed, 1 ignored`, feature root `1,877 passed, 1 ignored`, strict Clippy and formatting pass. Initial opening does not prove peer identity; packet-commit issues remain TODO-1129. Physical assignment close output is TODO-1134; the protected inbound wire gate is TODO-1136.
 - Detail: `docs/todo/done/todo-1133-authenticated-error-probe-routing.md`
 
-### TODO-1134 - Flush a terminal QUIC close before client assignment teardown
-- OPEN. The client assignment loop checks `is_closed()` after receive and returns before its next outbound flush; a locally queued QUIC close can be lost even though Core can seal it. Add one bounded post-receive close send and prove peer delivery on the live client loop.
-- Detail: `docs/todo/todo-1134-client-assignment-close-flush.md`
+### TODO-1134 - Flush the physical QUIC close before client assignment teardown
+- DONE. Assignment now detects a physical close after either receive result and sends one Core close directly over UDP before teardown, bypassing circuit drive. A real peer opened `0x0d`; an unconnected socket produced typed `TransportSend` while retaining the CRYPTO cause. Focused 2/2, default root 1,874 passed/1 ignored, feature root 1,879 passed/1 ignored, strict library Clippy and formatting pass. Protected inbound `recv_mut` error proof remains TODO-1136; nested relay remains TODO-1135.
+- Detail: `docs/todo/done/todo-1134-client-assignment-close-flush.md`
+
+### TODO-1135 - Carry a nested-hop terminal close through the circuit without cover leakage
+- OPEN. An inner-hop close must cross authenticated CONNECT-UDP links; ordinary `drive()` can be blocked or flush unrelated pending data. Define one bounded terminal drain and exact undeliverable outcomes for missing links, queue pressure and socket failures, with two- and three-hop peer proof.
+- Detail: `docs/todo/todo-1135-nested-hop-terminal-close.md`
+
+### TODO-1136 - Prove assignment close on protected inbound CRYPTO failure
+- OPEN. The TODO-1134 loopback queues a real CRYPTO admission close while assignment waits, but does not inject the failing frame as protected peer traffic. Prove the terminal `recv_mut` error branch, one peer-opened close, and cover suppression on a real UDP/TLS pair.
+- Detail: `docs/todo/todo-1136-inbound-crypto-close-assignment-wire.md`
+
+### TODO-1137 - Reconcile queued QUIC closes on other assignment exits
+- OPEN. The post-receive terminal drain does not cover earlier returns from outbound flush, control rejection, assignment finalization, tunnel start or H3 polling. Classify which can queue a physical or nested close and reuse the bounded terminal path only where deliverable.
+- Detail: `docs/todo/todo-1137-assignment-early-exit-close-drain.md`
 
 ## Completed
 
