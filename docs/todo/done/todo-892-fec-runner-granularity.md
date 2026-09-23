@@ -174,7 +174,7 @@ The full-suite utility must continue to run one internal FEC command, one contro
 - `docs/DOCUMENTATION.md`
 - `docs/MAP.md`
 - `docs/todo.md`
-- `docs/todo/todo-892-fec-runner-granularity.md`
+- `docs/todo/done/todo-892-fec-runner-granularity.md`
 
 ## Non-Goals
 

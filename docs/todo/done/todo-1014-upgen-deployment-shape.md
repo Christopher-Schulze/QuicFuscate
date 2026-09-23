@@ -23,7 +23,7 @@ variants that classify as "unknown benign encrypted" rather than a known
 circumvention protocol.
 
 Design study recorded in
-`docs/todo/todo-1010-stealth-shaping-research-track.md` (candidate 5).
+`docs/todo/done/todo-1010-stealth-shaping-research-track.md` (candidate 5).
 
 ## Implemented design (adapted)
 

@@ -4,62 +4,62 @@
 
 ### TODO-913 - Server RX: per-datagram heap alloc + double copy on every ingress packet
 - DONE. `recv_datagram_batch` now takes a caller-owned slot `pool` and `batch` out-param; each drained datagram pops a full-size slot (alloc only on cold pool) and returns it after processing. `to_vec`, per-call 64 KiB scratch, and batch Vec alloc all gone; `run_loop` reads `&datagram[..len]` directly so `buf` was deleted; `continue` -> `break 'one` keeps recycling on every path.
-- Detail: `docs/todo/todo-913-server-rx-per-datagram-alloc-copy.md`
+- Detail: `docs/todo/done/todo-913-server-rx-per-datagram-alloc-copy.md`
 
 ### TODO-914 - blocked_ips: String alloc + string hash on every ingress datagram
 - DONE. Store is `HashSet<IpAddr>` end to end; new `admin::parse_admin_ip` returns `Option<IpAddr>` while `normalize_admin_ip` keeps the canonical-string contract for the admin wire format. `persist_blocked_ips` serializes identical JSON strings. `run_loop` now does `contains(&from.ip())` - zero alloc.
-- Detail: `docs/todo/todo-914-blocked-ips-ipaddr-set.md`
+- Detail: `docs/todo/done/todo-914-blocked-ips-ipaddr-set.md`
 
 ### TODO-915 - Server dispatch: ~11 Arc::clone per datagram are loop-invariant
 - DONE. All eleven handles plus `runtime_parts` bind once per wakeup before the `batch.drain` loop. `self.admit_incoming_datagram` was inlined into `runtime_parts.live_state.*` (the `&mut self` borrow held across the drain forbids `self` calls) and the dead wrapper removed.
-- Detail: `docs/todo/todo-915-server-dispatch-arc-clone-storm.md`
+- Detail: `docs/todo/done/todo-915-server-dispatch-arc-clone-storm.md`
 
 ### TODO-916 - send fallback path takes crypto RwLock three times per packet
 - DONE. One `crypto.read()` guard covers the seal-1rtt check, `select_private_seal`+`seal_batch`, and the HP `new_mask`; dropped before `advance_send_packet_number` (which may take `write()`). The steady-state 1-RTT path was already lock-free via `crypto_1rtt: ArcSwapOption`.
-- Detail: `docs/todo/todo-916-crypto-rwlock-triple-read.md`
+- Detail: `docs/todo/done/todo-916-crypto-rwlock-triple-read.md`
 
 ### TODO-917 - stream_ring_buffer TX: two allocs + two copies per STREAM frame
 - DONE. New `stream_tx_scratch: Vec<u8>` connection field (`stream_ring_buffer`-gated) replaces the per-packet `vec![0;body_len]` staging buffer; the retained copy goes straight into `Arc::from(&scratch[..read])` - same shape as the non-ring path. One alloc + one copy per frame (the copy into the retained Arc is inherent).
-- Detail: `docs/todo/todo-917-stream-ring-tx-double-copy.md`
+- Detail: `docs/todo/done/todo-917-stream-ring-tx-double-copy.md`
 
 ### TODO-918 - Recovery sent-map: BTreeMap node alloc + O(log n) per tracked packet
 - `sent: BTreeMap<u64, SentPacket>` allocates a B-tree node per packet and does `O(log n)` lookup/remove. Packet numbers are monotonic per space - a sliding ring indexed by `pn - pn_base` gives O(1) + zero alloc. Must tolerate non-contiguous ACK removal and pn-space gaps.
 - DONE. `SentRing` (`VecDeque<Option<SentPacket>>` + `base`) replaces the map: O(1) insert/remove/contains, dense-slot range scans for ACK `drain_range` and `iter_prefix` loss walks, `pop_oldest`/`trim_front` for eviction. `MAX_SENT_RING_SLOTS = 2xretained` bounds sparse-ACK spans; same-pn requeues replace in place with exact byte accounting via `RingEvict`. 50/50 crate tests incl. new ring edge-case suite; 1719/1719 root lib.
-- Detail: `docs/todo/todo-918-recovery-sentmap-btreemap.md`
+- Detail: `docs/todo/done/todo-918-recovery-sentmap-btreemap.md`
 
 ### TODO-919 - Fountain codec: 3+ Vec allocs per encoded symbol
 - `generate_symbol_with_indices` -> `(Vec<u8>, Vec<usize>)` + `Vec<f64>` distribution; decoder `HashMap<u64, Vec<u8>>` + `Vec<Option<Vec<u8>>>` per symbol. Add `encode_into`/`SmallVec` indices + pooled symbol slab + cached degree table.
 - DONE. Encoder `generate_symbol` returns slices into reusable scratch (indices/select/encoded) + cached `max_symbol_len` - zero alloc warm path. Decoder: `symbol_degrees` Vec<usize> (sorted/deduped, binary_search removal), bounded payload freelist recycles symbol buffers, `add_fountain_symbol` computes indices into the scratch Vec that becomes the stored degree (1 alloc/retained symbol), peel transfers payload ownership (2 clones -> 0), `propagate_decoded_symbol` takes-out/puts-back decoded data and reuses `propagation_scratch`. `DecoderVariant::Fountain` boxed.
-- Detail: `docs/todo/todo-919-fountain-alloc-storm.md`
+- Detail: `docs/todo/done/todo-919-fountain-alloc-storm.md`
 
 ### TODO-920 - qf-stealth re-acquires thread RNG on every shaping decision
 - DONE (pragmatic). `build_request_headers` binds `rand::rng()` once per built request instead of three lookups. The "seeded RNG per worker" direction is documented as rejected: the remaining sites are `&self` methods on `Arc`-shared configs where a held RNG would need `Mutex`/`RefCell` - worse than the already-lock-free TLS `ThreadRng`.
-- Detail: `docs/todo/todo-920-stealth-rng-per-call.md`
+- Detail: `docs/todo/done/todo-920-stealth-rng-per-call.md`
 
 ### TODO-921 - Metrics: 4+ atomic RMWs per datagram - aggregate per batch
 - DONE (ingress). `record_ingress_batch(bytes, packets)` + `qf_instrumentation::record_packets_in/out(n)` added; `run_loop` accumulates per-burst and flushes once. Egress documented as residual (no batch boundary on the send side).
-- Detail: `docs/todo/todo-921-metrics-atomic-batch.md`
+- Detail: `docs/todo/done/todo-921-metrics-atomic-batch.md`
 
 ### TODO-922 - Client io_driver: to_vec() per ingress packet on restore queue
 - DONE. `ClientTunnelIngress` gained a capped `spare` free list: `push` reuses buffers (zero alloc warm), new `recycle` returns drained buffers; the WouldBlock path now `split_off`s the unwritten suffix instead of `to_vec`-copying it. `PooledBlock` rejected (block size configurable below the 64 KiB bound -> would have needed a fallback enum).
-- Detail: `docs/todo/todo-922-client-ingress-alloc.md`
+- Detail: `docs/todo/done/todo-922-client-ingress-alloc.md`
 
 ### TODO-923 - Wire UDP_SEGMENT GSO/GRO into the VPN dataplane
 - DONE (Omega-verified, kernel 6.17/aarch64). Shared `qf-transport-udp` primitives (`probe_udp_gso`, `enable_udp_gro`, `send_udp_segment`, `recv_batch_gro`, `recv_msg_gro`) now back both ends: server RX drains bursts via one `recvmmsg` with `UDP_GRO` cmsg parse + `push_gro_record` split; server TX coalesces contiguous same-target uniform-length runs into one `UDP_SEGMENT` sendmsg (`plan_gso_run`, <=64 segs); client RX switched to `recv_msg_gro` + `emit_wire_record` split (GRO gated off when `io_uring` inbound is compiled in - its RecvMsg SQEs post no cmsg space). `strace` evidence: 1 sendmsg -> 4 wire datagrams; 11 datagrams via 2 recvmsg + 2 recvmmsg. `UringBatchWorker` submissions now flatten payloads into one buffer + span table.
-- Detail: `docs/todo/todo-923-udp-gso-gro-datapath.md`
+- Detail: `docs/todo/done/todo-923-udp-gso-gro-datapath.md`
 
 ### TODO-924 - FEC encode path: parallelize multi-block parity with rayon
 - `qf-fec` already `rayon`s the decode side (`codecs.rs:956`, `decoder8.rs:592`) but encode is serial. Split parity accumulation by byte-range when `symbol_size` is large - same `PAR_THRESHOLD` heuristic. Byte-identical output (XOR-accumulate is order-associative).
 - DONE. GF16's existing chunked `into_par_iter` pattern now also covers GF8 (`gf_mul_scalar_slice` per chunk) and GF4 (`gf4_mul_xor` per chunk), gated identically (`max_len >= PAR_THRESHOLD*4 && wlen >= 8`, 16 KiB chunks). New `test_parallel_encode_matches_serial_reference` proves byte-identical output vs serial references across all three fields at 40 KiB x 8 sources.
-- Detail: `docs/todo/todo-924-fec-parallel-encode.md`
+- Detail: `docs/todo/done/todo-924-fec-parallel-encode.md`
 
 ### TODO-925 - run_loop holds 128 KiB of stack buffers inside the spawned future
 - DONE. `buf` deleted by TODO-913 (drain processes slots in place); `out` is now `Box::new([0u8; N])` - ~64 KiB out of the future's inline state, all call sites pass `&mut out[..]`.
-- Detail: `docs/todo/todo-925-runloop-stack-buffers.md`
+- Detail: `docs/todo/done/todo-925-runloop-stack-buffers.md`
 
 ### TODO-926 - recv_datagram_batch drain cap unreachable when socket never blocks
 - DONE via TODO-913's restructure: `while batch.len() < cap` checks the cap before each receive and slot alloc; the batch is bounded at 64 and the drain loop returns to `select!` housekeeping each wakeup.
-- Detail: `docs/todo/todo-926-recv-batch-cap-unreachable.md`
+- Detail: `docs/todo/done/todo-926-recv-batch-cap-unreachable.md`
 
 ### TODO-927 - io_uring TX: triple-copy, channel(1) depth, 1ms sleep poll - x86 evidence missing
 - PARTIAL (larger share done): flat payload storage end-to-end (`payload_flat`+`payload_spans`+`packet_addrs`; worker adopts the flat buffer in place - zero payload copies on the channel handoff); `submit_and_poll` spin->yield->capped-sleep backoff replaces the fixed 1 ms sleep; `channel(1)` kept deliberately as bounded backpressure (analysis documented); `UringRecvBatch` arms per-slot `UDP_GRO` cmsg storage and splits coalesced super-buffers - client GRO now works under io_uring (`with_defaults_gro`, safe `disable_udp_gro_fd` fallback). Still open: x86_64 native evidence (Omega covers aarch64 only), optional `IORING_ENTER_GETEVENTS` blocking wait.
@@ -67,179 +67,179 @@
 
 ### TODO-928 - Server TX staging: N Vec allocs per flush -> flat buffer + spans
 - DONE. `flush_live_server_outgoing` staged every packet into a fresh `to_vec()` (one alloc + copy per datagram) and GSO runs concatenated again. Staging is now one flat `Vec<u8>` + span table: N allocs -> 1, the borrowed worker API flattens once on its side, and a contiguous GSO run is submitted straight from the flat buffer (concat removed). `plan_gso_run` operates on spans; new unit test covers boundary grouping.
-- Detail: `docs/todo/todo-928-server-tx-flat-staging.md`
+- Detail: `docs/todo/done/todo-928-server-tx-flat-staging.md`
 
 ### TODO-929 - UDP pseudo-header checksums: heap Vec per packet -> two-part sum
 - DONE. `udp_checksum_v4`/`udp_checksum_v6` allocated a `12+len`/`40+len` heap Vec per call just to concatenate pseudo-header and packet. Ones-complement summation is associative and pseudo-headers are an even length, so the sum now runs over a stack pseudo-header plus the packet - zero allocation. Validation, folding, and fix-up helpers unchanged; dns_signals 18/18.
-- Detail: `docs/todo/todo-929-udp-checksum-alloc.md`
+- Detail: `docs/todo/done/todo-929-udp-checksum-alloc.md`
 
 ### TODO-930 - Bandwidth manager: String alloc per packet check -> u64 keys
 - DONE. `PerClientBandwidthManager` keyed clients by `String` - every `check_bandwidth` call on the TUN downlink path allocated `session_id.as_u64().to_string()`. Keys and method signatures are `u64` now; the rare audit path formats the numeric id only when it must log. SessionStore wrappers pass `as_u64()` through; bandwidth/session tests migrated (36/36 + 112/112 green).
-- Detail: `docs/todo/todo-930-bandwidth-string-key.md`
+- Detail: `docs/todo/done/todo-930-bandwidth-string-key.md`
 
 ### TODO-931 - DNS intercept: 3 parses + 2 payload copies per query -> 1 parse + Arc share
 - DONE. The DNS intercept hot path parsed the same packet three times (builder closure, payload extraction, source-IP lookup) and cloned the payload twice. It now parses once into an enum, moves the payload into `Arc<[u8]>`, and the response-builder closure clones only the `Arc` - one parse, one alloc, zero payload copies.
-- Detail: `docs/todo/todo-931-dns-intercept-triple-parse.md`
+- Detail: `docs/todo/done/todo-931-dns-intercept-triple-parse.md`
 
 ### TODO-932 - Client run_outbound: Vec<Vec<u8>> staging + copy per packet -> flat buffer
 - DONE. The TUN->QUIC drain copied every produced datagram into a per-packet `Vec` (`extend_from_slice`, N allocs + N copies per burst). Staging is now one flat `Vec<u8>` + span table: `conn.send` writes each datagram directly into the remaining window (zero staging copies), `batch_sent` is a persistent reused `Vec<bool>`, and io_uring/sendmmsg/single-send dispatch consume span slices. `batch_flat` sized `max(batch_cap-2048, 1 MiB)` - partial flush on exhaustion is correct because dispatch honors `queued`. `IO_DRIVER_COPY_OPS/BYTES` still owned by the GSO-split helper.
-- Detail: `docs/todo/todo-932-client-tx-flat-staging.md`
+- Detail: `docs/todo/done/todo-932-client-tx-flat-staging.md`
 
 ### TODO-933 - StrikeRegister: 4 lock acquisitions on 3 RwLocks per packet -> one lock
 - DONE. `check_and_insert` acquired `entries.write()` + `bloom.read()` + `order.write()` + `bloom.write()` on every 0-RTT datagram - three RwLocks that are always mutated together. Consolidated into `RwLock<StrikeInner>` (entries/order/bloom in one guard): one acquisition per packet, `cleanup` rebuilt via a destructured `&mut StrikeInner`. qf-transport-anti-replay 16/16.
-- Detail: `docs/todo/todo-933-antireplay-single-lock.md`
+- Detail: `docs/todo/done/todo-933-antireplay-single-lock.md`
 
 ### TODO-934 - TUN downlink lock merge + quadratic reconcile sweep
 - DONE. The per-packet downlink path took `sessions.read()` for `bandwidth_stats` and `sessions.write()` for `check_bandwidth` - now one write guard returns weight+decision (the guard is dropped before the transport send). `reconcile_live_clients` rebuilt `qkey_auth` with an O(qkeyxclients) `values().any()` scan inside `retain` - now builds a `HashSet<&[u8]>` of active conn ids once.
-- Detail: `docs/todo/todo-934-tun-downlink-lock-merge.md`
+- Detail: `docs/todo/done/todo-934-tun-downlink-lock-merge.md`
 
 ### TODO-935 - flush_outbound: one send syscall per ACK/PTO datagram -> sendmmsg burst
 - DONE. `flush_outbound` emitted one `socket.send` per produced datagram on the inbound/standby/negotiate paths. On Linux it now drains into a dedicated `flush_scratch` (`tokio::sync::Mutex` - its guard stays `Send` across socket awaits; separate from `run_outbound` staging to avoid self-deadlock), accumulates <=16 spans / <=256 KiB per burst, and dispatches via `try_sendmmsg_batch` with sequential-send fallback and identical error semantics. Non-Linux keeps the per-packet loop.
-- Detail: `docs/todo/todo-935-flush-outbound-batch.md`
+- Detail: `docs/todo/done/todo-935-flush-outbound-batch.md`
 
 ### TODO-936 - Fountain codec: payload clone per source symbol -> SharedFecBuffer passthrough
 - DONE. `EncoderVariant::take_packet` and the decoder systematic path each did `payload_slice().to_vec()` - one heap copy per source packet. Symbols are now `SymbolBuf::{Owned, Shared}`: `add_source_symbol_shared` retains the packet's pool-backed `SharedFecBuffer` (Arc bump, zero copy). Decoder `decoded_symbols` carries the same enum - peeled symbols stay owned, received source symbols stay shared; `propagate_decoded_symbol`/`get_*` read via `as_slice()`. qf-fec 84/84 local + Omega.
-- Detail: `docs/todo/todo-936-fountain-zerocopy-symbols.md`
+- Detail: `docs/todo/done/todo-936-fountain-zerocopy-symbols.md`
 
 ### TODO-937 - TUN downlink flush: one sendto per packet -> flat staging + sendmmsg/GSO burst
 - DONE. `flush_tun_downlink_queue` emitted one `try_send_to` per produced QUIC datagram. On Linux, `connection.send` now writes straight into a persistent `downlink_tx_flat` window (`LiveServerState` scratch, <=256 packets / 4 MiB per round) while `downlink_tx_staging` records `(target, offset, len)`. Dispatch walks the staging in order: contiguous same-target uniform-length runs go out as one `UDP_SEGMENT` sendmsg (`plan_gso_run`, reused from live_auth), everything else accumulates into `send_batch_fd` sendmmsg groups flushed before each GSO segment so per-target ordering is preserved; a sequential `try_send_to` tail keeps the original error semantics for anything unsent. Non-Linux keeps the per-packet loop.
-- Detail: `docs/todo/todo-937-tun-downlink-batch-tx.md`
+- Detail: `docs/todo/done/todo-937-tun-downlink-batch-tx.md`
 
 ### TODO-938 - Server ingress: per-datagram Arc clones + ServerAssignmentSettings clone
 - DONE. `process_live_server_client_datagram` took seven `Arc<T>` params plus `ServerAssignmentSettings` (incl. `dns_servers: Vec<IpAddr>`) **by value** - the runtime loop cloned 6 Arcs (12 atomic ops) and one heap Vec per incoming datagram. All are now `&Arc<T>`/`&ServerAssignmentSettings`; rare MASQUE/DNS paths still clone internally where ownership is actually needed (`Arc::clone(x)` on the ref - needless_borrow-clean). Zero-cost on the hot path, identical semantics.
-- Detail: `docs/todo/todo-938-server-ingress-ref-params.md`
+- Detail: `docs/todo/done/todo-938-server-ingress-ref-params.md`
 
 ### TODO-939 - Client RX standard path: per-datagram copy into Vec slots -> flat recv + span table
 - DONE. `run_inbound_standard` copied every datagram into a `Vec<Vec<u8>>` slot (`emit_wire_record`) only because each recv clobbered the single 64 KiB `recv_buf`. Now a persistent `recv_flat` (batch_cap fixed-stride 64 KiB slots, 4 MiB at the default cap) plus a `(offset, len)` span table: `emit_wire_spans` does pure arithmetic, `process_inbound_batch` hands slices straight to `conn.recv`. Zero payload copies on the whole standard inbound path; GRO splits still expand into multiple spans per slot. Platform-neutral (no cfg split). io_uring inbound was already zero-copy via `UringRecvBatch`.
-- Detail: `docs/todo/todo-939-client-rx-span-table.md`
+- Detail: `docs/todo/done/todo-939-client-rx-span-table.md`
 
 ### TODO-940 - Server TUN uplink: `to_vec` per frame in reader thread -> pooled TunPacket channel
 - DONE. The `tun-reader` thread copied every frame via `packet.to_vec()` into a fresh heap Vec for the `sync_channel` while the pooled block it came from was returned instantly. Channel now carries `crate::interface::TunPacket` (PooledBlock + len, `Send`) via `reader_loop_with_shutdown_owned`; `drain_server_tun_packets` reads `packet.as_slice()` and the block flows back to the TUN pool on drop. Zero alloc + zero copy on the uplink hot path; in-flight blocks bounded by `TUN_PACKET_QUEUE_CAPACITY` (1024); pool grows on demand so no exhaustion deadlock.
-- Detail: `docs/todo/todo-940-tun-reader-pool-channel.md`
+- Detail: `docs/todo/done/todo-940-tun-reader-pool-channel.md`
 
 ### TODO-941 - Server TUN uplink: 2 Arc clones + read+write sessions lock per packet
 - DONE. `process_server_tun_packet` cloned `server_tun` and `forwarding_policy` Arcs per packet (read-only use) and took `sessions.read()` for route resolution plus `sessions.write()` per target for the bandwidth check. Both Arcs are now borrowed, and one `sessions.write()` guard spans route classification through the per-target bandwidth/token-bucket checks - acquisitions on `sessions` halved for unicast. `send_masque_downlink` audited: connection-internal state only, no re-lock. Guard is dropped before `flush_tun_downlink_queue` (needs full `&mut live`).
-- Detail: `docs/todo/todo-941-tun-uplink-single-guard.md`
+- Detail: `docs/todo/done/todo-941-tun-uplink-single-guard.md`
 
 ### TODO-942 - TUN downlink backpressure: `packet.to_vec()` per queued packet -> retain pooled TunPacket
 - DONE. `PendingTunDownlink.packet` is now `PendingTunPacket` (`Owned(Vec)` / `Shared(SharedFecBuffer, len)`). `process_server_tun_packet` takes the `TunPacket` by value; `retain_tun_frame` converts it lazily on the first enqueue - direct sends never pay for retention, and extra queued targets share the block via Arc bump instead of another `to_vec`. `SharedFecBuffer::from_pooled_block` + `TunPacket::into_block` added; byte accounting, DRR, expiry and requeue semantics unchanged (bounded retention, pool grows on demand - no exhaustion deadlock). New shared-block test asserts `strong_count == 2` on both popped entries. Omega native: 5/5 pending + 59/59 tun tests.
-- Detail: `docs/todo/todo-942-pending-queue-shared-retention.md`
+- Detail: `docs/todo/done/todo-942-pending-queue-shared-retention.md`
 
 ### TODO-943 - H3 poll loop: 6 Arc clones per poll -> borrowed bindings view
 - DONE. `http3_poll_bindings()` cloned five callback `Option<Arc>`s + the `memory_pool` Arc per `poll_http3_event_loop` invocation (once per datagram on both server ingress and client `poll_http3_to_ingress`). `Http3PollBindings<'a>` is now a borrowed view of the connection fields; `OptimizationManager::memory_pool_ref()` added. The view is built inline in the poll loop - a `&self` helper would borrow all of `self` and clash with the `&mut self.conn`/`self.h3_conn` uses inside the loop; field-level borrows are disjoint and allowed.
-- Detail: `docs/todo/todo-943-h3-poll-bindings-borrow.md`
+- Detail: `docs/todo/done/todo-943-h3-poll-bindings-borrow.md`
 
 ### TODO-944 - H3 poll loop: unconditional `conn.stats().clone()` per iteration
 - DONE. `prepare_http3_poll_iteration` cloned the ~200-byte `Stats` struct every poll iteration although only `emit_server_push_cover_burst` read it - and that early-returns unless a cover burst is actually due (low-rate stealth path). The stats fetch now happens inside the burst function after the early-return; `prepare_http3_poll_iteration` returns just `intelligent_level`.
-- Detail: `docs/todo/todo-944-poll-stats-lazy.md`
+- Detail: `docs/todo/done/todo-944-poll-stats-lazy.md`
 
 ### TODO-945 - `recv_on_path`: pool checkout + copy + free per framed datagram -> slice path
 - DONE. The slice-based receive entry copied every datagram into a pooled block although the framed (FEC-wire) branch only ever read `&block[..len]` and freed it. Framed datagrams now run on the input slice directly; `framed_wire_report` (seed lazy-init + source-only/full receive dispatch) and `finish_wire_receive` (telemetry + recovered-packet drain + TLS handshake) are shared with the pooled-block entry used by io_uring/GRO. Malformed datagrams keep the consumed-semantics (`Ok(len)`).
-- Detail: `docs/todo/todo-945-recv-framed-slice-path.md`
+- Detail: `docs/todo/done/todo-945-recv-framed-slice-path.md`
 
 ### TODO-946 - `send_with_info`: raw datagrams emit directly from the caller buffer
 - DONE. Every wire datagram - including raw non-FEC packets that emit immediately - round-tripped through a pool checkout, `FecPacket` wrap, VecDeque push/front/pop, and a whole-packet `write_to` copy into the caller buffer. The `wire_profile.is_none()` branch now runs `send_with_info_raw`: `conn.send` writes straight into the caller buffer and only a real stealth/jitter deferral pays the previous cost by materializing the bytes into a pooled block for the queue. Gated on an empty `outgoing_fec_packets` so a non-empty queue (possible when `path_control_pending` skips the flush) keeps ordered push/pop emission; telemetry (`observe_wire_send(true, len, len)`), pacing, `packet_id_counter`, and deferral queue shape are unchanged. Connection suite 326/326.
-- Detail: `docs/todo/todo-946-send-raw-direct-emit.md`
+- Detail: `docs/todo/done/todo-946-send-raw-direct-emit.md`
 
 ### TODO-947 - DATAGRAM queues: bounded buffer free-list instead of alloc/free per datagram
 - DONE. Default-build `dgram_send`/`enqueue_received_datagram` paid `to_vec`/`into_owned` + free per queued DATAGRAM (hot on the VPN dataplane). Per-connection `dgram_*_freelist` (cap 64) now recycles drained buffers: enqueue extends a retained-capacity `Vec`, commit/recv return it - malloc+free per datagram eliminated, payload memcpy kept (queue must own bytes). `zero_copy_dgram` deliberately stays non-default (64 KiB block x 1024-deep queue ~ 64 MiB/conn worst case); the zc lane is untouched. Adjacent: `PooledBlock::pool_ref()` removes an `Arc` clone per `from_pooled_blocks` validation. 142/142 default + 145/145 zc transport tests, both modes check-clean on Omega.
-- Detail: `docs/todo/todo-947-dgram-queue-freelist.md`
+- Detail: `docs/todo/done/todo-947-dgram-queue-freelist.md`
 
 ### TODO-948 - MASQUE datagram path: reused scratch instead of per-datagram Vec
 - DONE. `send_masque_datagram` allocated `Vec::with_capacity(9+len)` per datagram for the Flow-ID prefix; `try_recv_masque_datagram` returned `payload.to_vec()` per received datagram. Send now frames into `masque_send_scratch`; recv takes a caller-owned `out` buffer reused across the poll drain. Allocations eliminated, framing copy kept (queue needs contiguous bytes). 47/47 masque + 115/115 h3 tests, Omega native check clean.
-- Detail: `docs/todo/todo-948-masque-datagram-scratch.md`
+- Detail: `docs/todo/done/todo-948-masque-datagram-scratch.md`
 
 ### TODO-949 - TUN outbound loop: event-driven idle wait instead of 100us polling
 - DONE. `run_outbound` polled the nonblocking TUN fd every `poll_interval_us=100` when idle - ~1,000 lock+send-attempt+syscall wakeups/s for zero traffic. The fd is now registered once with the tokio reactor (`AsyncFd` on a borrowed `TunFdRef`); idle arms wait via `select!` on `readable()` vs the connection's `next_send_deadline()` (pacing/stealth/PTO timing preserved), capped at 250ms for shutdown responsiveness. No-fd backends keep the fixed-sleep fallback. Omega native check+clippy clean, io_driver 20/20.
-- Detail: `docs/todo/todo-949-tun-outbound-event-driven-idle.md`
+- Detail: `docs/todo/done/todo-949-tun-outbound-event-driven-idle.md`
 
 ### TODO-950 - Per-datagram `format!("{:?}")` for snapshot stealth mode -> `&'static str`
 - DONE. `process_live_server_client_datagram` allocated a `String` via `format!("{:?}", stealth_mode)` for every inbound datagram just to store the (static) mode label in `ClientSnapshot`. Added `StealthMode::as_str()` (Debug-identical names); the snapshot, its constructors, and the recorder now carry `&'static str` - the `String` materializes once per admin query instead of per packet. Also repaired: `qf-stealth`'s own test suite could not compile (`EnvSnapshot::from_pairs` needs qf-common `rust-tests` on the dep - repo convention every other crate already follows). snapshot 17/17, qf-stealth 127/127, Omega native clean.
-- Detail: `docs/todo/todo-950-snapshot-stealth-mode-static-str.md`
+- Detail: `docs/todo/done/todo-950-snapshot-stealth-mode-static-str.md`
 
 ### TODO-951 - MASQUE relay response queue: buffer freelist instead of alloc/drop per datagram
 - DONE. Every upstream UDP response on a NextHopUdp relay flow paid `receive_buffer[..n].to_vec()` on enqueue plus a `Vec` free after send. The queue now keeps a bounded `spare` list (cap 64): `enqueue_slice` fills recycled buffers, `flush_masque_relay_responses` returns payloads after every consuming outcome, `discard_all` drains into spare, `DgramQueueFull` re-enqueues unchanged (ordering preserved). `MasqueRelayResponse` re-exported. Also repaired: `cargo test -p qf-transport-types` could not compile - same missing `rust-tests` dep feature as qf-stealth. qf-transport-types 43/43, masque 47/47, workspace all-targets clean on Omega.
-- Detail: `docs/todo/todo-951-relay-response-queue-freelist.md`
+- Detail: `docs/todo/done/todo-951-relay-response-queue-freelist.md`
 
 ### TODO-952 - Server live state: `ConnectionId` keys instead of `Vec<u8>` conn_id allocs
 - DONE. `acquire_runtime_client_with` runs per inbound datagram; its Occupied arm built `conn_id` via `source_id().as_ref().to_vec()` - a heap alloc per packet. The same pattern sat on connect/insert, idle-check, revoke, admin-kick, closed-pending, and session-timeout paths, all because `qkey_auth` was keyed `HashMap<Vec<u8>, _>` and `LiveClientRuntime.conn_id` was owned `Vec<u8>`. `ConnectionId` (Copy, 21B inline, designed for exactly this) now keys the map via a new `Borrow<[u8]>` impl - all `&[u8]` lookups keep working unchanged. `conn_id`, `auth_result`, `remove_auth_conn_id`, and the commit/handle signatures carry `ConnectionId` end to end. Per-datagram conn_id alloc eliminated; auth bookkeeping paths alloc-free. qkey 129/129, transport-types 43/43, Omega native clean.
-- Detail: `docs/todo/todo-952-conn-id-inline-keys.md`
+- Detail: `docs/todo/done/todo-952-conn-id-inline-keys.md`
 
 ### TODO-953 - Acquire path: O(clients) DCID parse -> slice+memcmp; triple session lock -> one
 - DONE. `find_live_client_by_dcid` iterated all clients calling `parse_header` per client - O(clients) parses + 2 Vec allocs per client for every datagram from an unregistered source (spoofing amplification vector). Server SCIDs are always `MAX_CONN_ID_LEN`, so the wire DCID is now sliced out directly (short: `buf[1..21]`; long: wire `dcid_len` field) - zero allocs, scan is pure memcmp. Separately, the Occupied arm fetched `assigned_ips`/`session_id`/`session_stats` through three accessors = 3 `sessions.read()` acquisitions + 5 map lookups per datagram, plus a wasted fetch on the Vacant path. New `session_view_by_remote` does it in 1 lock + 3 lookups, fetched inside the Occupied arm only. Dead `assigned_ips_by_remote` removed. qkey 129/129, live_state 4/4, Omega native clean.
-- Detail: `docs/todo/todo-953-path-update-dcid-scan-session-view.md`
+- Detail: `docs/todo/done/todo-953-path-update-dcid-scan-session-view.md`
 
 ### TODO-954 - `LiveClientRuntime`: borrowed `&'a Arc` fields instead of 3 clones per datagram
 - DONE. The runtime built per inbound datagram carried owned `forwarding_policy`/`sessions`/`fanout_queue` - three `Arc::clone`s per packet. The only consumer needing owned Arcs is the `'static` MASQUE callback, and `Arc::clone` only needs `&Arc`. Fields are now `&'a Arc`/`&'a ClientFanoutQueue` on the existing `'a` lifetime; the callback clones through the borrow. -3 atomic refcount ops per datagram. qkey 129/129, Omega native clean.
-- Detail: `docs/todo/todo-954-runtime-borrowed-arcs.md`
+- Detail: `docs/todo/done/todo-954-runtime-borrowed-arcs.md`
 
 ### TODO-955 - MASQUE datagram sink: install once instead of rebind per datagram
 - DONE. On TUN-enabled server connections the MASQUE->TUN callback was re-installed on every inbound datagram (~13 Arc clones + `Arc::new(AtomicBool)` + `Arc::new(Mutex(Box(closure)))` + ~16 decrements from the dropped closure ~45 atomics + 4 allocs per packet) - the rebind existed only to refresh the `auth_gate` capture. The connection now owns persistent `masque_datagram_auth_gate` + `masque_logical_addr` holders (1 atomic + 1 mutex store per pass); the sink installs once and resolves `logical_addr`/`session_id`/`assigned_ips` fresh inside via the stable `sessions` handle - strictly fresher than the old rebind and migration-safe. `LiveClientRuntime.qkey_auth` also became `Option<&'a QKeyAuthState>`, killing a 2-String state clone plus a 64-byte `expected_token_sha256` String per datagram. qkey 129/129, masque 47/47, connection 326/326, Omega native clean.
-- Detail: `docs/todo/todo-955-masque-cb-install-once.md`
+- Detail: `docs/todo/done/todo-955-masque-cb-install-once.md`
 
 ### TODO-956 - Recovery ACK path: reuse scratch vectors instead of per-ACK allocations
 - DONE. `on_ack_received` allocated up to three heap vectors per inbound ACK frame purely for iterated scratch: `newly_acked: Vec<SentPacket>` (~56B/elem), plus `lost_pns: Vec<u64>` + `lost: Vec<SentPacket>` inside every `detect_lost_packets` call (ACK path and loss-timeout path). `Recovery` now carries `acked_scratch`/`lost_scratch`/`lost_pn_scratch`, moved out via `mem::take` during `&mut self` work and restored afterwards - `finish_ack_loss_accounting` takes `&[SentPacket]` and `detect_lost_packets` an out-param. Steady-state ACK processing allocates zero bookkeeping memory; sort order, RTT sampling, persistent-congestion and path-epoch semantics unchanged. recovery 50/50, clippy/fmt clean, Omega native green.
-- Detail: `docs/todo/todo-956-recovery-ack-scratch.md`
+- Detail: `docs/todo/done/todo-956-recovery-ack-scratch.md`
 
 ### TODO-957 - `Frame::Ack.ranges`: inline `SmallVec` instead of a heap `Vec` per ACK
 - DONE. Both directions allocated one `Vec` per ACK frame: the parser built `Vec::with_capacity(num_blocks+1)` per inbound ACK, and `peek_ack_at`/`take_ack_at` collected `ack_ranges` into a fresh `Vec` per outbound ACK - mostly for a single 16-byte pair. New shared `AckRanges = SmallVec<[(u64,u64); 8]>` alias backs `Frame::Ack.ranges` and the pn-space return types; <=8 blocks never touch the heap, loss-heavy frames spill transparently, and `Deref<Target=[T]>` kept every consumer (`on_ack_received`, `acknowledge_late_stream_packets`, observer, serializers) unchanged. frames/pn/types 21+27+43 green, connection tests 139/139, Omega native clean.
-- Detail: `docs/todo/todo-957-ack-ranges-smallvec.md`
+- Detail: `docs/todo/done/todo-957-ack-ranges-smallvec.md`
 
 ### TODO-958 - `AckOutcome`: inline `SmallVec` for `newly_acked`/`lost`
 - DONE. The outcome returned per inbound ACK still allocated: `newly_acked` on every acknowledging ACK, `lost` under any loss burst (`crypto_*` stays `Vec` - handshake spaces only, `Vec::new()` never allocates until first push). Both hot fields are now `SmallVec<[(u64,usize); 8]>` - typical ACK counts stay inline, bulk acks spill, and every consumer iterates through `Deref<Target=[T]>` unchanged. `AckOutcome` grows ~256B - cheaper than an alloc/free cycle. recovery 50/50, connection 139/139, Omega native clean.
-- Detail: `docs/todo/todo-958-ack-outcome-inline-vecs.md`
+- Detail: `docs/todo/done/todo-958-ack-outcome-inline-vecs.md`
 
 ### TODO-959 - FlowShaper: lock-free history length on the jitter path
 - DONE. Anti-DPI connections took the `packet_history` mutex twice per outbound packet - `jitter_range_for_traffic` locked it just to read `len()` before `record_and_prune` locked it again. An `AtomicUsize` mirror kept exact by `record_and_prune` (sole mutator, stores `len()` while holding the lock) now feeds the jitter read side: one acquisition per packet instead of two, and the read can never stall behind the writer. Same count, same thresholds. qf-stealth 127/127, Omega native clean.
-- Detail: `docs/todo/todo-959-flowshaper-lockfree-len.md`
+- Detail: `docs/todo/done/todo-959-flowshaper-lockfree-len.md`
 
 ### TODO-960 - `total_send_buffered_bytes`: running counter instead of O(streams) scan
 - DONE. `stream_send` computed connection-level pending bytes via `streams.values().map(|s| s.send_buf.len()).sum()` - a linear scan over every stream on each application write (H3 control + request streams make this real). `send_buffered_bytes` counter on the connection is now maintained at the only mutation sites (`stream_send` push += buf.len()/written; emit drain -= data_len) so the check is O(1). Exact by construction - `streams` has no removal path; `saturating_*` ops guard regardless. connection 139/139 on both feature variants, Omega native clean.
-- Detail: `docs/todo/todo-960-send-buffered-counter.md`
+- Detail: `docs/todo/done/todo-960-send-buffered-counter.md`
 
 ### TODO-961 - Observer `apply_policy`: `Option::take` instead of `Arc::clone` per ACK
 - DONE. After writing an ACK frame the transport observer's policy hook ran via `self.observer.as_ref().cloned()` - an `Arc` clone (atomic inc + dec) on every emitted ACK purely to satisfy the borrow checker (`apply_policy` needs `&mut self`). The call now moves the `Arc` out of the slot (`self.observer.take()`), invokes the hook, and restores it - zero atomic traffic per ACK. Safe by contract: the `TransportPolicyTarget` interface only exposes policy setters and can neither emit observer events nor re-enter the receive path, so the briefly empty slot is unobservable. transport 363/363 local, Omega native clean.
-- Detail: `docs/todo/todo-961-observer-apply-policy-take.md`
+- Detail: `docs/todo/done/todo-961-observer-apply-policy-take.md`
 
 ### TODO-962 - `benches/ack_pipeline.rs`: criterion evidence for the alloc-free ACK path
 - DONE. New criterion suite measuring the paths made allocation-free in TODO-956..961: `recovery_ack_steady` (send+ack cycle, ~80 ns flat across 8/64/256-packet windows - proves O(1) scratch reuse), `recovery_ack_loss_64` (63-packet loss detection, ~1.5 us cold), `pnspace_ack_emit` (24 ns inline <=8 blocks vs 330 ns spilled 64), `frame_ack_parse` (42 ns/1 block -> 1.07 us/64), `frame_ack_emit` (91 ns -> 1.82 us). Wired as `[[bench]] ack_pipeline` behind the `benches` feature; run via `cargo bench --features benches --bench ack_pipeline`. Local macOS arm64 and Omega aarch64 Linux numbers recorded.
-- Detail: `docs/todo/todo-962-ack-pipeline-bench.md`
+- Detail: `docs/todo/done/todo-962-ack-pipeline-bench.md`
 
 ### TODO-963 - Multi-hop inner ingress: buffer reuse instead of alloc+drop per datagram
 - DONE. In circuit mode every inner-hop payload paid `payload.to_vec()` on `InnerIngress::push` and dropped the `Vec` after `hop.recv` - an alloc/free per tunnelled datagram. The queue now carries a bounded `spare` list (TODO-947 pattern): `push` reuses a retired buffer, and the new `pop_into(&mut Vec)` swaps the front datagram into the persistent `inner_ingress_scratch` - no alloc, no copy, same bounds/accounting/order. circuit tests 9/9 local + Omega native clean.
-- Detail: `docs/todo/todo-963-inner-ingress-buffer-reuse.md`
+- Detail: `docs/todo/done/todo-963-inner-ingress-buffer-reuse.md`
 
 ### TODO-964 - FEC repair encoders: in-place `par_chunks_mut` instead of scratch vecs + merge
 - DONE. The GF8/GF4/GF16 rayon paths (>32 KiB payloads) allocated a `vec![0; chunk]` scratch per 16 KiB chunk, collected them, then XOR-merged everything into `out`. All three kernels XOR-accumulate into an already-zeroed `out`, so workers now write via `par_chunks_mut` straight into the destination - no per-chunk allocs, no merge pass, byte-identical output (XOR commutative, chunks disjoint; GF16 chunk size 16384 keeps u16 alignment). New par-path test verifies GF8 against a scalar `gf_mul_table` reference above the threshold. qf-fec 85/85 local + Omega native clean.
-- Detail: `docs/todo/todo-964-fec-par-inplace-accumulate.md`
+- Detail: `docs/todo/done/todo-964-fec-par-inplace-accumulate.md`
 
 ### TODO-907 - Real GF16 SIMD kernels for x86/NEON + in-kernel endianness
 - DONE. The x86 GF16 "SIMD" kernels were scalar `gf16_mul` loops that still incremented `FEC_AVX512_OPS`/`FEC_AVX2_OPS`, and `gf16_mul_scalar_slice_u16` byteswapped every 64-word chunk through stack buffers around the dispatch. `crates/qf-fec/src/gf16.rs` now carries genuine kernels: AVX-512 VBMI2 (`permutex2var_epi16`), AVX-512 VBMI (`permutexvar_epi8`, gated on F+BW+VBMI since the dispatch matrix omits BW), AVX2 (`vpshufb` nibble tables), SSE2 (vectorized carryless multiply - the only honest option below SSSE3), and NEON (`vqtbl1q_u8` + `vrev16q_u8` byteswap). The big-endian byte path resolves the policy once per call and swaps endianness in-register. qf-fec 84/84 incl. new parity tests on aarch64; workspace all-target check clean; x86 kernels compile-verified for x86_64-linux-gnu, native execution owned by hosted CI.
-- Detail: `docs/todo/todo-907-gf16-x86-real-simd-kernels.md`
+- Detail: `docs/todo/done/todo-907-gf16-x86-real-simd-kernels.md`
 
 ### TODO-908 - GF16 SVE2 kernel: nibble-table lookup instead of 16-round carryless loop
 - DONE (compile-verified). `gf16.rs` now carries a real SVE2 kernel: `svtbl_u8` nibble tables built from plain `[[u8; 16]; 4]` arrays (scalable vectors cannot be struct fields), predicated `svld1/svst1` loop, in-register byte swap via `svlsr`/`svlsl`+`svorr`. Verified by a standalone `rustc +nightly --edition 2024 -C target-feature=+sve2` mirror compile; native SVE2 execution stays an explicit boundary (no Graviton/Neoverse host here). Unrelated pre-existing `+sve2` breakage in `qf-cpu/src/simd_dispatch.rs` (46 errors, C-ACLE names absent from Rust stdarch) is recorded in the detail file - workspace-wide SVE2 compile is not claimable until that file is fixed.
-- Detail: `docs/todo/todo-908-gf16-sve2-nibble-tables.md`
+- Detail: `docs/todo/done/todo-908-gf16-sve2-nibble-tables.md`
 
 ### TODO-909 - Bound anti_replay.max_entries
 - DONE. `max_entries` had no upper bound: `usize::MAX` wrapped the Bloom sizing (`capacity*16` then `next_power_of_two`) to a zero-length bit table with `mask = u64::MAX` - an out-of-bounds panic on the first packet. `MAX_STRIKE_ENTRIES = 1 << 24` is now enforced in `AntiReplaySection::validate` (readable startup error) and clamped in `effective_capacity` so programmatic `AntiReplayConfig` construction is equally safe. qf-transport-anti-replay 16/16 incl. boundary and `usize::MAX` regression tests.
-- Detail: `docs/todo/todo-909-antireplay-max-entries-bound.md`
+- Detail: `docs/todo/done/todo-909-antireplay-max-entries-bound.md`
 
 ### TODO-910 - Audit carried dead code in optimize/udp.rs and compat shims
 - DONE. Full workspace sweep (~44 `#[allow(dead_code)]`/`unused_imports` sites): 6 dead compat shims removed from `src/optimize/udp.rs` (two live Linux batch wrappers retained), ~10 zero-caller functions deleted (orphaned factories, delegation-only `new` twins, unreachable non-x86 prefetch stub), ~20 test/bench-only constructors moved behind `#[cfg(test)]`/`cfg(any(test, feature = "benches"))` so reachability is declared instead of suppressed, and ~15 stale allows dropped where the item is actually live. `StatusData` keeps an annotated allow (serde wire contract); `qf-simd`'s `x86_extended` keeps a documented module allow (self-tested SIMD toolkit). Workspace all-targets check is now warning-free including `--features rust-tests` and `x86_64-apple-darwin` cross-checks.
-- Detail: `docs/todo/todo-910-optimize-dead-code-cluster.md`
+- Detail: `docs/todo/done/todo-910-optimize-dead-code-cluster.md`
 
 ### TODO-911 - simd_policy dispatch() comment/implementation divergence
 - DONE. The generic `dispatch()` priority comment claimed an SSE2 tier and omitted PCLMULQDQ; it now documents the real order and that SSE2 exists only as a `dispatch_bitslice` policy. Also recorded: `simd_dispatch_matrix().avx512_vbmi` deliberately excludes `avx512bw`, which is why the GF16 VBMI kernel gates BW itself.
-- Detail: `docs/todo/todo-911-simd-policy-comment-divergence.md`
+- Detail: `docs/todo/done/todo-911-simd-policy-comment-divergence.md`
 
 ### TODO-912 - Release profile: evaluate panic=abort and lto=fat
 - DONE (decision: keep profile unchanged). `panic = "abort"` rejected - two live `catch_unwind` isolation boundaries (`admin_http/server.rs:940` -> HTTP 500, `dns_signals.rs:384` -> recorded worker fault) would become daemon-aborting crashes. `lto = "fat"` rejected pending evidence - with `codegen-units = 1` the marginal gain is cross-crate inlining only; revisit if `benches/ci_regression.rs` shows a cross-crate hot-path gap. Rationale comment added to `Cargo.toml`.
-- Detail: `docs/todo/todo-912-release-profile-panic-lto.md`
+- Detail: `docs/todo/done/todo-912-release-profile-panic-lto.md`
 
 ### TODO-904 - Consolidate CI onto platform lanes and clear Clippy 1.98 stable drift
 - The floating-stable toolchain moved CI to Clippy/rustfmt 1.98.0, whose new `chunks_exact_to_as_chunks` and `manual_slice_fill` lints broke the macOS build-test and Clippy Matrix lanes: 22 sites across qf-crypto, qf-cpu, qf-engine-types, qf-stealth, qf-transport-version, and the root crate now use `as_chunks`/`as_chunks_mut` (and volatile `zeroize` for AES round-key words), plus canonical rustfmt reformat. The admin auth test helper read timeout rose from 10s to 30s so Argon2 under full-suite parallel load cannot starve the response read. CI lanes were consolidated onto the developer platform: macOS `build-test` remains the lean Rust push gate; the macOS simd-selfcheck matrix entry stays removed; `windows-core-checks` proves only Windows-gated surfaces (Wintun/WFP filters) with full test compilation still enforced via `cargo test --no-run`, which also structurally removes the 83-minute Windows suite deadlock observed in run `32614855375`. Frontend/Tauri host jobs were restored after that consolidation so Admin/Desktop check+unit, Shared UI unit, bundle budget, Playwright (including visual/axe), dependency security, and Tauri host tests run on push. Hosted run `32740406262` then exposed four stale contracts: `smol-toml` 1.6.0 advisory (now 1.6.1), Admin `svelte-check` missing `node:fs`/`node:url` types (now `@types/node` 22.20.1), Cargo feature taxonomy missing the live `specta` feature, and Tauri `generate_context!` requiring `apps/svelte-desktop/build` before Clippy. The required GitHub set is now only macOS `build-test`, frontend security/check/e2e, and Tauri host. Parked lanes were removed from the push workflow so skipped jobs cannot pad the check rollup. Hosted `frontend-e2e` installs Playwright Chromium and ignores visual screenshot specs until baselines exist. Local verification: strict rust-tests Clippy, all 22 clippy-matrix feature profiles, all-features check/clippy/lib tests (1759/1759 twice), fuzz contract plus 7/7 fuzz suite, and `cargo fmt --check` all pass.
-- Detail: `docs/todo/todo-904-ci-lane-consolidation.md`
+- Detail: `docs/todo/done/todo-904-ci-lane-consolidation.md`
 
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
 - DONE for the bakeoff decision. No advanced family is the ship default. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refuses the old ARM freeze. Ship default stays TODO-1033 rustls AES-GCM. TODO-1029 wire proof is done on Omega.
@@ -247,11 +247,11 @@
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
 - DONE (renumbered from the collided "TODO-894" used in commit `2a3beb2`; the number already belonged to the archived Brain EnvSnapshot task). The fuzz lane is migrated from nightly-only `cargo-fuzz` + AddressSanitizer to a stable deterministic corpus + generated-input regression runner. `rust-toolchain.toml` is set to floating `stable`; `config/tool-versions.env` drops `RUST_NIGHTLY_TOOLCHAIN` and `CARGO_FUZZ_VERSION`; all CI workflows use `dtolnay/rust-toolchain@stable`. `verify-reproducible-dependencies.sh` accepts floating-stable and rejects version-suffixed nightly channels. Client assignment negotiation and outbound flush now treat `ConnectionError::BufferTooShort` and `Done` as transient under netem impairment instead of dropping the circuit. The routing `cleanup_stale` path checks `nft_table_exists` before removing stale ownership records, preventing fail-open on foreign-owner or permission errors. Unimpaired 3-hop passes on Omega; the impaired 3-hop threshold gap diagnosed under this task was closed by TODO-905. Local fuzz contract and test suite are green (7/7).
-- Detail: `docs/todo/todo-906-fuzz-stable-migration.md`
+- Detail: `docs/todo/done/todo-906-fuzz-stable-migration.md`
 
 ### TODO-905 - Bound PTO backoff for nested circuit hops (impaired TCP-over-tunnel fix)
 - DONE (renumbered from the collided "TODO-895" used in commits `22b6198`/`bfa920e`; the number already belonged to the archived AesBlock task). **Diagnosis (2026-08-23):** cumulative PTO cascade in nested 3-hop QUIC-over-QUIC tunnels under 1% loss + 2% reorder - each stacked hop owns an independent RFC 9002 recovery instance, and the unbounded per-hop backoff (up to 2^16) compounds into multi-second underlay probe gaps (captured exponential 1s -> 5s inter-packet gaps) until TCP-over-tunnel times out. **Fix (commit `9edf00c`):** `Recovery::set_pto_backoff_cap` bounds the backoff exponent (clamped 1..=16, RFC default 16 kept for single connections), the transport `Config` wires the ceiling into connection recovery construction, and multi-hop circuit connections cap the exponent at 2^3 so worst-case probe spacing stays near the hop RTT scale. **Verified on the native Linux bench (Omega, release build `9edf00c`):** impaired 3-hop (1% loss, 2% reorder, 1% duplicate, 12ms delay, 4ms jitter, MTU 1472) PASSES for the first time - retained throughput ratio 0.4104 >= 0.40, max RTT 377.9ms <= 500, max jitter 82.9ms <= 150, zero owned residue; unimpaired 3-hop still PASSES with 0.9891 retained ratio and 0% loss. qf-transport-recovery 47/47 including new cap-bounding/clamp/RFC-default regressions; strict rust-tests Clippy; 1717/1717 root lib tests.
-- Detail: `docs/todo/todo-905-pto-backoff-nested-circuits.md`
+- Detail: `docs/todo/done/todo-905-pto-backoff-nested-circuits.md`
 
 
 ### TODO-883 - Prove and reconcile the live standard QUIC packet-protection baseline
@@ -335,7 +335,7 @@
 
 ### TODO-805 - Reconcile frontend dependency security advisories
 - Local implementation is complete and pushed in commit `e6e0684`: the current 35-advisory Bun baseline is mapped and resolved, the locked graph is reproducible, the frontend security gate is fail-closed and wired into CI/release, Admin/Desktop checks/builds/unit tests and bounded dev-server probes pass, and the locked ARM64 macOS Tauri host lane passes 41/41. Hosted CI, full Chromium E2E, Linux/Windows packaging, updater signing, and tagged publication remain external gates.
-- Detail: `docs/todo/todo-805-frontend-dependency-advisories.md`
+- Detail: `docs/todo/done/todo-805-frontend-dependency-advisories.md`
 
 ### TODO-755 - Remediate Tauri dependency advisories and lockfile drift
 - Local implementation is complete and pushed in commit `1048f7e`: the separately locked Tauri graph has zero vulnerabilities, an exact 19-warning reverse-path inventory, a dedicated locked Cargo Deny policy, CI/release gates, and ARM64 macOS Tauri check/Clippy/tests pass with 41/41 tests. Hosted CI, Linux/Windows packaging, updater signing, and tagged publication remain external release gates.
@@ -393,31 +393,31 @@
 
 ### TODO-1029 - Omega pcap/wire proof for private AEAD upgrade (TODO-885)
 - DONE. Both peers `mode=off`: initial/handshake open rustls AES-GCM, 9 standard 1-RTT below boundary, 50 private AEGIS 1-RTT above boundary, zero unopened, zero standard above boundary. Control run (client off + server stealth): 69/69 rustls-only, no private install. Coalesced GSO datagrams split by trial open in `src/bin/qf-aead-wire-proof.rs`.
-- Detail: `docs/todo/todo-1029-omega-pcap-private-aead.md`
+- Detail: `docs/todo/done/todo-1029-omega-pcap-private-aead.md`
 
 ### TODO-1030 - Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
 - DONE. Keep/replace record is in the detail file. Ship default is `packet_protection_mode=standard`. Opt-in post-auth owner is S-AEGIS. TODO-1031 is closed with opt-in rustls-standard 0-RTT; the ship default remains off.
-- Detail: `docs/todo/todo-1030-custom-vs-standard-systems-audit.md`
+- Detail: `docs/todo/done/todo-1030-custom-vs-standard-systems-audit.md`
 
 ### TODO-1031 - Rustls-standard 0-RTT transport path (never private AEAD)
 - DONE. Opt-in rustls-standard 0-RTT remains default-off and never uses private AEAD. Only complete, explicitly replay-safe client bidirectional streams are admitted; H3/MASQUE/TUN and DATAGRAM remain post-handshake/1-RTT. Shared stateful tickets and fail-closed anti-replay, packet-level fallback, and H3 425 body draining are tested; no reconnect-latency or fingerprint gain is claimed.
-- Detail: `docs/todo/todo-1031-later-rustls-0rtt-investigation.md`
+- Detail: `docs/todo/done/todo-1031-later-rustls-0rtt-investigation.md`
 
 ### TODO-1032 - Same-API AEAD bakeoff parent program
 - DONE. S-AEGIS clears 10 percent vs R-RING and R-LC on both ARM hosts at P1 1200-1400. First-party does not. x86_64 UNAVAILABLE. Default unchanged.
-- Detail: `docs/todo/todo-1032-same-api-aead-bakeoff.md`
+- Detail: `docs/todo/done/todo-1032-same-api-aead-bakeoff.md`
 
 ### TODO-1033 - Ship default rustls AES-GCM
 - DONE. `packet_protection_mode=standard`. Bakeoff did not flip the default.
-- Detail: `docs/todo/todo-1033-ship-default-rustls-aes-gcm.md`
+- Detail: `docs/todo/done/todo-1033-ship-default-rustls-aes-gcm.md`
 
 ### TODO-1034 - Replace first-party Initial AES-GCM and AesHp with ring/aws-lc
 - DONE. Initial seal/open and header protection are ring AES-128. First-party Initial is slower on the same API (Omega P1 1200: I-RING 1120 ns, F-AES 115441 ns).
-- Detail: `docs/todo/todo-1034-replace-initial-aes-hp-ring.md`
+- Detail: `docs/todo/done/todo-1034-replace-initial-aes-hp-ring.md`
 
 ### TODO-1035 - Move TLS-Cover and first-party ChaCha20-Poly1305 onto rustls/ring
 - DONE. TLS-Cover and production QKey storage use ring AES-GCM / ChaCha20-Poly1305. The legacy `QFENC1` fixture seals with `RingChaCha20Poly1305`; TODO-1066 keeps one first-party ciphertext from `a87b9584` and opens it with ring.
-- Detail: `docs/todo/todo-1035-move-cover-chacha-to-rustls.md`
+- Detail: `docs/todo/done/todo-1035-move-cover-chacha-to-rustls.md`
 
 ### TODO-1036 - Evaluate rustls aws-lc-rs for the standard AES-GCM path
 - ARM verdict DONE: keep ring. `rustls-aws-lc` stays a non-default feature. Omega P1 1400 R-LC 1360 ns vs R-RING 1280 ns. macOS P1 1400 R-LC 583 ns vs R-RING 667 ns, inside timer noise.
@@ -426,23 +426,23 @@
 
 ### TODO-1037 - Pin standard AEGIS/MORUS/rustls owners
 - DONE. Pins: aegis 0.9.18, morus 0.1.3 (unmaintained, license-clean, measured), ring 0.17.14, rustls PacketKey, aws-lc-rs 1.18.1 behind `rustls-aws-lc`. Default graph has none of the bakeoff crates.
-- Detail: `docs/todo/todo-1037-pin-standard-aead-owners.md`
+- Detail: `docs/todo/done/todo-1037-pin-standard-aead-owners.md`
 
 ### TODO-1038 - Same-API harness and matrix execution
 - DONE. Artifacts in `scripts/out/benchmarks/aead-bakeoff-macos-arm/` and `aead-bakeoff-omega-arm/`. x86_64 UNAVAILABLE. Decision size P1 1400.
-- Detail: `docs/todo/todo-1038-same-api-aead-matrix.md`
+- Detail: `docs/todo/done/todo-1038-same-api-aead-matrix.md`
 
 ### TODO-1039 - Profile why first-party AEGIS/MORUS lose
 - DONE. No second permutation. In-place NEON AESENC cut C-AEGIS-L P1 1400 from 2500/4120 ns to 750/1360 ns (macOS/Omega). S-AEGIS stays ahead at 334/720 ns. allocs=0, copied=16. Omega `perf` blocked (`perf_event_paranoid=4`).
-- Detail: `docs/todo/todo-1039-profile-first-party-aead-slowpath.md`
+- Detail: `docs/todo/done/todo-1039-profile-first-party-aead-slowpath.md`
 
 ### TODO-1040 - QUIC-shaped ciphertext distinguishability
 - DONE. 10k x 1400 B, both ARM hosts, `cheap_keyless_distinguisher=false`. Private ciphertext is not a stealth win over AES-GCM.
-- Detail: `docs/todo/todo-1040-quic-ciphertext-distinguishability.md`
+- Detail: `docs/todo/done/todo-1040-quic-ciphertext-distinguishability.md`
 
 ### TODO-1041 - Honest AEAD/FEC/stealth/transport integration contract
 - DONE. No unique hook. Pipeline stays pad, then AEAD+HP, then timing, then FEC of the sealed datagram.
-- Detail: `docs/todo/todo-1041-aead-fec-stealth-integration-contract.md`
+- Detail: `docs/todo/done/todo-1041-aead-fec-stealth-integration-contract.md`
 
 ### TODO-1042 - Next-gen custom AEGIS/MORUS design (gated)
 - SKIP. No unique hook. In-place NEON AESENC is in the existing update and still loses to libaegis. No new permutation.
@@ -454,7 +454,7 @@
 
 ### TODO-1044 - Post-auth AEAD owner decision
 - DONE. Pick: opt-in S-AEGIS. Ship default stays `packet_protection_mode=standard`. `auto` does not upgrade. Production enable still waits on TODO-1029. The removal of homemade AEGIS/MORUS is TODO-1045.
-- Detail: `docs/todo/todo-1044-post-auth-aead-owner-decision.md`
+- Detail: `docs/todo/done/todo-1044-post-auth-aead-owner-decision.md`
 
 ### TODO-1045 - Drop homemade AEGIS/MORUS, keep rustls AES-GCM-128 and libaegis
 - DONE. Homemade AEGIS, MORUS, and `CryptoAeadPlan` are removed. `PrivateAeadFamily` has only `Aegis128L`; `force_aead` accepts only `auto`/`aegis`. `off`/`performance` pin post-auth payload to libaegis AEGIS-128L; stealth modes and `dynamic` pin AES-GCM-128. qf-crypto 104/104 at close.
@@ -462,99 +462,99 @@
 
 ### TODO-1046 - FEC repairs as normal QUIC packets in stealth modes
 - DONE. `stealth`, `Stealth MAX`, `dynamic`, and `manual` use `FecFraming::QuicFrame`: repairs ride a sealed DATAGRAM (`0xFE` + symbol, no UDP `0xF1 0xEC`). Those modes drop a cleartext wrapper. `off` and `performance` keep `write_packet`. A symbol from an older epoch is rejected. Repair packets can be padded to the source sealed length. qf-fec 110/110.
-- Detail: `docs/todo/todo-1046-in-quic-fec-framing.md`
+- Detail: `docs/todo/done/todo-1046-in-quic-fec-framing.md`
 
 ### TODO-1047 - Real ClientHello and transport parameters from one browser capture
 - DONE. `crates/qf-stealth/fixtures/transport_params.toml` is the single versioned persona source: ClientHello cipher order, extension order, groups, key shares, ALPN, and the full transport-parameter block per engine. Chromium is a real Chrome-154 wire capture (`scripts/capture/quic_initial_listener.py` + tshark), Firefox is documented neqo source constants, Safari is honestly marked `unverified-catalog`. The same fixture feeds the rustls Initial TP block (`fixture_transport_params`, real local SCID threaded through the provider chain) and the internal flow-control config — no independent tables remain. rustls emits only mintable key shares (persona groups ∩ ring groups; ML-KEM narrows offers, never faked). Freshness gate `verify-fingerprint-freshness.sh` fails stale verified fixtures and warns on unverified ones.
-- Detail: `docs/todo/todo-1047-browser-capture-clienthello.md`
+- Detail: `docs/todo/done/todo-1047-browser-capture-clienthello.md`
 
 ### TODO-1048 - Replace domain fronting with a real Reality fallback
 - DONE. Domain fronting is gone from the wire path: SNI always equals the hop certificate name. `CoverTargetRotator` (qf-stealth) plus `stealth.reality_cover_targets` replace `enable_domain_fronting`/`fronting_domains` (legacy keys still parse; `true` fails validation). `RealityProxy::new_with_targets` relays probe bytes unchanged to configured cover hosts. QKey `df_sni_*` wire keys unchanged; `off` strategy added. CLI/frontend/docs migrated (`--cover-target`, `--disable-cover`; deprecated aliases retained).
-- Detail: `docs/todo/todo-1048-reality-replaces-domain-fronting.md`
+- Detail: `docs/todo/done/todo-1048-reality-replaces-domain-fronting.md`
 
 ### TODO-1049 - Delete dead first-party AES-GCM and ChaCha
 - DONE. First-party AES/GCM/ChaCha20/Poly1305/AesHp modules and `chacha20_blocks_x4/x16` removed; ring/libaegis are the only AEAD owners. Retry tag uses `aes128_gcm_tag_aad_only` on ring. qf-crypto 59/59, packet 42/42, QKey legacy 13/13 green.
-- Detail: `docs/todo/todo-1049-delete-dead-first-party-aead.md`
+- Detail: `docs/todo/done/todo-1049-delete-dead-first-party-aead.md`
 
 ### TODO-1050 - Derive QUIC packet keys with ring HKDF
 - DONE. `hkdf.rs` extract, expand, HMAC-SHA256, and SHA-256 are ring. The hand-rolled expand loop and the production expects are gone. RFC 9001 Appendix A.1 key, IV, and HP vectors already matched the previous labels, so the bytes did not change. A rustls Initial seal opens with these keys and the reverse. qf-crypto 60/60. Clippy `-D warnings` on `qf-crypto --lib` is clean.
-- Detail: `docs/todo/todo-1050-quic-kdf-via-ring-hkdf.md`
+- Detail: `docs/todo/done/todo-1050-quic-kdf-via-ring-hkdf.md`
 
 ### TODO-1051 - Remaining datapath speed without a new cipher
 - DONE. An admitted 1-RTT run is framed first and sealed with one `seal_batch` (`send_admitted_batch`). Eight equal datagrams: 1 seal call, 8 packets, peer opens every packet. GSO/sendmmsg syscall count stays 1 for that burst. TODO-927 is the only 925-964 item not DONE. No new SIMD kernel. TODO-902, TODO-901, and TODO-1036 stay on their own ids.
-- Detail: `docs/todo/todo-1051-datapath-speed-not-cipher.md`
+- Detail: `docs/todo/done/todo-1051-datapath-speed-not-cipher.md`
 
 ### TODO-1052 - One wire byte budget for padding, cover, and FEC
 - DONE. One `BudgetLedger` per connection pays repairs, trace padding, and cover/chaff from the same counters; `stealth`/`stealth_max`/`dynamic` run `persona-trace` on a real Chrome-154 capture fixture, `manual` may pick `fixed-cell`, `off`/`performance` own no ledger and emit zero stealth bytes. Denied spends drop with telemetry, never over the cap.
-- Detail: `docs/todo/todo-1052-one-wire-byte-budget.md`
+- Detail: `docs/todo/done/todo-1052-one-wire-byte-budget.md`
 
 ### TODO-1053 - One send clock under the PTO threshold
 - DONE. Congestion control is the only continuous limiter. `clamp_shaping_delay` caps extra delay at `pto/4` (`shaping_delay_clamps_to_one_quarter_of_pto`: 50 ms requested, 20 ms PTO, 5 ms result; zero PTO yields zero). `StealthManager` no longer calls `RateChoker::shape`. A manual `enable_realtime_choke` sets `max_pacing_rate` (`ack_only_stays_undelayed_when_manual_choke_is_enabled`). Presets `performance`, `stealth_max`, and `dynamic` leave the choke off. Pure ACKs stay undelayed.
-- Detail: `docs/todo/todo-1053-single-clock-under-pto.md`
+- Detail: `docs/todo/done/todo-1053-single-clock-under-pto.md`
 
 ### TODO-1054 - Cover PING only when the persona trace would send
 - DONE. The 15 s/30 s grid is gone: `BudgetLedger::cover_ping_due` replays the persona's captured client-send deltas against the last wire emission, pads the PING to the trace length, and pays the shared budget — suppressed slots are consumed, never replayed. One budgeted keepalive past `idle/2` survives traces quieter than the idle horizon (`COVER_PING_IDLE_KEEPALIVE`).
-- Detail: `docs/todo/todo-1054-cover-ping-follows-persona-trace.md`
+- Detail: `docs/todo/done/todo-1054-cover-ping-follows-persona-trace.md`
 
 ### TODO-1055 - QPACK, User-Agent, and server push only on the outer hop
 - DONE. Inner `/tun` streams carry pseudo + functional `x-qf-*` headers only; outer-hop MASQUE/H3 requests take the persona header list and debit the wire ledger. `use_qpack_headers` now really gates the QPACK dynamic table. Fake server-push generation removed end to end (sender, brain triggers, telemetry, `Event::PushPromise`); the original receive path disabled `MAX_PUSH_ID`, parsed and dropped `CANCEL_PUSH`/`MAX_PUSH_ID`, and rejected push streams and `PUSH_PROMISE`. TODO-1110 corrects the original server-push stream error code and wires application-close delivery. `enable_server_push_cover = true` is a config error. WebTransport cover is a one-shot outer-hop emit.
-- Detail: `docs/todo/todo-1055-outer-hop-only-h3-masquerade.md`
+- Detail: `docs/todo/done/todo-1055-outer-hop-only-h3-masquerade.md`
 
 ### TODO-1056 - Persona change via connection migration, not a 120 s handshake
 - DONE. The mid-connection rotation timer is gone (`maybe_rotate_fingerprint`, `runtime_rotation_rate`, 30 s escalation hack); persona rotation is next-session only. Disguise is now a QUIC port migration: uniform 120-600 s draw on stealth/stealth_max/dynamic, `begin_disguise_migration` drives the existing PATH_CHALLENGE path API, the runtime keeps the old socket as standby and rolls back on `FailedValidation`. `off`/`performance` never migrate; DCID stays stable (NAT-rebind signature).
-- Detail: `docs/todo/todo-1056-persona-rotation-via-migration.md`
+- Detail: `docs/todo/done/todo-1056-persona-rotation-via-migration.md`
 
 ### TODO-1057 - Shape the outer IP and UDP header to the claimed OS
 - DONE. `src/stealth/outer_header.rs` maps the persona OS to socket options: TTL 128 for Windows / 64 elsewhere (p0f defaults), DF=1 for the Chromium-family QUIC personas and DF=0 for iOS, hop-limit-only on IPv6. Applied at connect and re-applied after disguise-migration rebinds (`StealthManager::persona_os` is the live source). Fail-soft with one process-wide warning; the inner `PacketNormalizer` and ICMP exit policy are unchanged. IPv4 ID is not socket-controllable — documented gap, no raw-socket requirement added. Real-socket tests on macOS verify the kernel-visible TTL/DF via getsockopt.
-- Detail: `docs/todo/todo-1057-outer-ip-udp-persona.md`
+- Detail: `docs/todo/done/todo-1057-outer-ip-udp-persona.md`
 
 ### TODO-1058 - DoH uses the same persona and is the only DNS
 - DONE. `DnsProxyConfig.allow_udp_fallback` gates the cleartext upstream path — stealth modes return SERVFAIL with zero UDP sends (real-send counter proof); `off`/`performance` and the server TUN forwarder keep it. `doh_persona_ciphers` installs the frozen persona's `TlsProfile::cipher_suites` onto a preconfigured rustls client (`use_preconfigured_tls`, persona order, `h2` ALPN). Derived from `EngineConfig.stealth` in `ClientDnsRuntime::prepare` and from the resolved `stealth_config` in the standalone client.
-- Detail: `docs/todo/todo-1058-doh-matches-persona.md`
+- Detail: `docs/todo/done/todo-1058-doh-matches-persona.md`
 
 ### TODO-1059 - dynamic keeps one wire image for the whole connection
 - DONE. `DynamicWireImage { Stealth, Performance }` freezes at connect (`stealth` default; `dynamic_wire_image = "performance"` for the thin image). All shape keys are inert under `mode = "dynamic"` in both TOML layers and the QKey override path. `brain_runtime_permissions()` denies every packet-shape actuator; probe escalation only moves the repair-ratio hint (`probe_level` -> `fec_hint_ppm`) and the Reality/MASQUE armed bit. The traffic-analysis policy and cover/WT gates key on the frozen image, never the level. Both images stay AES-128-GCM.
-- Detail: `docs/todo/todo-1059-dynamic-holds-one-wire-image.md`
+- Detail: `docs/todo/done/todo-1059-dynamic-holds-one-wire-image.md`
 
 ### TODO-1060 - Brain sensors may switch repairs and Reality, not the packet shape
 - DONE. The epsilon-greedy bandit, Tamaraw table, `StealthRuntimePolicy`/`StealthRuntimeDelta` and every padding/jitter/bias/granularity/CC writer are gone. The Brain keeps sensors (Kalman CE, JS divergence, reorder, RTT, probe bit) and emits exactly three actuators: the EMA-bounded repair-ratio hint (inside the TODO-1052 cap), the Reality/MASQUE armed bit, and the congestion-driven ACK threshold — which stays because it only moves *when* ACKs emit, never the length set, and is operator-lockable via `BrainRuntimePermissions`. `apply_policy` performs zero environment reads. Acceptance: 1000 brain ticks under shifting loss never touch `PaddingStrategy`, timing, or framing.
-- Detail: `docs/todo/todo-1060-brain-sensors-not-pattern.md`
+- Detail: `docs/todo/done/todo-1060-brain-sensors-not-pattern.md`
 
 ### TODO-1061 - Maybenot as the measured wire defense
 - DONE (adapter). `maybenot = "2.2.2"` pinned on the connection crate; `MaybenotRuntime` (one `Framework` per connection) reports `NormalSent`/`TunnelSent`/`TunnelRecv`/`NormalRecv`/`PaddingSent` — direction-only events, upstream carries no length field. `SendPadding` becomes a QUIC `PADDING` frame filled to `path_mtu - 48`, paid from `try_spend_wire_cover` (TODO-1052) or dropped with `MAYBENOT_PADDING_BUDGET_DROPPED`. `BlockOutgoing` opens a send block clamped to `pto/4` that never holds pure ACKs; held pads surface after `BlockingEnd`. Operator opt-in via `stealth.maybenot_machine`; `off`/`performance` ignore it, invalid strings fail closed, no preset ships one and `Stealth MAX` stays on the persona trace. Simulator harness `scripts/benchmarks/maybenot_sim.rs` ran a smoke trace (14.29% pad share); real WF overhead/accuracy run not performed — command recorded in the TODO file.
-- Detail: `docs/todo/todo-1061-maybenot-wire-defense.md`
+- Detail: `docs/todo/done/todo-1061-maybenot-wire-defense.md`
 
 ### TODO-1062 - Stop emitting the synthetic ClientHello
 - DONE. `key_share_ext`, `generate_client_hello`, and `FingerprintProfile.client_hello` are gone. Cover plaintext is random, not a stamped handshake. Startup validation builds a rustls ClientHello for each persona (`rustls_startup_validation_builds_every_persona_hello`). `every_supported_persona_controls_the_real_rustls_client_hello_order` still passes.
-- Detail: `docs/todo/todo-1062-remove-synthetic-clienthello.md`
+- Detail: `docs/todo/done/todo-1062-remove-synthetic-clienthello.md`
 
 ### TODO-1063 - When UDP is blocked, fall back to MASQUE or real TLS
 - DONE. `OuterHop::{None, Masque, TlsHttp}` arms a one-time retry in `Engine::connect` after a reachability failure (UDP unreachable or timeout). The synthesized two-hop circuit runs relay -> exit via the existing MASQUE machinery; `tls_http` is rejected until an in-tree HTTP CONNECT client exists. `it-outer-hop-fallback` ferries real inner QUIC bytes over a loopback relay association.
-- Detail: `docs/todo/todo-1063-udp-blocked-fallback.md`
+- Detail: `docs/todo/done/todo-1063-udp-blocked-fallback.md`
 
 ### TODO-1064 - ECH only on a shared outer hop
 - DONE. rustls 0.23.45 `EchConfig`/`with_ech` (no bump, no fork). `qf_dns::https_record` parses the `ech` SvcParam from the DoH HTTPS answer; `resolve_outer_hop_ech` injects it into the shared outer hop / circuit entry hop only, before the engine dials. Direct UDP and the inner listener carry no ECH state; no GREASE when the record is absent. HPKE suites via `qf-hpke`, a pure-Rust `rustls::crypto::hpke::Hpke` provider over `hpke-rs` (rustcrypto backend) — always compiled in, no aws-lc-sys (provider swapped after review; `rustls-aws-lc` stays opt-in for bakeoff comparisons only). Wire-verified: the real rustls ClientHello carries extension `0xfe0d` with the ECH public_name as outer SNI for ECH personas, nothing for Brave or absent records.
-- Detail: `docs/todo/todo-1064-ech-on-shared-outer-hop.md`
+- Detail: `docs/todo/done/todo-1064-ech-on-shared-outer-hop.md`
 
 ### TODO-1065 - Retry integrity tag must match the RFC vector and must not panic
 - DONE. `aes128_gcm_tag_aad_only` returns `Result`. RFC 9001 Appendix A.4 tag `04a265ba2eff4d829058fb3f0f2496ba` matches for ODCID `8394c8f03e515708`. The 16-byte XOR compare is unchanged. `cargo test --offline --lib retry_integrity` 2/2.
-- Detail: `docs/todo/todo-1065-retry-tag-rfc-vector.md`
+- Detail: `docs/todo/done/todo-1065-retry-tag-rfc-vector.md`
 
 ### TODO-1066 - Freeze one pre-ring QFENC1 ciphertext and open it with ring
 - DONE. Golden sealed by first-party ChaCha20-Poly1305 at `a87b9584` (key `0x31` x32, nonce `0x91` x12, counter 0, empty AAD). `legacy_envelope_frozen_from_a87b9584_opens_with_ring` opens it with ring and rejects a flipped tag. `cargo test --offline --lib legacy_envelope_frozen` 1/1.
-- Detail: `docs/todo/todo-1066-legacy-qkey-golden-ciphertext.md`
+- Detail: `docs/todo/done/todo-1066-legacy-qkey-golden-ciphertext.md`
 
 ### TODO-1067 - Rewrite present-tense claims about deleted crypto
 - DONE. TODO-1035 no longer says the fixture uses first-party ChaCha. TODO-626 is marked historical. The GHASH regression-proof paragraphs in DOCUMENTATION and MAP are dated 2026-08-03. The MAP subtle sentence is stamped superseded by TODO-1049. TODO-1049 "Current code" is now "Plan at open". The 2026-08-03 constructor section is labeled a historical snapshot. Historical close counts were not rewritten.
-- Detail: `docs/todo/todo-1067-stale-crypto-status-claims.md`
+- Detail: `docs/todo/done/todo-1067-stale-crypto-status-claims.md`
 
 ### TODO-1068 - Audit the crypto owner by behavior, not only by source strings
 - DONE. Check 4n is unchanged. Check 4n-behavior runs the NIST AES-GCM test, the libaegis CFRG test, and the RFC 9001 A.4 Retry tag test, and fails if a filter matches zero tests. The existing crypto unsafe-fn inventory stays the only unsafe gate. Dry run: both crypto lines passed. Exit 1 from the six pre-existing AMX, Windows, and Linux criticals. Those checks were not edited.
-- Detail: `docs/todo/todo-1068-crypto-owner-behavior-audit.md`
+- Detail: `docs/todo/done/todo-1068-crypto-owner-behavior-audit.md`
 
 ### TODO-1069 - Remove the write-only DATA_AEAD_OVERRIDE_MODE selector residue
 - DONE. The atomic, `install_data_aead_selection`, and `install_data_aead_config` are gone. Tests assert `CryptoConfig::validate`. Callers in qf-crypto, fuzz, rt-property, and rt-security were retargeted. qf-crypto 59/59. Fuzz `crypto_operations_stable` passed. Property and security suites compile.
-- Detail: `docs/todo/todo-1069-remove-write-only-aead-override.md`
+- Detail: `docs/todo/done/todo-1069-remove-write-only-aead-override.md`
 
 ### TODO-1070 - `--no-default-features` build fails on unconditional geoip module vs optional maxminddb
 - DONE (2026-09-22). Two masked layers fixed, API surface unchanged:
@@ -738,7 +738,7 @@
 
 ### TODO-1110 - Return the RFC HTTP/3 error for an unauthorized push stream
 - DONE. A server push stream and ungranted `PUSH_PROMISE` now close the client with wire `H3_ID_ERROR` (0x108); a client-initiated push stream closes the server with wire `H3_STREAM_CREATION_ERROR` (0x103). Paired 1-RTT tests assert the peer-received application codes; unknown unidirectional types remain nonfatal. The prior audit claim that the server returned `H3_FRAME_UNEXPECTED` for a correctly initiated client push was false. The remaining H3 error classes and runtime flush proof belong to TODO-1117.
-- Detail: `docs/todo/todo-1110-h3-unauthorized-push-error.md`
+- Detail: `docs/todo/done/todo-1110-h3-unauthorized-push-error.md`
 
 ### TODO-1111 - Restore Windows compilation and outer-header socket policy
 - OPEN. TODO-1057 added an unconditional `std::os::unix::io::AsRawFd` import and `RawFd` API in `src/stealth/outer_header.rs`, while `src/stealth/mod.rs` exports the module and the client calls it without a Windows gate. The native Windows client build therefore cannot compile this path, and the required CI matrix is macOS-only. Implement a Windows socket backend for TTL/hop-limit and supported DF control, retain truthful per-option outcomes, gate the Windows build on push/PR, and prove migration reapply.
@@ -772,45 +772,49 @@
 - OPEN. A real Initial-before-Retry v2 handshake now retransmits TLS CRYPTO, but the Retry receive path still leaves the old Initial in `Recovery` while resetting its packet number to zero. RFC 9002 Section 6.3 requires a full loss-recovery and congestion reset including timers. Preserve the TLS transcript, configured CC and callbacks; prove v1/v2 Retry, induced loss, 0-RTT disposition and negative Retry immutability with real peers.
 - Detail: `docs/todo/todo-1118-retry-recovery-state-reset.md`
 
+### TODO-1119 - Archive completed task details and repair their links
+- DONE. All 327 clearly completed active details were moved to `docs/todo/done/` with matching SHA-256 before reference repair; 133 retained Git tracking and 194 remain ignored local files. Eight moved details needed exact internal link updates. All 987 board detail links and 1,094 task paths resolve. TODO-720 through TODO-723 had stale archived `OPEN` metadata, reconciled against their completed board records. Open and ambiguous details stayed in place.
+- Detail: `docs/todo/done/todo-1119-archive-completed-task-details.md`
+
 ## Completed
 
 ### TODO-899 - Multi-RHS Gauss for FEC decode under loss
 - DONE. decoder8 true multi-RHS (`O(u^2*m + B*u*m)`, commit `5588f6d`); decoder16 word-domain multi-RHS with one augmented `yb[m][words]` matrix replacing the per-word rebuild + re-solve (`7dc0dc9`), pivot-row clone hoisted per column (`c7f4f11`). Correctness: qf-fec `82/82`, e2e `14/14`, root `1717/1717`. New permanent regression gate `fec_decode16_elimination/loss10_k16` (K=16, 10% loss, full recovery path): **1.36 ms median / 128 payloads, ~94 Kelem/s**. The original "10x" figure was never measurable and is replaced by this baseline; historical pre-899 comparison optional.
-- Detail: `docs/todo/todo-899-fec-gauss-per-byte.md`
+- Detail: `docs/todo/done/todo-899-fec-gauss-per-byte.md`
 
 ### TODO-900 - Memory-path overhead: policy zeroize, ledger decision, block-size evidence
 - DONE (revised scope). Reality check first: the "per-connection eager 16-64M pools" claim was stale - `global_pool()` is already the single process-wide pool. Implemented: free-time zeroize now policy-driven via `QUICFUSCATE_POOL_ZEROIZE_ON_FREE` (**default ON** - it is the cross-connection stale-data barrier; both modes unit-tested, commit `faf7044`). Ledger lock-free rewrite **scope-reduced with rationale**: measured ~10% of cycle cost, no header space for per-block state, fail-closed transition validation kept (see detail Deviations). New permanent bench `memory_pool_cycle` (512 cycles, equal 4 MiB working set): warm-state medians - 64K zeroize ON 1.20-1.35ms vs OFF 0.78-0.83ms (~45% memset cost), MTU 4K ON ~348us vs OFF ~323us (~8%), **4K beats 64K by ~3.5x regardless of policy**. Cold first-run numbers retracted as outliers. Security default unchanged; costs are now explicit and regression-gated. Commits `faf7044`, `8b96221`.
-- Detail: `docs/todo/todo-900-per-connection-pool.md`
+- Detail: `docs/todo/done/todo-900-per-connection-pool.md`
 
 ### TODO-894 - Cap EnvSnapshot per ACK in Brain send path
 - DONE. `StealthBrain` captures one `EnvSnapshot` at construction and reuses it for every `apply_policy` tick via `&self.environment`; the per-tick `EnvSnapshot::capture()` (full `env::vars_os`, millions of allocs at 10k pps) is removed. Only consumer is `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1` (startup config), so stealth behavior is byte-identical. Root lib `1713/1713`, Clippy clean. Commits `a456308`, `8adeba3`.
-- Detail: `docs/todo/todo-894-brain-envsnapshot-per-ack.md`
+- Detail: `docs/todo/done/todo-894-brain-envsnapshot-per-ack.md`
 
 ### TODO-895 - Remove AesBlock Drop from hot loop
 - DONE. `AesBlock` no longer implements `Drop` (every `xor`/`and`/`from_bytes` temporary previously paid a 16-byte volatile memset; 117 `from_bytes` call sites per seal/open). Key protection stays at the owner boundary: `Aegis128L/X4/X8` `Drop` still calls `zeroize_aegis_state` (erasure-observed tests green). `AesHp` caches the AES-NI round-key schedule in a `OnceLock` instead of expand+zeroize per protected packet; its `Drop` erases the schedule before the key. qf-crypto `151/151`, erasure tests green. Commit `6e98929`, `e909a03`.
-- Detail: `docs/todo/todo-895-aesblock-drop-hotloop.md`
+- Detail: `docs/todo/done/todo-895-aesblock-drop-hotloop.md`
 
 ### TODO-896 - Graceful TUN EAGAIN handling
 - DONE. Server HTTP/3 + MASQUE downlink absorb `WouldBlock` with `Metrics::record_tun_write_backpressure` (new Prometheus counter `quicfuscate_tun_write_backpressure_absorbed_total`); real faults keep the hard fail-closed path. Client `drain_ingress_to_tun` is lossless: failed packet and remainder are re-queued to the ingress front in order via `ClientTunnelIngress::restore` with capacity bounds; new `IoDriverStats.tun_write_backpressure` + snapshot. Also fixed `restore_dns` no-op ordering (check captured state before resolving the network service). Root lib `1713/1713`, io_driver `15/15`. Commits `48f4881`.
-- Detail: `docs/todo/todo-896-tun-eagain-graceful.md`
+- Detail: `docs/todo/done/todo-896-tun-eagain-graceful.md`
 
 ### TODO-897 - Fix LazyDecoder seen_seqs leak and fastpath death
 - DONE. Window-relative safe reset before the flush/push decision, guarded by (a) no recovery in flight (buffers empty after the previous repair-driven flush) and (b) newest block >= 2k past the tracked minimum. Partial `retain` evictions were proven corrupt by the e2e exact-delivery and no-duplication contracts and rejected. New regression `test_lazy_decoder_seen_seqs_bounded_under_permanent_loss` models permanent loss with realistic repair cadence, asserts `len <= k`. qf-fec `82/82`, e2e `14/14`, root `1713/1713`. Commit `9873595`.
-- Detail: `docs/todo/todo-897-lazydecoder-leak.md`
+- Detail: `docs/todo/done/todo-897-lazydecoder-leak.md`
 
 ### TODO-898 - Fix AVX512 and SVE2 GF16 carry-less reduction
 - DONE. AVX512 VPCLMULQDQ path now uses the same four-fold reduction as the SSE path (`GF16_PCLMUL_FOLDS`) - the single fold was the exact defect documented and fixed in SSE with a differential test. SVE2 kernel replaced the integer-product `svmul/svmulh` form (not carryless) and wrong constant `0x000B` with the Russian-peasant scheme matching the NEON kernel and the scalar field (`0x100B`, x^16 implicit). Miri full coverage on omega Linux aarch64: 33/33 AEGIS+MORUS, 0 UB. qf-simd `61/61`, qf-fec `82/82`. Commit `c51c5e3`.
-- Detail: `docs/todo/todo-898-avx512-sve2-gf16-fix.md`
+- Detail: `docs/todo/done/todo-898-avx512-sve2-gf16-fix.md`
 
 
 ### TODO-903 - Brain jitter gate and FlowShaper tuning
 - DONE. Jitter half: the core timing gate skips ACK-only packets via `SendInfo.congestion_controlled`; stealth jitter stays on every ack-eliciting packet (`282e096`). Residual gap closed: `StealthManager::process_outgoing_packet` still jittered every datagram through the FlowShaper path (AntiDpi) - it now takes the `ack_only` class from `!send_info.congestion_controlled` at both `core/connection/send.rs` call sites, bypasses FlowShaper jitter for pure ACK datagrams, keeps recording them as `StealthPacketClass::Ack` for the rate estimator, and leaves the explicit realtime choke applied (configured bandwidth cap covers every wire byte). FlowShaper half: traffic-aware range from the bounded 2s history - burst >=32 records -> low half floored at min/2, idle <8 -> full spread, steady -> classic uniform; replaces the flat uniform that fingerprinted bursts as constant-ish profiles. CE-ratio deviation documented in the detail file. qf-stealth `127/127`, root flow_shaper `12/12`, stealth suite `169/169` incl. `ack_only_packets_bypass_jitter_but_feed_history`. Commits `65a6e7c`, `282e096`.
-- Detail: `docs/todo/todo-903-brain-jitter-flowshaper.md`
+- Detail: `docs/todo/done/todo-903-brain-jitter-flowshaper.md`
 
 
 ### TODO-893 - Modularize the Performance regression runner and artifact report path
 - DONE. `test-performance-regression.sh` now validates `throughput,latency,memory,cpu,hotpath,simd,scalability,report` with `--only`, gates `qf_bench_preflight` and native build to `throughput/latency/hotpath/simd` only, splits the former combined `memory_cpu` into separate `memory` and `cpu` scopes with distinct `fast_profile_omits_scope` handling, implements `write_current_snapshot` as the sole `performance_current.json` writer and `run_report_scope` with explicit `PASS/SKIP/FAIL`, and emits one selection record plus one pre-execution record per canonical scope with `not_selected_by_scope` reasons. `scripts/tests/fast/test-performance-scope-contract.sh` covers help, unknown/empty/malformed/duplicate/conflict, default, each scope, combinations, and failure propagation; `CURRENT_FILE` gap is closed.
-- Detail: `docs/todo/todo-893-performance-runner-granularity.md`
+- Detail: `docs/todo/done/todo-893-performance-runner-granularity.md`
 
 
 ### TODO-892 - Modularize the FEC internal runner without collapsing proof boundaries
@@ -1646,7 +1650,7 @@
 
 ### TODO-764 - Reconcile the web-admin publish artifact ownership contract
 - Completed in the current reconciliation: `assets/web-admin/` is explicitly generated and ignored, TODO-202's stale tracked-tree claim is retired, build/local/E2E/release/installer ordering is documented, and `scripts/audits/verify-web-admin-publish-contract.sh` passes the ownership and missing-bundle negative contract without changing UI sources.
-- Detail: `docs/todo/todo-764-web-admin-publish-artifact-contract.md`
+- Detail: `docs/todo/done/todo-764-web-admin-publish-artifact-contract.md`
 
 ### TODO-766 - Reconcile the transport ClientHello template setter contract
 - Completed in commit `c1d894f`: removed the write-only `Config::chlo_template` storage and its three setters, removed the dead transport injection helpers, renamed the remaining deterministic profile catalog, and documented rustls as the sole real-wire ClientHello owner. Focused Rust validation and the complete local audit gates remain recorded in the task detail; hosted/native proof is not claimed.
@@ -1762,126 +1766,126 @@
 - Completed the supported client TUN DNS owner: localhost UDP/53 proxy, pre-pinned RFC 8484 DoH endpoints, Linux/Windows TUN-name hooks, Engine and standalone lifecycle wiring, resolver restoration, and fail-closed stop behavior.
 - The Linux E2E harness now separates explicit TUN DNS from OS/application resolver DNS, private resolver namespace mutation, underlay port-53 capture, and restoration. The privileged run is environment-specific and is not claimed on this macOS host.
 - The server ownership boundary is documented as encrypted client-to-server transport followed by configured plain-UDP upstream forwarding; no server-side DoH HTTP/3 endpoint is claimed.
-- Detail: `docs/todo/todo-771-dns-proxy-runtime-wiring-gap.md`
+- Detail: `docs/todo/done/todo-771-dns-proxy-runtime-wiring-gap.md`
 
 ### TODO-606 - Second close() queues a second close frame after CONNECTION_CLOSE was already queued
 - `Connection::close()` is now first-close-wins: repeated calls preserve the first terminal frame and state, and the transport serializes one close frame only. The regression covers pending-queue cardinality, first-close metadata, peer receipt, and `Done` on a later send.
 - Focused proof and the full `CARGO_BUILD_JOBS=2 cargo test --locked --features rust-tests` gate passed; strict Clippy also passed. TODO-697 remains the separate terminal-close priority owner.
-- Detail: `docs/todo/todo-606-double-close-redundant-frame.md`
+- Detail: `docs/todo/done/todo-606-double-close-redundant-frame.md`
 
 ### TODO-772 - Local transport close reports ApplicationClosed regardless of close kind
 - `Connection::close()` now records structured `LocalApplicationClosed` or `LocalConnectionClosed` errors matching the emitted frame, while first-root-cause and peer-error separation remain intact. `ClientConnection::close()` is documented and exercised as application close; `close_transport()` exposes the transport branch, and public error accessors return the cloned local/remote split.
 - Focused Close-/Client-, TLS-, and version-negotiation tests passed; the full `CARGO_BUILD_JOBS=2 cargo test --locked --features rust-tests` gate and strict Clippy passed. TODO-606 idempotency remains green and TODO-697 remains the separate terminal-close priority owner.
-- Detail: `docs/todo/todo-772-local-close-error-type-contract.md`
+- Detail: `docs/todo/done/todo-772-local-close-error-type-contract.md`
 
 ### TODO-773 - Classify tracked archive paths in the exhaustive audit coverage contract
 - `archive/stealth/doh.rs`, `archive/stealth/masque_manager.rs`, and `archive/tests/masque_runtime_integration.rs` are now classified as `historical-archive` evidence in the fail-closed validator and coverage manifest. They remain retired, non-compiled sources owned by the historical MASQUE/DoH record.
 - The validator now passes with 899 tracked, 55,098 ignored, 0 non-ignored untracked, and 55,997 accounted paths; the archive class contains exactly 3 paths. TODO-754's remaining target/evidence boundaries stay open under their own owners.
-- Detail: `docs/todo/todo-773-audit-coverage-archive-classification.md`
+- Detail: `docs/todo/done/todo-773-audit-coverage-archive-classification.md`
 
 ### TODO-774 - Remove the stale MASQUE integration target from the desktop validation suite
 - The desktop/web-admin Rust validation runner now invokes five current Cargo integration targets; the archived MASQUE integration source remains evidence only and is not promoted back into the active test surface.
 - The targeted suite reached its final success status after the five Rust targets executed, together with the desktop/admin checks and unit suites.
-- Detail: `docs/todo/todo-774-stale-masque-integration-target.md`
+- Detail: `docs/todo/done/todo-774-stale-masque-integration-target.md`
 
 ### TODO-775 - Reconcile the TUN factory example feature contract
 - `tun_factory_example` now has one explicit contract: Cargo and crate-level gating require `tun-tests`, and `main()` demonstrates external factory wiring only. `tun-windows` and `tun-ios` remain separate platform backend features and no longer select this example.
 - Positive default-feature check and runtime execution pass; no-feature, `tun-windows`-only, and `tun-ios`-only invocations fail closed because Cargo requires `tun-tests`.
-- Detail: `docs/todo/todo-775-tun-factory-example-feature-contract.md`
+- Detail: `docs/todo/done/todo-775-tun-factory-example-feature-contract.md`
 
 ### TODO-776 - Serialize frontend polling and discard stale responses
 - Admin and desktop polling now use per-resource serialization, generation/epoch checks, and teardown invalidation. Delayed Dashboard, Configuration, Logs, and Tauri responses are covered by 45 focused lifecycle tests; both Svelte checks pass with 0 errors and 0 warnings. The unbounded frontend `bun run test:unit` run did not return a report in the local environment and is not claimed as passing.
-- Detail: `docs/todo/todo-776-frontend-polling-stale-response-contract.md`
+- Detail: `docs/todo/done/todo-776-frontend-polling-stale-response-contract.md`
 
 ### TODO-777 - Make the fast FEC smoke test fail closed
 - `test-fast-fec.sh` now runs four separate FEC filters with explicit `benches,rust-tests`, records each command status and executed-test count, rejects zero-test or non-OK output, and records bench compilation separately. The positive local run passed 112 focused tests plus the bench smoke. The real invalid-Rust-flag fixture returned nonzero with bounded `FAIL` records and no green or bench result.
-- Detail: `docs/todo/todo-777-fast-fec-smoke-fail-closed.md`
+- Detail: `docs/todo/done/todo-777-fast-fec-smoke-fail-closed.md`
 
 ### TODO-778 - Make dynamic test discovery target-scoped and fail closed
 - Shared fail-closed Cargo discovery/execution classification now covers optimization, performance regression, and security/fuzzing suites. Positive discovery found 2,104 library tests; the real negative fixture covers command failure, target mismatch, stale patterns, and zero-test execution. The three affected suites passed their bounded local gates with structured `PASS`, `FAIL`, `SKIP`, and `UNAVAILABLE` metadata.
-- Detail: `docs/todo/todo-778-dynamic-test-discovery-contract.md`
+- Detail: `docs/todo/done/todo-778-dynamic-test-discovery-contract.md`
 
 ### TODO-779 - Make test and benchmark harness argument propagation array-safe
 - Shared Cargo/env propagation is array-safe; touched wrappers validate bounded CLI values, preserve structured command identity, and emit explicit per-cell results. The real negative fixture passed shell-metacharacter, malformed-size, invalid-numeric, path-with-space, and Admin dry-run checks without side effects. A current Fast Full Suite run re-opened the separate TODO-782 artifact-consumer boundary: `test-optimization.sh --fast` fails JSON serialization after a passing Cargo case because of an extra environment brace. TODO-735, TODO-738, and TODO-782 remain open for their broader owners.
-- Detail: `docs/todo/todo-779-harness-argument-safety.md`
+- Detail: `docs/todo/done/todo-779-harness-argument-safety.md`
 
 ### TODO-780 - Reconcile profiling script truth and durable evidence
 - The three profiling runners now emit versioned, unique per-scenario evidence with provenance, readiness, process, perf/flamegraph, metric, cleanup, and aggregate manifest status. Missing native prerequisites are `UNAVAILABLE`; failed setup, process, traffic, or measurement is `FAIL`; no `N/A` row can pass.
 - The canonical zero-copy entrypoint is `scripts/benchmarks/profiling-zc.sh`, and the historical TODO-418 and ignored `docs/profiling/` boundary are explicitly reconciled. The local macOS run records native Linux profiling as unavailable rather than claiming remote execution.
-- Detail: `docs/todo/todo-780-profiling-evidence-contract.md`
+- Detail: `docs/todo/done/todo-780-profiling-evidence-contract.md`
 
 ### TODO-781 - Reconcile benchmark and analysis fast-mode flags
 - The five affected benchmark suites now implement distinct `--fast` and `--full` matrices, write effective-mode and selected-cell metadata, and support non-executing dry runs. The orchestrator records selected suites and propagates the matching child flag.
 - Coverage analysis now records the bounded static fast proxy separately from full cargo-llvm-cov or Cargo-test-proxy execution. The positive mode fixture and existing harness argument-safety fixture pass.
-- Detail: `docs/todo/todo-781-fast-mode-contract.md`
+- Detail: `docs/todo/done/todo-781-fast-mode-contract.md`
 
 ### TODO-783 - Make the admin confirmation dialog concurrency-safe
 - The admin confirmation store now uses monotonic request IDs and explicit latest-wins cancellation. Superseded callers resolve `false`, stale dialog callbacks cannot resolve another request, and layout teardown cancels the active request so no confirmation Promise remains pending.
 - Focused frontend evidence passed: `svelte-check` 0 errors/0 warnings; confirmation store 3/3, Sidebar 12/12, Configuration 10/10, and Logs 17/17 tests. The visible dialog presentation and shared UI component were not changed.
-- Detail: `docs/todo/todo-783-admin-confirm-dialog-concurrency.md`
+- Detail: `docs/todo/done/todo-783-admin-confirm-dialog-concurrency.md`
 
 ### TODO-784 - Make the PGO build helper isolated and evidence-complete
 - The PGO helper now creates unique run-scoped evidence with parser-valid `quicfuscate.pgo-release.v1` provenance, explicit workload/profile/merge/final-build status, and a final binary SHA-256. Missing tools, no profile output, merge failure, and concurrent isolation are covered by the bounded fake-tool fixture; native PGO was not run on the disk-constrained macOS host.
-- Detail: `docs/todo/todo-784-pgo-build-artifact-contract.md`
+- Detail: `docs/todo/done/todo-784-pgo-build-artifact-contract.md`
 
 ### TODO-785 - Make tray autostart synchronization fail closed on uncertain state
 - Tray state now distinguishes first-run absence, loaded state, and unavailable/corrupt state. Autostart mutations read the OS first, persist after the OS change, compensate failed saves or OS operations, and report retryable partial results when compensation fails. The native tray disables and labels preference controls while state is unavailable; 37/37 desktop bin tests and Clippy passed.
-- Detail: `docs/todo/todo-785-tray-autostart-state-contract.md`
+- Detail: `docs/todo/done/todo-785-tray-autostart-state-contract.md`
 
 ### TODO-786 - Propagate desktop engine cleanup failures through the native host
 - Native disconnect, replacement-connect, and tray shutdown now retain failed engine ownership and propagate bounded cleanup outcomes instead of discarding `disconnect()`/`stop()` errors. The desktop adapter test target passed 41/41 tests and Clippy passed.
-- Detail: `docs/todo/todo-786-desktop-engine-cleanup-errors.md`
+- Detail: `docs/todo/done/todo-786-desktop-engine-cleanup-errors.md`
 
 ### TODO-787 - Make admin credential initialization and persistence fail closed
 - Admin auth initialization now fails closed on hash, invalid-verifier, malformed-file, and initial-persistence errors. Credential updates durably commit before publishing in-memory state or invalidating sessions; failed writes retain the previous credential, clean temporary artifacts, and return an explicit error. Focused auth tests passed 18/18 and the startup-failure regression passed 1/1.
-- Detail: `docs/todo/todo-787-admin-credential-persistence-contract.md`
+- Detail: `docs/todo/done/todo-787-admin-credential-persistence-contract.md`
 
 ### TODO-788 - Make standalone FEC file loading strict and fail closed
 - Explicit `--fec-config` input now fails closed on I/O, TOML, enum, and semantic errors; unknown modes and invalid windows are rejected before runtime construction, and accepted source provenance is logged. Parser tests passed 3/3, all FEC-filtered library tests passed 281/281, and loader tests passed 5/5.
-- Detail: `docs/todo/todo-788-standalone-fec-config-fail-closed.md`
+- Detail: `docs/todo/done/todo-788-standalone-fec-config-fail-closed.md`
 
 ### TODO-789 - Make client CA loading scoped and fail closed
 - Client CA files are now fully validated before runtime publication, retained on the owning transport configuration, and passed to each connection-local rustls provider without process-global first-writer-wins state. Standalone, engine, E2E, and QKey integration callers fail closed; qftls passed 21/21, transport configuration 50/50, standalone loader 1/1, engine missing-CA 1/1, and real QKey HTTP/3/TLS integration 1/1.
-- Detail: `docs/todo/todo-789-client-ca-scope-and-fail-closed.md`
+- Detail: `docs/todo/done/todo-789-client-ca-scope-and-fail-closed.md`
 
 ### TODO-790 - Validate client URL scheme host and target semantics
 - Standalone client URL handling now validates one target object before DNS or UDP setup, distinguishes omitted default input from explicit input, rejects invalid authorities and unsupported schemes, and projects the validated host, HTTP/3 authority, and request path without fallback.
 - Target parsing and connection-construction tests passed 6/6; `cargo check --lib --bins`, `cargo fmt -- --check`, and `git diff --check` passed. The unchanged TLS Cover dead-code warning remains outside this task.
-- Detail: `docs/todo/todo-790-client-url-validation-contract.md`
+- Detail: `docs/todo/done/todo-790-client-url-validation-contract.md`
 
 ### TODO-791 - Fail closed when requested standalone client TUN cannot start
 - Standalone client `--tun` activation now fails closed on open/configuration, reader-spawn, and reader-loop errors. Startup cleanup preserves the primary error, closes QUIC, retains kill-switch blocking, and shuts down the stealth runtime within its bounded timeout. Connected policy requires complete TUN ownership and a healthy reader.
 - Focused client-TUN tests passed 4/4, the complete runtime reload suite passed 29/29, and the TUN library suite passed 30/30. `cargo check --lib --bins`, targeted Clippy with documented baseline suppressions, `cargo fmt -- --check`, and `git diff --check` passed; the existing TLS Cover dead-code warning remains outside this task.
-- Detail: `docs/todo/todo-791-standalone-client-tun-activation.md`
+- Detail: `docs/todo/done/todo-791-standalone-client-tun-activation.md`
 ### TODO-792 - Propagate initial client handshake send errors
 - Standalone client startup now requires a non-empty initial QUIC datagram and complete connected-UDP delivery before any later HTTP/3 request, TUN activation, or readiness work. Construction and socket-send failures run bounded cleanup and preserve the primary error context.
 - Runtime tests passed 33/33; `cargo check --lib --bins`, targeted Clippy with documented baseline suppressions, `cargo fmt -- --check`, and `git diff --check` passed. The existing TLS Cover dead-code warning remains outside this task.
-- Detail: `docs/todo/todo-792-initial-handshake-send-error.md`
+- Detail: `docs/todo/done/todo-792-initial-handshake-send-error.md`
 
 ### TODO-793 - Propagate TUN data-plane I/O faults to runtime health
 - Typed reader, channel, TUN-write, transport-send, and transport-receive faults now reach client/server runtime health and bounded cleanup. Connected/QUIC liveness is separate from TUN readiness; cooperative reader shutdown remains non-error and joins owned readers.
 - Full local library gate passed 2120/2120 tests; all-target check, focused data-plane/runtime/server-health tests, formatting, diff hygiene, and targeted Clippy passed. Linux cross-compilation was not claimable on this macOS host because the local GNU cross-compiler and Linux sysroot are missing.
-- Detail: `docs/todo/todo-793-tun-data-plane-fault-propagation.md`
+- Detail: `docs/todo/done/todo-793-tun-data-plane-fault-propagation.md`
 
 ### TODO-794 - Validate complete EngineConfig across adapter and reload boundaries
 - Strict complete EngineConfig validation now runs before AppConfig projection, client/server runtime construction, generic engine transport setup, and admin write/reload validation. Unknown keys and invalid typed/range values fail closed; transport policies, FEC, stealth, optimization, and fingerprint-slot projections are canonicalized and tested.
 - Local proof: canonical configuration parse/validate/roundtrip, strict fixtures for every serialized section, Engine 24/24, engine adapter 21/21, client adapter 8/8, server adapter 121/121, full library gate 2130/2130, all-target check, targeted Clippy, formatting, and diff hygiene.
-- Detail: `docs/todo/todo-794-complete-engine-config-validation.md`
+- Detail: `docs/todo/done/todo-794-complete-engine-config-validation.md`
 
 ### TODO-795 - Validate quicfuscate-ctl response shapes and bounded framing
 - `quicfuscate-ctl` now enforces typed command-specific response schemas and one bounded newline-terminated UTF-8 response frame. Missing, wrong-typed, unknown, malformed, oversized, unterminated, and overflowing values fail closed; QKeys are parsed and checksum-validated.
 - Local proof: CLI 5/5, Unix admin projection 7/7, full library 2130/2130, all-target check, targeted Clippy, formatting, and diff hygiene. TODO-673 remains the request-side owner.
-- Detail: `docs/todo/todo-795-quicfuscate-ctl-response-contract.md`
+- Detail: `docs/todo/done/todo-795-quicfuscate-ctl-response-contract.md`
 
 ### TODO-796 - Make E2E migration proof fail closed on HTTP/3 finalization
 - The migration proof now handles the final HTTP/3 body/FIN result before emitting `migration-proof`, records `finalization=accepted` or the explicit terminal `finalization=already-done` state, and returns nonzero without a marker for every other error. H3 `Done` now maps to the typed terminal `ConnectionError::Done` instead of a string-wrapped transport error.
 - Local proof: `qf-e2e-client` tests 5/5, full library 2132/2132, release migration control-path 1/1, all-target check, targeted Clippy, formatting, and diff hygiene. The live QKey migration probe was not run because no live server/QKey fixture was available in this bounded local gate.
-- Detail: `docs/todo/todo-796-e2e-migration-proof-finalization.md`
+- Detail: `docs/todo/done/todo-796-e2e-migration-proof-finalization.md`
 
 ### TODO-797 - Make persisted logging mode state fail closed and durable
 - Persisted logging state now distinguishes absent from valid typed state, applies `normal` only for an absent sidecar, and aborts standalone bootstrap on malformed, unreadable, missing-mode, unknown-field, or unsupported state. Configured admin updates persist before live publication; failed writes retain the previous mode, while no-config updates explicitly report live-only behavior.
 - Local proof: logging-mode filter 24/24, dedicated `no-log` regression 1/1, full library 2,139/2,139, all-target check, targeted Clippy with repository baseline suppressions, formatting, and diff hygiene.
-- Detail: `docs/todo/todo-797-logging-mode-persistence-contract.md`
+- Detail: `docs/todo/done/todo-797-logging-mode-persistence-contract.md`
 
 ### TODO-685 - Audit unsafe code in qkey registry storage and admin session handling
 - Archived as a stale unsafe-site inventory after current-source reconciliation: no QKey registry or admin-session raw-memory issue exists. The sole inspected Rust `unsafe` block is registry storage's Windows `MoveFileExW` call; TODO-873 closes its interior-NUL path contract, safety contract, and portable replacement proof at commit `b532ecd`, and the source is unchanged. Native Windows execution remains explicitly unclaimed. TODO-861 and TODO-728 separately close audit-file FFI and pathname binding. Original verification: commit `4c6114d`; Graphify `BLOCKED` at `scripts/out/audits/graphify-20260807T023124Z/graphify-evidence.json`; completeness PASS with `tracked=991`, `ignored=32931`, `accounted=33922`, `current_details=371/371`, `missing_current=0`, `done_archive=441`, `explicit_archive_exceptions=36`.
@@ -2052,7 +2056,7 @@
 
 ### TODO-628 - AEGIS seal/open paths unwrap Option state on the crypto hot path
 - Resolved by TODO-582: AEGIS wrappers now use local non-nullable state, remove the Mutex/Option unwrap path, and pass concurrent seal/open regression coverage.
-- Detail: `docs/todo/todo-628-aegis-unwrap-panics.md`
+- Detail: `docs/todo/done/todo-628-aegis-unwrap-panics.md`
 
 ### TODO-573 - Remove inert QKey rotation and harden revocation state
 - Removed the inert automatic QKey rotation scheduler and callback state, consolidated revocation/tracker ownership, preserved explicit admin revocation with peer-visible close delivery, and completed local/process gates.
@@ -3256,7 +3260,7 @@
 
 ### TODO-307 - io_uring Full Exploitation - Inbound RecvMsg, Server Send, SendMsgZc, SQPOLL
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-307-iouring-full-exploitation.md`
+- Detail: `docs/todo/done/todo-307-iouring-full-exploitation.md`
 
 ### TODO-356 - "Update stale test counts in retired local worklog and todo.md"
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3264,47 +3268,47 @@
 
 ### TODO-357 - "CONTRIBUTING.md says "Rust stable (latest)" instead of pinned version"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-357-contributing-rust-version.md`
+- Detail: `docs/todo/done/todo-357-contributing-rust-version.md`
 
 ### TODO-358 - "Remove 4 dead PQ trait methods from qftls.rs"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-358-stale-pq-trait-methods.md`
+- Detail: `docs/todo/done/todo-358-stale-pq-trait-methods.md`
 
 ### TODO-359 - "Add SAFETY comments to ~25 unsafe blocks"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-359-unsafe-missing-safety-comments.md`
+- Detail: `docs/todo/done/todo-359-unsafe-missing-safety-comments.md`
 
 ### TODO-360 - "Replace eprintln! with log::warn! in transport hot path"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-360-eprintln-transport-hotpath.md`
+- Detail: `docs/todo/done/todo-360-eprintln-transport-hotpath.md`
 
 ### TODO-361 - "hkdf_expand panics on large out_len instead of returning Result"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-361-hkdf-expand-panic.md`
+- Detail: `docs/todo/done/todo-361-hkdf-expand-panic.md`
 
 ### TODO-363 - "Stealth mode env var rejects "auto" despite TOML accepting it"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-363-stealth-env-auto-mode.md`
+- Detail: `docs/todo/done/todo-363-stealth-env-auto-mode.md`
 
 ### TODO-364 - "Document relationship between dual 0-RTT config fields"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-364-dual-0rtt-config.md`
+- Detail: `docs/todo/done/todo-364-dual-0rtt-config.md`
 
 ### TODO-365 - "server-linux.default.toml missing [anti_replay] section"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-365-server-toml-anti-replay.md`
+- Detail: `docs/todo/done/todo-365-server-toml-anti-replay.md`
 
 ### TODO-366 - "Extract duplicated Switch.svelte and Select.svelte to packages/ui"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-366-switch-select-duplication.md`
+- Detail: `docs/todo/done/todo-366-switch-select-duplication.md`
 
 ### TODO-367 - "Fix cn() import inconsistency between desktop and admin"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-367-cn-import-inconsistency.md`
+- Detail: `docs/todo/done/todo-367-cn-import-inconsistency.md`
 
 ### TODO-368 - "Move fatal-error-screen.test.ts to correct directory"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-368-fatal-error-test-misplaced.md`
+- Detail: `docs/todo/done/todo-368-fatal-error-test-misplaced.md`
 
 ### TODO-369 - "Add tests for 5 untested packages/ui components + 2 utilities"
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3320,7 +3324,7 @@
 
 ### TODO-372 - "Update README.md test count from "800+" to "900+""
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-372-readme-test-count.md`
+- Detail: `docs/todo/done/todo-372-readme-test-count.md`
 
 ### TODO-373 - "Add tests for desktop clipboard.ts"
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3332,11 +3336,11 @@
 
 ### TODO-375 - "Replace unwrap() in quicfuscate-ctl with proper error handling"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-375-quicfuscate-ctl-unwrap.md`
+- Detail: `docs/todo/done/todo-375-quicfuscate-ctl-unwrap.md`
 
 ### TODO-376 - "Test simd-selfcheck on macOS/Windows in CI feature-matrix"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-376-simd-selfcheck-cross-platform-ci.md`
+- Detail: `docs/todo/done/todo-376-simd-selfcheck-cross-platform-ci.md`
 
 ### TODO-377 - "Add test for desktop +error.svelte page"
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3388,7 +3392,7 @@
 
 ### TODO-389 - Retire aegis128x4/x8 config override mapping drift
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-389-aegis-x4-x8-config-override.md`
+- Detail: `docs/todo/done/todo-389-aegis-x4-x8-config-override.md`
 
 ### TODO-390 - AEAD selection uses MTU workload length
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3396,23 +3400,23 @@
 
 ### TODO-391 - Eliminate double header parse in Connection::recv
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-391-double-header-parse-recv.md`
+- Detail: `docs/todo/done/todo-391-double-header-parse-recv.md`
 
 ### TODO-392 - Eliminate FecPacket clone on send hot path
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-392-fec-send-clone-elimination.md`
+- Detail: `docs/todo/done/todo-392-fec-send-clone-elimination.md`
 
 ### TODO-393 - Reuse AEGIS cipher state across packets
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-393-aegis-state-reuse.md`
+- Detail: `docs/todo/done/todo-393-aegis-state-reuse.md`
 
 ### TODO-394 - Replace sent_bytes_by_pn full-scan ACK accounting
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-394-ack-accounting-data-structure.md`
+- Detail: `docs/todo/done/todo-394-ack-accounting-data-structure.md`
 
 ### TODO-395 - MORUS in-place seal/open on trait path
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-395-morus-in-place-trait-path.md`
+- Detail: `docs/todo/done/todo-395-morus-in-place-trait-path.md`
 
 ### TODO-396 - Brain apply_policy lock coalescing
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3428,43 +3432,43 @@
 
 ### TODO-399 - Criterion Connection send/recv bench
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-399-connection-criterion-bench.md`
+- Detail: `docs/todo/done/todo-399-connection-criterion-bench.md`
 
 ### TODO-400 - Criterion ACK stress benchmark
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-400-ack-stress-bench.md`
+- Detail: `docs/todo/done/todo-400-ack-stress-bench.md`
 
 ### TODO-401 - Stealth-on vs stealth-off CI regression
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-401-stealth-regression-bench.md`
+- Detail: `docs/todo/done/todo-401-stealth-regression-bench.md`
 
 ### TODO-402 - Batch AEAD seal/open
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-402-batch-aead.md`
+- Detail: `docs/todo/done/todo-402-batch-aead.md`
 
 ### TODO-403 - Zero-copy inbound recv through FEC
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-403-zero-copy-recv.md`
+- Detail: `docs/todo/done/todo-403-zero-copy-recv.md`
 
 ### TODO-404 - Unify client pipeline with core pooled path
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-404-client-pipeline-unify.md`
+- Detail: `docs/todo/done/todo-404-client-pipeline-unify.md`
 
 ### TODO-405 - Wire PN decode SIMD into production
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-405-pn-decode-simd-prod.md`
+- Detail: `docs/todo/done/todo-405-pn-decode-simd-prod.md`
 
 ### TODO-406 - Consolidate dual stealth timing gates
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-406-dual-stealth-timing.md`
+- Detail: `docs/todo/done/todo-406-dual-stealth-timing.md`
 
 ### TODO-407 - Enum AEAD dispatch instead of Box dyn
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-407-enum-aead-dispatch.md`
+- Detail: `docs/todo/done/todo-407-enum-aead-dispatch.md`
 
 ### TODO-408 - Fix VNNI aggregate_congestion heap allocs
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-408-vnni-aggregate-alloc-fix.md`
+- Detail: `docs/todo/done/todo-408-vnni-aggregate-alloc-fix.md`
 
 ### TODO-409 - stream_ring_buffer throughput profile evaluation
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3472,131 +3476,131 @@
 
 ### TODO-410 - Zstd compression streaming into pool
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-410-compression-pool-streaming.md`
+- Detail: `docs/todo/done/todo-410-compression-pool-streaming.md`
 
 ### TODO-411 - StrikeRegister 0-RTT anti-replay optimization
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-411-strike-register-optimization.md`
+- Detail: `docs/todo/done/todo-411-strike-register-optimization.md`
 
 ### TODO-412 - Server deploy and real-world profiling baseline
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-412-server-deploy-profiling.md`
+- Detail: `docs/todo/done/todo-412-server-deploy-profiling.md`
 
 ### TODO-413 - TODO-System-Sanierung + CI-Gate for Status-Feld-Pflicht
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-413-todo-system-sanierung-ci-gate.md`
+- Detail: `docs/todo/done/todo-413-todo-system-sanierung-ci-gate.md`
 
 ### TODO-414 - Streaming-FEC in adaptiven Loop integrieren (supersedes TODO-409)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-414-streaming-fec-adaptive-loop.md`
+- Detail: `docs/todo/done/todo-414-streaming-fec-adaptive-loop.md`
 
 ### TODO-415 - Reality-Grade TLS-Mimikry (3 Phasen, inkrementell)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-415-reality-grade-tls-mimikry.md`
+- Detail: `docs/todo/done/todo-415-reality-grade-tls-mimikry.md`
 
 ### TODO-416 - Graduelle Stealth-Eskalation (3-Stufen-Rampe mit Hysterese)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-416-gradual-stealth-escalation.md`
+- Detail: `docs/todo/done/todo-416-gradual-stealth-escalation.md`
 
 ### TODO-417 - Hot-Path-Lock-Entfernung (buendelt TODO-396 + TODO-397 + TODO-398)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-417-hotpath-lock-elimination.md`
+- Detail: `docs/todo/done/todo-417-hotpath-lock-elimination.md`
 
 ### TODO-418 - Profiling-Baseline + tc-netem-Setup auf omega
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-418-profiling-baseline-tc-netem-setup.md`
+- Detail: `docs/todo/done/todo-418-profiling-baseline-tc-netem-setup.md`
 
 ### TODO-419 - Fix CI linux-fastpath-gates - uring_batch stale CQE drain
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-419-ci-linux-fastpath-stale-cqe-drain.md`
+- Detail: `docs/todo/done/todo-419-ci-linux-fastpath-stale-cqe-drain.md`
 
 ### TODO-420 - Update omega Go toolchain 1.22.2 -> 1.26.4
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-420-omega-go-toolchain-update.md`
+- Detail: `docs/todo/done/todo-420-omega-go-toolchain-update.md`
 
 ### TODO-421 - Verify GitHub contributors have no Devin/Claude co-authors
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-421-github-contributors-clean.md`
+- Detail: `docs/todo/done/todo-421-github-contributors-clean.md`
 
 ### TODO-422 - TUN VPN data plane end-to-end via MASQUE (CONNECT-UDP capsule <-> TUN routing)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-422-tun-vpn-data-plane-masque.md`
+- Detail: `docs/todo/done/todo-422-tun-vpn-data-plane-masque.md`
 
 ### TODO-424 - FEC full-stack performance benchmarks (encode/decode pipeline, mode switch, streaming)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-424-fec-full-stack-benchmarks.md`
+- Detail: `docs/todo/done/todo-424-fec-full-stack-benchmarks.md`
 
 ### TODO-425 - FEC under network adversity (tc-netem loss/jitter/bandwidth/RTT simulation)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-425-fec-network-adversity.md`
+- Detail: `docs/todo/done/todo-425-fec-network-adversity.md`
 
 ### TODO-426 - FEC memory pressure and resource efficiency tests
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-426-fec-memory-pressure-tests.md`
+- Detail: `docs/todo/done/todo-426-fec-memory-pressure-tests.md`
 
 ### TODO-427 - FEC mode transition tests under active load
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-427-fec-transition-load-tests.md`
+- Detail: `docs/todo/done/todo-427-fec-transition-load-tests.md`
 
 ### TODO-428 - FEC adaptive intelligence deep optimization
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-428-fec-adaptive-deep-optimization.md`
+- Detail: `docs/todo/done/todo-428-fec-adaptive-deep-optimization.md`
 
 ### TODO-429 - Kill switch runtime integration - wire KillSwitch into ClientRuntime and engine lifecycle
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-429-killswitch-runtime-integration.md`
+- Detail: `docs/todo/done/todo-429-killswitch-runtime-integration.md`
 
 ### TODO-430 - Multi-client TUN forwarding - per-client routing by destination IP
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-430-multi-client-tun-forwarding.md`
+- Detail: `docs/todo/done/todo-430-multi-client-tun-forwarding.md`
 
 ### TODO-431 - IPv6 support - dual-stack TUN, IPv6 NAT, IPv6 IP pool, IPv6 forwarding
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-431-ipv6-support.md`
+- Detail: `docs/todo/done/todo-431-ipv6-support.md`
 
 ### TODO-432 - ICMP handling - echo reply, packet-too-big, destination unreachable, time exceeded
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-432-icmp-handling.md`
+- Detail: `docs/todo/done/todo-432-icmp-handling.md`
 
 ### TODO-433 - InterleavedDecoder coefficient-to-packet-ID mapping bug - FEC recovery fails with interleave=1
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-433-interleaved-decoder-bug.md`
+- Detail: `docs/todo/done/todo-433-interleaved-decoder-bug.md`
 
 ### TODO-434 - Production PKI (CA hierarchy, cert generation, no self-signed fallback)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-434-production-pki-ca-hierarchy.md`
+- Detail: `docs/todo/done/todo-434-production-pki-ca-hierarchy.md`
 
 ### TODO-435 - DNS through tunnel (DoH wire-in, DNS proxy, server forwarding)
 - Historical server-TUN slice is marked `DONE`, but the audit reconciliation records that client DoH/runtime wiring and the broader system-resolver proof are missing under TODO-771.
-- Detail: `docs/todo/todo-435-dns-through-tunnel-doh-wirein.md`
+- Detail: `docs/todo/done/todo-435-dns-through-tunnel-doh-wirein.md`
 
 ### TODO-436 - Key rotation & immediate revocation (incl. race condition fix)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-436-key-rotation-immediate-revocation.md`
+- Detail: `docs/todo/done/todo-436-key-rotation-immediate-revocation.md`
 
 ### TODO-437 - "IPv6 and DNS leak prevention in kill switch"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-437-ipv6-dns-leak-prevention.md`
+- Detail: `docs/todo/done/todo-437-ipv6-dns-leak-prevention.md`
 
 ### TODO-438 - Traffic isolation between clients
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-438-traffic-isolation-between-clients.md`
+- Detail: `docs/todo/done/todo-438-traffic-isolation-between-clients.md`
 
 ### TODO-439 - Security audit logging (SIEM-compatible)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-439-security-audit-logging-siem.md`
+- Detail: `docs/todo/done/todo-439-security-audit-logging-siem.md`
 
 ### TODO-440 - "Key erasure via zeroize and memory locking (mlock)"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-440-key-erasure-memory-locking.md`
+- Detail: `docs/todo/done/todo-440-key-erasure-memory-locking.md`
 
 ### TODO-441 - Privilege dropping (post-bind setuid/setgid)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-441-privilege-dropping-post-bind.md`
+- Detail: `docs/todo/done/todo-441-privilege-dropping-post-bind.md`
 
 ### TODO-442 - "Windows TUN via Wintun integration (client + server, dynamic DLL, ring buffer, kill switch)"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-442-windows-tun-wintun.md`
+- Detail: `docs/todo/done/todo-442-windows-tun-wintun.md`
 
 ### TODO-443 - Mobile platform TUN (iOS NetworkExtension + Android VpnService) and mobile kill switch
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3604,303 +3608,303 @@
 
 ### TODO-444 - "nftables backend for kill switch and routing (auto-detection with iptables fallback)"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-444-nftables-support.md`
+- Detail: `docs/todo/done/todo-444-nftables-support.md`
 
 ### TODO-445 - "Per-client bandwidth limits, traffic quotas, and fairness scheduling"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-445-per-client-bandwidth-limits.md`
+- Detail: `docs/todo/done/todo-445-per-client-bandwidth-limits.md`
 
 ### TODO-446 - "Production logging (structured JSON, rotation, file output, per-module levels, syslog)"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-446-production-logging-rotation.md`
+- Detail: `docs/todo/done/todo-446-production-logging-rotation.md`
 
 ### TODO-448 - Graceful shutdown (SIGTERM, SIGHUP reload, drain mode, systemd notify)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-448-graceful-shutdown.md`
+- Detail: `docs/todo/done/todo-448-graceful-shutdown.md`
 
 ### TODO-449 - Multipath support (WiFi+LTE bonding)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-449-multipath-wifi-lte-bonding.md`
+- Detail: `docs/todo/done/todo-449-multipath-wifi-lte-bonding.md`
 
 ### TODO-450 - Connection migration fix (gentle cwnd handling)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-450-connection-migration-gentle-cwnd.md`
+- Detail: `docs/todo/done/todo-450-connection-migration-gentle-cwnd.md`
 
 ### TODO-451 - PMTUD enablement (DPLPMTUD, black hole detection)
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-451-pmtud-dplpmtud-black-hole.md`
+- Detail: `docs/todo/done/todo-451-pmtud-dplpmtud-black-hole.md`
 
 ### TODO-452 - CUBIC congestion control
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-452-cubic-congestion-control.md`
+- Detail: `docs/todo/done/todo-452-cubic-congestion-control.md`
 
 ### TODO-453 - QUIC version negotiation
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-453-quic-version-negotiation.md`
+- Detail: `docs/todo/done/todo-453-quic-version-negotiation.md`
 
 ### TODO-454 - NAT traversal (STUN/TURN/ICE) for restrictive firewalls
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-454-nat-traversal-stun-ice.md`
+- Detail: `docs/todo/done/todo-454-nat-traversal-stun-ice.md`
 
 ### TODO-455 - "Traffic analysis defense: chaffing, constant rates, full padding"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-455-traffic-analysis-defense-chaffing.md`
+- Detail: `docs/todo/done/todo-455-traffic-analysis-defense-chaffing.md`
 
 ### TODO-456 - "Auth-specific rate limiting for QKey brute-force protection"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-456-auth-rate-limiting.md`
+- Detail: `docs/todo/done/todo-456-auth-rate-limiting.md`
 
 ### TODO-457 - "Mutual authentication and replay protection for QKey transport"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-457-mutual-auth-replay-protection.md`
+- Detail: `docs/todo/done/todo-457-mutual-auth-replay-protection.md`
 
 ### TODO-458 - "Encryption at rest for QKey token storage (qkeys.json)"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-458-qkey-token-storage-encryption.md`
+- Detail: `docs/todo/done/todo-458-qkey-token-storage-encryption.md`
 
 ### TODO-459 - "DDoS protection hardening (rate limits, burst, GeoIP, blacklist sync, challenge-response)"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-459-ddos-protection-hardening.md`
+- Detail: `docs/todo/done/todo-459-ddos-protection-hardening.md`
 
 ### TODO-460 - "Install script: create quicfuscate user, directories, and validate prerequisites"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-460-install-script-fix.md`
+- Detail: `docs/todo/done/todo-460-install-script-fix.md`
 
 ### TODO-461 - "TUN teardown retry, cleanup verification, and stale-rule cleanup on startup"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-461-tun-teardown-retry.md`
+- Detail: `docs/todo/done/todo-461-tun-teardown-retry.md`
 
 ### TODO-462 - "TCP/ICMP fingerprint obfuscation through the VPN tunnel"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-462-tcp-icmp-fingerprint-obfuscation.md`
+- Detail: `docs/todo/done/todo-462-tcp-icmp-fingerprint-obfuscation.md`
 
 ### TODO-463 - "Loss detection improvements: time-based loss, RACK, RTT variance, Reno bandwidth estimation"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-463-loss-detection-improvements.md`
+- Detail: `docs/todo/done/todo-463-loss-detection-improvements.md`
 
 ### TODO-464 - Stealth persona wiring in Engine client
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-464-stealth-persona-engine-wiring.md`
+- Detail: `docs/todo/done/todo-464-stealth-persona-engine-wiring.md`
 
 ### TODO-465 - Connection-scoped persona freeze and rotation semantics
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-465-stealth-persona-session-freeze.md`
+- Detail: `docs/todo/done/todo-465-stealth-persona-session-freeze.md`
 
 ### TODO-466 - Stealth mode policy rationalization and domain-fronting defaults
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-466-stealth-mode-policy-rationalization.md`
+- Detail: `docs/todo/done/todo-466-stealth-mode-policy-rationalization.md`
 
 ### TODO-467 - Randomized cover traffic and server-push variation
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-467-stealth-cover-traffic-variation.md`
+- Detail: `docs/todo/done/todo-467-stealth-cover-traffic-variation.md`
 
 ### TODO-468 - StealthBrain actuator ownership and FEC hint cleanup
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-468-stealth-brain-policy-ownership.md`
+- Detail: `docs/todo/done/todo-468-stealth-brain-policy-ownership.md`
 
 ### TODO-469 - MASQUE production path and experimental surface cleanup
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-469-stealth-masque-surface-cleanup.md`
+- Detail: `docs/todo/done/todo-469-stealth-masque-surface-cleanup.md`
 
 ### TODO-470 - Protocol mimicry flag truth and config cleanup
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-470-stealth-protocol-mimicry-flag-truth.md`
+- Detail: `docs/todo/done/todo-470-stealth-protocol-mimicry-flag-truth.md`
 
 ### TODO-472 - CI app backend release gate synchronization
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-472-ci-app-backend-release-gate-sync.md`
+- Detail: `docs/todo/done/todo-472-ci-app-backend-release-gate-sync.md`
 
 ### TODO-473 - Linux production E2E proof hardening
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-473-linux-production-e2e-proof-hardening.md`
+- Detail: `docs/todo/done/todo-473-linux-production-e2e-proof-hardening.md`
 
 ### TODO-474 - TUN/MASQUE hotpath and E2E lock hardening
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-474-tun-masque-hotpath-e2e-lock-hardening.md`
+- Detail: `docs/todo/done/todo-474-tun-masque-hotpath-e2e-lock-hardening.md`
 
 ### TODO-475 - ACK accounting extract-if hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-475-ack-accounting-extract-if-hotpath.md`
+- Detail: `docs/todo/done/todo-475-ack-accounting-extract-if-hotpath.md`
 
 ### TODO-476 - FEC Lazy Receive Hotpath and Bounded Clean-Block Tracking
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-476-fec-lazy-receive-hotpath.md`
+- Detail: `docs/todo/done/todo-476-fec-lazy-receive-hotpath.md`
 
 ### TODO-477 - FEC zero-mode receive ownership preservation
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-477-fec-zero-receive-ownership.md`
+- Detail: `docs/todo/done/todo-477-fec-zero-receive-ownership.md`
 
 ### TODO-478 - Stealth H3 cover clean-path policy
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-478-stealth-h3-cover-clean-path-policy.md`
+- Detail: `docs/todo/done/todo-478-stealth-h3-cover-clean-path-policy.md`
 
 ### TODO-479 - Transport stealth heuristic RNG hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-479-transport-stealth-heuristic-rng-hotpath.md`
+- Detail: `docs/todo/done/todo-479-transport-stealth-heuristic-rng-hotpath.md`
 
 ### TODO-480 - FEC send output reuse hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-480-fec-send-output-reuse-hotpath.md`
+- Detail: `docs/todo/done/todo-480-fec-send-output-reuse-hotpath.md`
 
 ### TODO-481 - FEC interleaved lazy gap tracking
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-481-fec-interleaved-lazy-gap-tracking.md`
+- Detail: `docs/todo/done/todo-481-fec-interleaved-lazy-gap-tracking.md`
 
 ### TODO-482 - Transport stealth padding decision fastpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-482-transport-stealth-padding-decision-fastpath.md`
+- Detail: `docs/todo/done/todo-482-transport-stealth-padding-decision-fastpath.md`
 
 ### TODO-483 - Brain policy target cache hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-483-brain-policy-target-cache-hotpath.md`
+- Detail: `docs/todo/done/todo-483-brain-policy-target-cache-hotpath.md`
 
 ### TODO-484 - FEC receive output reuse hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-484-fec-receive-output-reuse-hotpath.md`
+- Detail: `docs/todo/done/todo-484-fec-receive-output-reuse-hotpath.md`
 
 ### TODO-485 - ACK accounting split-drain hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-485-ack-accounting-split-drain-hotpath.md`
+- Detail: `docs/todo/done/todo-485-ack-accounting-split-drain-hotpath.md`
 
 ### TODO-486 - STREAM frame direct writer hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-486-stream-frame-direct-writer-hotpath.md`
+- Detail: `docs/todo/done/todo-486-stream-frame-direct-writer-hotpath.md`
 
 ### TODO-487 - ACK sparse prefix classification hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-487-ack-sparse-prefix-classification-hotpath.md`
+- Detail: `docs/todo/done/todo-487-ack-sparse-prefix-classification-hotpath.md`
 
 ### TODO-488 - FEC benchmark product-window calibration
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-488-fec-benchmark-product-window-calibration.md`
+- Detail: `docs/todo/done/todo-488-fec-benchmark-product-window-calibration.md`
 
 ### TODO-489 - Connection benchmark hotpath isolation
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-489-connection-benchmark-hotpath-isolation.md`
+- Detail: `docs/todo/done/todo-489-connection-benchmark-hotpath-isolation.md`
 
 ### TODO-490 - FEC decode batch benchmark truth
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-490-fec-decode-batch-benchmark-truth.md`
+- Detail: `docs/todo/done/todo-490-fec-decode-batch-benchmark-truth.md`
 
 ### TODO-491 - FEC lazy full-recovery gating
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-491-fec-lazy-full-recovery-gating.md`
+- Detail: `docs/todo/done/todo-491-fec-lazy-full-recovery-gating.md`
 
 ### TODO-492 - Transport adaptive padding power-of-two fastpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-492-transport-adaptive-padding-power-of-two-fastpath.md`
+- Detail: `docs/todo/done/todo-492-transport-adaptive-padding-power-of-two-fastpath.md`
 
 ### TODO-493 - Runtime guardrail contract drift hardening
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-493-runtime-guardrail-contract-drift-hardening.md`
+- Detail: `docs/todo/done/todo-493-runtime-guardrail-contract-drift-hardening.md`
 
 ### TODO-494 - Transport default adaptive padding direct branch
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-494-transport-default-adaptive-padding-direct-branch.md`
+- Detail: `docs/todo/done/todo-494-transport-default-adaptive-padding-direct-branch.md`
 
 ### TODO-495 - QUIC padding direct writer hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-495-quic-padding-direct-writer-hotpath.md`
+- Detail: `docs/todo/done/todo-495-quic-padding-direct-writer-hotpath.md`
 
 ### TODO-496 - Transport adaptive default early return
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-496-transport-adaptive-default-early-return.md`
+- Detail: `docs/todo/done/todo-496-transport-adaptive-default-early-return.md`
 
 ### TODO-497 - FEC active-mode lock bypass
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-497-fec-active-mode-lock-bypass.md`
+- Detail: `docs/todo/done/todo-497-fec-active-mode-lock-bypass.md`
 
 ### TODO-498 - FEC lazy source-buffer replay
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-498-fec-lazy-source-buffer-replay.md`
+- Detail: `docs/todo/done/todo-498-fec-lazy-source-buffer-replay.md`
 
 ### TODO-499 - FEC send reuse hotpath benchmark truth
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-499-fec-send-reuse-hotpath-benchmark-truth.md`
+- Detail: `docs/todo/done/todo-499-fec-send-reuse-hotpath-benchmark-truth.md`
 
 ### TODO-500 - AArch64 data AEAD selector evidence
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-500-aarch64-data-aead-selector-evidence.md`
+- Detail: `docs/todo/done/todo-500-aarch64-data-aead-selector-evidence.md`
 
 ### TODO-501 - FEC streaming lazy tail-loss gating
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-501-fec-streaming-lazy-tail-loss-gating.md`
+- Detail: `docs/todo/done/todo-501-fec-streaming-lazy-tail-loss-gating.md`
 
 ### TODO-502 - Omega netfilter fastpath priority
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-502-omega-netfilter-fastpath-priority.md`
+- Detail: `docs/todo/done/todo-502-omega-netfilter-fastpath-priority.md`
 
 ### TODO-503 - Svelte unit harness stability
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-503-svelte-unit-harness-stability.md`
+- Detail: `docs/todo/done/todo-503-svelte-unit-harness-stability.md`
 
 ### TODO-504 - FEC interleaved recovery isolation
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-504-fec-interleaved-recovery-isolation.md`
+- Detail: `docs/todo/done/todo-504-fec-interleaved-recovery-isolation.md`
 
 ### TODO-505 - FEC repair telemetry fastpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-505-fec-repair-telemetry-fastpath.md`
+- Detail: `docs/todo/done/todo-505-fec-repair-telemetry-fastpath.md`
 
 ### TODO-506 - FEC GF16 repair-burst hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-506-fec-gf16-repair-burst-hotpath.md`
+- Detail: `docs/todo/done/todo-506-fec-gf16-repair-burst-hotpath.md`
 
 ### TODO-507 - Brain histogram direct divergence hotpath
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-507-brain-histogram-direct-divergence-hotpath.md`
+- Detail: `docs/todo/done/todo-507-brain-histogram-direct-divergence-hotpath.md`
 
 ### TODO-508 - Canonical docs SSOT cleanup after retiring local worklog files
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-508-canonical-docs-ssot-cleanup.md`
+- Detail: `docs/todo/done/todo-508-canonical-docs-ssot-cleanup.md`
 
 ### TODO-509 - Post-clean local release gate replay
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-509-post-clean-local-release-gate-replay.md`
+- Detail: `docs/todo/done/todo-509-post-clean-local-release-gate-replay.md`
 
 ### TODO-511 - Security and ops acceptance audit closure
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-511-security-ops-acceptance-audit-closure.md`
+- Detail: `docs/todo/done/todo-511-security-ops-acceptance-audit-closure.md`
 
 ### TODO-512 - Omega long-running production soak and chaos proof
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-512-omega-production-soak-chaos-proof.md`
+- Detail: `docs/todo/done/todo-512-omega-production-soak-chaos-proof.md`
 
 ### TODO-513 - Signed release, install, upgrade, and rollback proof
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-513-signed-release-install-upgrade-rollback-proof.md`
+- Detail: `docs/todo/done/todo-513-signed-release-install-upgrade-rollback-proof.md`
 
 ### TODO-514 - Stealth traffic realism validation and profile tuning
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-514-stealth-traffic-realism-validation.md`
+- Detail: `docs/todo/done/todo-514-stealth-traffic-realism-validation.md`
 
 ### TODO-515 - Wire AuditLogger into server runtime so security events are actually emitted
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-515-wire-audit-logger-into-server-runtime.md`
+- Detail: `docs/todo/done/todo-515-wire-audit-logger-into-server-runtime.md`
 
 ### TODO-517 - HintChannel<T> abstraction for brain.rs hint atomics
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-517-hint-channel-abstraction.md`
+- Detail: `docs/todo/done/todo-517-hint-channel-abstraction.md`
 
 ### TODO-518 - Reconcile Global Atomic State Audit counts with code truth
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-518-global-atomic-audit-count-reconciliation.md`
+- Detail: `docs/todo/done/todo-518-global-atomic-audit-count-reconciliation.md`
 
 ### TODO-519 - "Windows desktop build: cfg-gate Unix-specific core library code for Windows compilation"
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-519-windows-desktop-core-porting.md`
+- Detail: `docs/todo/done/todo-519-windows-desktop-core-porting.md`
 
 ### TODO-520 - Remove dead QKey transport-parameter channel and false confidentiality claims
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-520-remove-dead-qkey-transport-parameter-channel.md`
+- Detail: `docs/todo/done/todo-520-remove-dead-qkey-transport-parameter-channel.md`
 
 ### TODO-522 - Close kill-switch automatic-loss handling and privileged runtime proof
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-522-kill-switch-loss-runtime-proof.md`
+- Detail: `docs/todo/done/todo-522-kill-switch-loss-runtime-proof.md`
 
 ### TODO-524 - Prove interleaved FEC mapping and random plus burst recovery
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-524-interleaved-fec-recovery-proof.md`
+- Detail: `docs/todo/done/todo-524-interleaved-fec-recovery-proof.md`
 
 ### TODO-532 - Complete negotiated multipath wire and data-plane runtime
 - Reconciled from current detail frontmatter status `SCRAP`; retained as historical disposition, not an active queue item.
@@ -3908,11 +3912,11 @@
 
 ### TODO-546 - Restore Windows SIMD dispatch and native core gate
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-546-windows-simd-native-core-gate.md`
+- Detail: `docs/todo/done/todo-546-windows-simd-native-core-gate.md`
 
 ### TODO-547 - Restore FEC wire framing and live 1-RTT integrity
 - Reconciled from current detail frontmatter status `DONE`; retained as historical disposition, not an active queue item.
-- Detail: `docs/todo/todo-547-fec-wire-framing-live-one-rtt-integrity.md`
+- Detail: `docs/todo/done/todo-547-fec-wire-framing-live-one-rtt-integrity.md`
 ### TODO-626 - Constant-time tag comparison claim reconciled
 - Historical close (not the live owner): the helper delegated to `subtle::ConstantTimeEq` across 13 call sites inside the then-current 141-test `qf-crypto` matrix. TODO-1049 removed that dependency. Tag comparison now stays inside ring and libaegis.
 - Detail: `docs/todo/done/todo-626-crypto-non-constant-time-tag-comparison.md`
@@ -4125,80 +4129,80 @@
 - Exact commit `8271af9bb2128771ea4f5ab92206655e51543d93` closes the native release boundary: CI `30408735389`, Clippy Matrix `30408735413`, and Release Build `30408758903` completed successfully, including Linux, native ARM64, macOS, and signed Windows MSI jobs. The ARM64 server bundle SHA-256 is `17b16af6421fd803b63d7da6e1f256b9df48b006f51251c4c1850b0cf10df097`; its AArch64 binary SHA-256 is `dce1e6a924c85d94a3934999b2ff7e4d2d116d7407d441665ec369ce34591ea8`. The commit after the exact Omega runtime matrices changes only cross-platform-equivalent test assertions, so the measured product source and runtime behavior are unchanged.
 
 ### TODO-563 - Decompose monster source files into focused modules
-- Detail: `docs/todo/todo-563-monster-file-decomposition.md`
+- Detail: `docs/todo/done/todo-563-monster-file-decomposition.md`
 - Split simd, stealth, server, connection, fec, optimize, admin_http, main, h3, and core owners under the 2500-line ceiling.
 - Local proof: `cargo check --lib --features rust-tests` and `cargo test --lib --features rust-tests` (1846 passed).
 
 ### TODO-544 - RFC loss detection and network proof
-- Detail: `docs/todo/todo-544-rfc-loss-detection-proof.md`
+- Detail: `docs/todo/done/todo-544-rfc-loss-detection-proof.md`
 - Historical closure recorded the RFC 9002 recovery owner, per-space state, deadline wiring, CC propagation, TUN-ping correction, and named CI/Omega gates. Current follow-up gaps are explicitly owned by TODO-695 (bounded recovery scans/storage) and TODO-696 (terminal timeout cleanup); current artifact-status reconciliation belongs to TODO-561.
 
 ### TODO-965 - Feature-matrix verification and rust-tests repair
-- Detail: `docs/todo/todo-965-feature-matrix.md`
+- Detail: `docs/todo/done/todo-965-feature-matrix.md`
 - `vec![...]` Ack-range literals in feature-gated `rust-tests` targets broke after the SmallVec switch; fixed and verified the full feature matrix locally and on Omega.
 - Local proof: `cargo check --all-targets` for throughput / stream_ring_buffer / zero_copy_dgram / rust-tests and pairs, `cargo test --features rust-tests` (8/8 roundtrip, 26/26 security).
 - Omega proof: `cargo check --all-targets` for io_uring / rust-tests / io_uring+rust-tests on aarch64 Linux.
 
 ### TODO-966 - QPACK Huffman encode through SIMD dispatch
-- Detail: `docs/todo/todo-966-qpack-huffman-simd.md`
+- Detail: `docs/todo/done/todo-966-qpack-huffman-simd.md`
 - `huff_encode_into` bypassed the existing AVX2/NEON dispatcher; rewired to `encode_huff_into`. Decode stays scalar because the SIMD decode API cannot surface `InvalidEncoding`.
 - Local proof: `cargo test -p qf-simd` (61/61), `cargo test -p quicfuscate h3/qpack` (137) on aarch64 NEON.
 - Omega proof: qf-simd 61/61, qpack 22/22 on aarch64 Linux.
 
 ### TODO-967 - Fountain decoder stale-tolerant queues
-- Detail: `docs/todo/todo-967-fountain-stale-queues.md`
+- Detail: `docs/todo/done/todo-967-fountain-stale-queues.md`
 - `remove_symbol_state`/`remove_queued_symbol` ran `VecDeque::retain` (O(window)) per eviction and per degree-1->0 propagation; replaced with stale-parked entries + bounded compaction.
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
 ### TODO-968 - Fountain propagation reverse index
-- Detail: `docs/todo/todo-968-fountain-reverse-index.md`
+- Detail: `docs/todo/done/todo-968-fountain-reverse-index.md`
 - `propagate_decoded_symbol` scanned every retained degree list per decode (O(window x degree)); replaced with an `adjacency[source_idx]` reverse index maintained at insert/remove.
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
 ### TODO-969 - Decoder8/16 single-pass solve + SmallVec rejection evidence
-- Detail: `docs/todo/todo-969-decoder8-single-pass.md`
+- Detail: `docs/todo/done/todo-969-decoder8-single-pass.md`
 - `try_solve_equation` in decoder8 and decoder16 merged subtract and unknown-count passes into one O(k) scan. `SmallVec` coeff rows were tested and reverted: rotating ~280B structs through the equation queue measured worse than the heap alloc.
 - Local proof: `cargo test -p qf-fec` (85/85); `fec_peeling` bench neutral (p=0.47) at degree-2, halves scan work at higher degrees.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
 ### TODO-970 - Gaussian elimination hot path acceleration (decoder8/16)
-- Detail: `docs/todo/todo-970-gaussian-hot-path.md`
+- Detail: `docs/todo/done/todo-970-gaussian-hot-path.md`
 - Matrix build O(m*u*k) -> O(m*k) via sorted-unknowns binary search; RHS build O(min_len*k) scalar -> O(min_len*nnz) SIMD; per-row `yb[row]` clones replaced by `split_at_mut`; RHS row updates switched to `gf_mul_scalar_slice`.
 - Local proof: `cargo test -p qf-fec` (85/85), clippy clean.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
 ### TODO-971 - Wiedemann per-worker matrix/rhs scratch + lookup build
-- Detail: `docs/todo/todo-971-wiedemann-scratch.md`
+- Detail: `docs/todo/done/todo-971-wiedemann-scratch.md`
 - Per-byte `vec![vec![0;n];m]` matrix and rhs allocs moved into `map_init` worker scratch (min_len ~1200 allocs -> ~worker count); `eq_coeff_lookup` built O(m*k) via sorted-unknowns binary search instead of O(m*n*k).
 - Local proof: `cargo test -p qf-fec` (85/85), `fec_wiedemann_allocations` bench baseline.
 - Omega proof: qf-fec 85/85 on aarch64 Linux.
 
 ### TODO-972 - PathScheduler per-packet Vec allocs (latent multipath flaw)
-- Detail: `docs/todo/todo-972-path-scheduler-allocs.md`
+- Detail: `docs/todo/done/todo-972-path-scheduler-allocs.md`
 - `select_path` built `validated_path_ids()` (Vec alloc) plus a second `Vec<(PathId, u64)>` in the weighted branch per call; rewritten to iterate `paths()` directly with zero allocations. The scheduler is currently dormant (no production caller), so this removes the per-packet alloc pattern before multipath is wired.
 - Local proof: `cargo test -p qf-transport-path` (27/27), clippy clean, fmt clean.
 
 ### TODO-973 - MemoryPool ownership ledger: fused free-path transition
-- Detail: `docs/todo/todo-973-pool-ownership-fused-return.md`
+- Detail: `docs/todo/done/todo-973-pool-ownership-fused-return.md`
 - `free()` ran `begin_free` + `return_accounted` as two separate global-mutex acquisitions on the ownership HashMap per returned block; fused into `begin_return` (probe TLS room first, transition CheckedOut->Tls/Queue in one lock). One global mutex per free instead of two; `begin_free`/`return_accounted`/`try_cache_block` are now test-only.
 - Local proof: `cargo test -p qf-memory-pool` (25/25), `cargo test -p qf-fec` (85/85), clippy/fmt clean.
 - Omega proof: qf-memory-pool + qf-fec native green on aarch64 Linux.
 
 ### TODO-974 - Vectored `stream_send_parts` for H3 DATA frames
-- Detail: `docs/todo/todo-974-stream-send-parts.md`
+- Detail: `docs/todo/done/todo-974-stream-send-parts.md`
 - `send_body` built `Vec::new()` + full-body `extend_from_slice` per call just to prepend a <=9-byte DATA frame header, then `stream_send` copied it again into `send_buf`. New `stream_send_parts` appends `&[&[u8]]` parts under one flow-control decision (both buffer variants); `send_body` now sends a stack header + borrowed body - the per-body Vec alloc and intermediate copy are gone.
 - Local proof: `transport::connection` 142/142 default + 143/143 `stream_ring_buffer`, `transport::h3` 102/102, clippy/fmt clean.
 - Omega proof: native green on aarch64 Linux.
 
 ### TODO-975 - MASQUE per-packet alloc + copy on uplink/downlink
-- Detail: `docs/todo/todo-975-masque-zero-copy-dispatch.md`
+- Detail: `docs/todo/done/todo-975-masque-zero-copy-dispatch.md`
 - `send_masque_udp_payload` cloned `host_header` (String) per uplink call just to escape a borrow conflict; `ensure_masque_tunnel{,_with_requirement}` now read `self.host_header` internally, removing the clone at all three call sites. On the downlink, `try_recv_masque_datagram` copied every datagram payload out of the shared recv scratch into a drain Vec; it now returns `(flow_id, offset, len)` indices and `dispatch_bound_masque_payload` normalizes in place over `masque_recv_region` (buffer carries `MASQUE_RECV_HEADROOM` = 40B spare, the on-wire TCP option-space bound). Capsule-carried DATAGRAM payloads keep identical semantics via a one-time +40B tail extension.
 - Local proof: masque tests 47/47, h3 connection tests 93/93, `cargo check --features rust-tests` clean, clippy/fmt clean.
 
 ### TODO-976 - Bandwidth admission: per-client mutex sharding
-- Detail: `docs/todo/todo-976-bandwidth-sharding.md`
+- Detail: `docs/todo/done/todo-976-bandwidth-sharding.md`
 - `sessions.write().check_bandwidth()` took the SessionManager write lock once per forwarded packet because `check` needed `&mut self`; it only mutates the target client's entry. `PerClientBandwidthManager.clients` entries now carry their own `Mutex`, `check()`/`check_bandwidth()` are `&self`, and every callsite (live_auth datagram cb, tun_path batch + fast paths) runs under a shared read guard - different sessions no longer serialize on admission. Denial audit emission moved after the entry lock is released.
 - Local proof: bandwidth 36/36, implementations::server 549/549, clippy/fmt clean.
 - Omega proof: bandwidth 36/36 native aarch64 Linux.
@@ -4209,12 +4213,12 @@
 - Commit: 8e89f19
 
 ### TODO-978 - Standalone client downlink drained only on 250ms housekeeping tick
-- Detail: `docs/todo/todo-978-standalone-client-downlink-tick.md`
+- Detail: `docs/todo/done/todo-978-standalone-client-downlink-tick.md`
 - `conn.recv()` only queues decoded H3/MASQUE events; the standalone client's `poll_http3*` dispatch ran exclusively on the housekeeping branch, so every downlink payload waited up to `CLIENT_HOUSEKEEPING_IDLE` (250ms) before reaching the TUN - measured +251.5ms between UDP arrival and qtun0 write on Omega. The UDP-receive branch now drains H3/MASQUE (and plain `poll_http3` for non-TUN) immediately after `conn.recv`, sharing a new `client_h3_downlink_body_cb` helper with the housekeeping fallback.
 - Local proof: `cargo check --bin quicfuscate` clean, bin tests 50/50, clippy/fmt clean.
 
 ### TODO-979 - TLS cover jitter: deferred emission instead of thread::sleep
-- Detail: `docs/todo/todo-979-cover-jitter-no-sleep.md`
+- Detail: `docs/todo/done/todo-979-cover-jitter-no-sleep.md`
 - `TlsCoverProvider` ran `std::thread::sleep(jitter)` inside `next_crypto_frame`, which executes inside `conn.send()` on the async select loops - every jittered cover frame stalled the whole runtime worker. The encrypted frame is now held behind a `cover_ready_at` deadline surfaced through `handshake_send_ready_at` -> `next_send_deadline()`; the runtime wakes exactly on time and emits it without any blocking.
 - Bonus in the same pass: `qf_fec::interleaved` no longer warns once per connection for the (0,0) disabled-FEC sentinel shape.
 - Local proof: qftls 35/35 (new deferral regression), qf-fec 85/85, clippy/fmt clean.
@@ -4317,168 +4321,168 @@
 ### TODO-995 - io_uring batch worker: evaluate default-enablement on Linux
 
 - DONE (Omega-verified, kernel 6.17/aarch64). `io_uring` is now a default feature — the dep is Linux-target-gated so other platforms are unaffected, and every init point already probes + falls back to sendmmsg/per-packet. `QUICFUSCATE_IO_URING=0|off` is the operator kill-switch (cached OnceLock; gates server `enable_uring_worker`, client outbound worker, client inbound recv). **Found while verifying:** the SQPOLL-first builder spawned `iou-sqp-*` kernel threads that survive `setuid` and failed the server's post-drop per-thread UID verification — SQPOLL is now explicit opt-in via `QUICFUSCATE_IO_URING_SQPOLL=1` (send + recv rings), matching the `QUICFUSCATE_IO_URING_ZC` convention. Scenario g PASS (54.1 Mbit/s, 0% loss) with the worker active and privilege drop verified across 5 threads.
-- Detail: docs/todo/todo-995-iouring-default-linux.md
+- Detail: docs/todo/done/todo-995-iouring-default-linux.md
 
 ### TODO-996 - PGO (profile-guided optimization) for release builds
 
 - DONE (Omega-verified end-to-end). `scripts/build/pgo-dataplane.sh` profiles the instrumented binary inside the real TUN scenario — `LLVM_PROFILE_FILE` propagates through `ip netns exec env` into both endpoints, SIGTERM-stop yields 38 non-empty profraws → llvm-profdata merge (9.2 MB) → `-Cprofile-use` rebuild. Distinct from the pre-existing `build-pgo-release.sh` (microbench-only workloads). PGO binary PASSes scenario g (45.6 Mbit/s, 0% loss — Omega contention band; definitive delta needs multi-core). `lto="fat"` evaluated + rejected (build-time cost vs marginal cross-crate inlining; PGO covers the better dimension). llvm-tools component installed on Omega for `llvm-profdata`.
-- Detail: docs/todo/todo-996-pgo-dataplane.md
+- Detail: docs/todo/done/todo-996-pgo-dataplane.md
 
 ### TODO-997 - Cacheline-pad StealthBrain pending observer counters (false sharing)
 
 - DONE. `on_packet_recv` writes per packet from the dataplane thread while `apply_policy` swaps the same words from housekeeping; all pending counters plus the size/IAT histogram bins shared cachelines. Wrapped each hot counter and every histogram bin in `crossbeam_utils::CachePadded` (dep already in the tree). `brain_packet_observer` on Apple Silicon: workers_1 -30% time (+44% thrpt), workers_8 -37% time (+60% thrpt). 62/62 brain tests green.
-- Detail: docs/todo/todo-997-brain-pending-cacheline.md
+- Detail: docs/todo/done/todo-997-brain-pending-cacheline.md
 
 ### TODO-998 - Isolate ack_sent_byte_accounting benchmark from connection setup
 
 - DONE. The bench ran full connection pairing + sent-byte seeding inside `b.iter` (~90% setup noise in every cell). Moved all three shapes to `iter_batched`/`SmallInput`; the honest ACK-accounting cost is ~28-130 ns per acknowledged packet (SentRing drain is already efficient, no production change needed).
-- Detail: docs/todo/todo-998-ack-bench-isolation.md
+- Detail: docs/todo/done/todo-998-ack-bench-isolation.md
 
 ### TODO-999 - Binary-search the persistent-congestion gap probe
 
 - DONE. `finish_ack_loss_accounting` scanned `newly_acked` linearly per loss-run candidate (O(lost x acked), up to ~2.7e8 comparisons under the 16384-packet cap). A lazily-filled sorted `sent_at` scratch + `partition_point` makes each probe O(log acked) with identical strict-interval semantics. All 7 persistent-congestion tests + 50/50 crate tests green, clippy clean.
-- Detail: docs/todo/todo-999-pc-gap-binary-search.md
+- Detail: docs/todo/done/todo-999-pc-gap-binary-search.md
 
 ### TODO-1000 - Fountain repair generation encodes into the pooled wire block
 
 - DONE. The Fountain arm of `generate_repair_packet` encoded into encoder scratch then copied into the `PooledBlock` (one `max_symbol_len` memcpy per repair). New `LTEncoder::generate_symbol_into` writes the XOR accumulation directly into the pooled wire block, matching the GF8/GF16 convention. Equivalence tests prove byte-identical payload + indices vs `generate_symbol`; 96/96 qf-fec tests green.
-- Detail: docs/todo/todo-1000-fountain-into-block.md
+- Detail: docs/todo/done/todo-1000-fountain-into-block.md
 
 ### TODO-1001 - Decide fate of benchmark-only SIMD sort/shuffle surface
 
 - DONE (2026-09-21). Pinned as rust-tests / parity surface (`rt-argsort-parity`, `rt-simd-selfcheck`). `sort_simd`/`shuffle_simd` stay library-quality CI cells, not production-path guards. Not deleted: the AVX2 comparison probe depends on them.
-- Detail: docs/todo/todo-1001-orphan-simd-sort-shuffle.md
+- Detail: docs/todo/done/todo-1001-orphan-simd-sort-shuffle.md
 
 ### TODO-1002 - Dedupe engine-poller store writes (render churn + e2e stability)
 
 - DONE. `pollStatus`/`pollStats` rebuilt `tunnelStates`, per-tunnel stats, and throughput objects every 500/900 ms and wrote them unconditionally; object writes always notify Svelte subscribers, so the Tauri-mode render tree churned ~3x/sec while idle. Write-site dedupe (`flatRecordEqual`/`tunnelStatsEqual`/`throughputRecordEqual`) skips identical-payload writes; 454/454 unit tests green, `svelte-check` clean. Correction: the `full-ui.pw.ts` e2e flake was NOT this churn - browser-mode pollers never start (`!isTauri()` gate) and the flake recurred post-merge; the hardened `expectSettledDialog` animation-wait plus CI `test-results` artifact upload address it instead.
-- Detail: docs/todo/todo-1002-poller-store-write-dedupe.md
+- Detail: docs/todo/done/todo-1002-poller-store-write-dedupe.md
 
 ### TODO-1003 - Batch per-packet telemetry atomics in burst loops
 
 - DONE. Server `flush_live_server_outgoing` issued ~7 atomic RMWs per staged datagram (global `BYTES_SENT`, worker+global transport counters, session counters) even though the loop already accumulated byte/packet locals; client `io_driver` burst loops issued 3 RMWs per span. All now accumulate into locals and land one batched update per flush (`record_egress_batch`, `record_sent_batch`); early-return error paths flush accumulated counts first so totals are identical. Staging vectors are `with_capacity`-sized for a full burst, killing the growth-doubling memcpy chain. 28/28 metrics + 17/17 session + 17/17 io_driver tests green.
-- Detail: docs/todo/todo-1003-telemetry-atomic-batching.md
+- Detail: docs/todo/done/todo-1003-telemetry-atomic-batching.md
 
 ### TODO-1004 - io_uring SendMsg injected-partial-failure completion accounting on kernel 6.17
 
 - DONE (2026-09-19). Root cause via strace: kernel 6.17 imports `msghdr` at SQE prep time, so the injected-invalid SQE aborts the submission loop (`io_uring_enter` returns 2/3 consumed) and leaves the tail pending in the SQ ring - quarantine is the only safe response since the pending SQE would execute with stale pointers on the next submit. Sender now detects short-submit immediately with a precise `InvalidData` error (and skips the 250ms poll deadline); the test encodes both kernel contracts (issue-time `-EFAULT` CQE partial disposition vs prep-time short-submit quarantine) and asserts the pending SQE never fires. `rt-transport-uring` 22/22 on Omega.
-- Detail: docs/todo/todo-1004-uring-injection-completion-accounting.md
+- Detail: docs/todo/done/todo-1004-uring-injection-completion-accounting.md
 
 ### TODO-1005 - Standalone client TX staged a second memcpy per packet before GSO coalescing
 
 - DONE (2026-09-19). Linux `flush_connected_outgoing` wrote each datagram into `out` scratch and then copied it into the flat GSO staging buffer; `conn.send` is write-only in its output buffer, so the loop now publishes directly into `flat`'s spare capacity (`reserve` + `set_len(start+len)` on success), removing one ~1.2 KiB memcpy per outbound packet while keeping the staging layout, span table, GSO runs, fallback slicing, and diagnostics identical. Verified on Omega: clippy/check clean, `tun-e2e-netns.sh` PASS on the rebuilt release binary with 0% loss.
-- Detail: docs/todo/todo-1005-standalone-client-tx-memcpy.md
+- Detail: docs/todo/done/todo-1005-standalone-client-tx-memcpy.md
 
 ### TODO-1006 - Audit whether wire-level FEC recovery masks congestion loss from CC (RFC 9265)
 
 - DONE (2026-09-19). Verdict: masked, but tightly bounded and observable - accepted as documented behavior. Masking applies only to losses recovered faster than `loss_delay` (~RTT); losses beyond repair capacity always reach CC, and post-declaration ACKs land as spurious loss (conservative direction). Both controller inputs are already correct (receiver wire-truth via `observe_wire_receive`; sender residual-loss via declared-loss callbacks). `quicfuscate_fec_packets_recovered` exposes masked volume. Option (a) Repair-ACK then landed 2026-09-21 under TODO-1011 item 3: recovered source ids + payload lengths are reported back on a dedicated wire frame and fed to CC via the PN-less loss path, so masked wire loss now reaches congestion control directly.
-- Detail: docs/todo/todo-1006-fec-congestion-signal-masking.md
+- Detail: docs/todo/done/todo-1006-fec-congestion-signal-masking.md
 
 ### TODO-1007 - io_uring multishot recv + provided buffer ring for inbound
 
 - DONE (2026-09-20). `UringRecvMultishot` implemented and kernel-verified on Omega 6.17, now the **default** client RX path (`QUICFUSCATE_IO_URING_RECV_MULTISHOT=0` opts back out to batch+GRO). Decision data (`recv_flood_bench`, 20k datagrams, RUSAGE_THREAD-isolated): individual datagrams - multishot 4x fewer drains, 30% less CPU (1.19 vs 1.69 us/dgram); GSO trains - batch+GRO 2.4x less CPU (0.54 vs 1.28). GSO trains do not survive the wire (receive-side GRO needs same-kernel `gso_size`), so the WAN edge client defaults to multishot; same-host/VM deployments opt out via env. Also fixed a CQ-overflow deadlock the bench exposed (`IoUring::new(64)` left only 128 CQ slots - a full CQ parked the terminating -ENOBUFS CQE in the kernel overflow list, surfaced only on io_uring_enter; `setup_cqsize(entries+64)` + one flushing `submit()` per drain). Buffer ring is 64x2KB pool blocks vs 64x64KB contiguous (~128KB vs 4MB). Server demux stays on per-slot RecvMsg (needs per-packet sockaddr).
-- Detail: docs/todo/todo-1007-uring-multishot-recv.md
+- Detail: docs/todo/done/todo-1007-uring-multishot-recv.md
 
 ### TODO-1008 - Evaluate io_uring send bundles for TX batching
 
 - DONE (P3, 2026-09-21). Rejected. Omega 6.17 uAPI has no `IORING_RECVSEND_BUNDLE`; GSO + sendmmsg already cover the one-descent batch; standalone TUN is not on io_uring. Revisit only if a deployment kernel ships the flag and a multi-core io_driver profile shows per-SQE descent above ~5%.
-- Detail: docs/todo/todo-1008-uring-send-bundles.md
+- Detail: docs/todo/done/todo-1008-uring-send-bundles.md
 
 ### TODO-1009 - TLS/browser fingerprint freshness and rotation validation
 
 - DONE (2026-09-21). Catalog + freshness gate + per-call entropy + hybrid key shares + JA4 tooling. Chrome a/b matches FoxIO `55b375c5d22e`. Refresh policy is in `docs/CONTRIBUTING.md`. Residuals accepted: no local browser captures; c-hash byte-parity not over-fit.
-- Detail: docs/todo/todo-1009-fingerprint-freshness.md
+- Detail: docs/todo/done/todo-1009-fingerprint-freshness.md
 
 ### TODO-1010 - Next-generation stealth shaping research track
 
 - DONE (2026-09-21). All five candidates have a written verdict. Landed: WF-A2D burst-edge jitter, ChameleonFlow density + reorder (TODO-1015/1016/1017, Omega 99.98% of baseline), Adaptive-Tamaraw direction rows (TODO-1019), UPGen shape seed (TODO-1014). QUICstep stays deferred-by-verdict. Anti-goals recorded: domain fronting dead on major CDNs; GFW QUIC blocking is residual-only/compute-limited.
-- Detail: docs/todo/todo-1010-stealth-shaping-research-track.md
+- Detail: docs/todo/done/todo-1010-stealth-shaping-research-track.md
 
 ### TODO-1011 - FEC standards alignment and maximal-effectiveness audit
 
 - DONE (2026-09-21). All five findings closed: QUIRL Bulk/Protected gating, TinyMT32 rejected-by-design, Repair-ACK, sliding-window Streaming GF8 (TODO-1018), unequal protection via the same class gate. Omega 3% netem: framed=9705/unframed=22589, tunnel stable.
-- Detail: docs/todo/todo-1011-fec-standards-alignment.md
+- Detail: docs/todo/done/todo-1011-fec-standards-alignment.md
 
 ### TODO-1012 - Standalone client RX: recvmmsg burst + persistent GRO slots
 
 - DONE (2026-09-19). RX: `recv_connected_burst` fills 8 persistent 64 KiB slots in one `recvmmsg` per readiness wake on Linux (each slot possibly a UDP_GRO super-buffer, split in place); non-Linux keeps single-datagram semantics. TX (same change set): the non-GSO tail of `flush_connected_outgoing` now goes out in one `sendmmsg` instead of per-datagram `sendmsg` — measured on Omega with `perf stat` under a 15 s iperf3 tunnel run: sendmsg -31%, socket-TX syscalls -15%. Verified by `tun-e2e-netns.sh` on Omega (5/5 echo, 0% loss, clean teardown).
-- Detail: docs/todo/todo-1012-standalone-client-rx-burst.md
+- Detail: docs/todo/done/todo-1012-standalone-client-rx-burst.md
 
 ### TODO-1014 - UPGen deployment-seeded private-protocol wire-image diversity
 
 - DONE (2026-09-20). Adapted from the TLV plan after code inspection showed a strict fixed-layout format: `PrivateProtocolShape` expands a 32-byte seed (HKDF, `qf private protocol shape v1`) into a Fisher-Yates permutation of eight wire blocks (nonces, hashes, ALPN, DCIDs, pad), a 0/16/32/64-byte pad granule with seed-derived content, and a pacing hint. Non-canonical shapes emit wire version 2; the version byte stays fixed so the decoder picks the layout before parsing. The authenticator binds the exact byte image - seed mismatch fails closed. Seed provisioning: `[crypto] private_shape_seed` (hex) -> `CryptoConfig::private_shape_seed_bytes()` -> `set_private_protocol_shape` -> `Machine::with_shape`, plumbed through client, circuit-hop, and server paths. Absent seed keeps byte-identical v1. 6 unit tests.
-- Detail: docs/todo/todo-1014-upgen-deployment-shape.md
+- Detail: docs/todo/done/todo-1014-upgen-deployment-shape.md
 
 ### TODO-1015 - ChameleonFlow bounded reorder window for bulk datagrams
 
 - DONE (2026-09-21). Pressure-aware gather windows. Omega `udp60-*-1015`: reorder-off `JITTER_US=0` recv 59.999 Mbit/s 0% loss; reorder-on `JITTER_US=5000` recv 59.986 Mbit/s 0.001% loss (1/82644), `qtun0 TX dropped=0` both sides. 99.98% of baseline, above the 80% gate. Window still armed (`reorder_window: bulk window +Nus` throughout the on-run).
-- Detail: docs/todo/todo-1015-bulk-reorder-window.md
+- Detail: docs/todo/done/todo-1015-bulk-reorder-window.md
 
 ### TODO-1016 - Deferral drain serializes emission under per-packet stealth deferral
 
 - DONE (2026-09-21). Scheduler redesign plus pressure-aware skip/refill. Omega 80% gate closed under TODO-1015: 59.986 / 59.999 Mbit/s at `JITTER_US=5000`.
-- Detail: docs/todo/todo-1016-deferral-drain-serialization.md
+- Detail: docs/todo/done/todo-1016-deferral-drain-serialization.md
 
 ### TODO-1017 - Atomic pair emission for bounded bulk reorder swaps
 
 - DONE (P1, 2026-09-21). Swap-on-join plus the TODO-1015 pressure-aware arming. Omega 80% gate closed: 59.986 / 59.999 Mbit/s.
-- Detail: docs/todo/todo-1017-atomic-pair-emission.md
+- Detail: docs/todo/done/todo-1017-atomic-pair-emission.md
 
 ### TODO-1018 - Sliding-window (convolutional) FEC coding window
 
 - DONE (P2, 2026-09-21, Streaming GF8 scope). Implemented end-to-end: `FLAG_SLIDING` wire bit (strict-reject compat), `Encoder::new_sliding` (no clear, FIFO evict, right-aligned self-describing coefficient rows), controller skips boundary emit/clear, decoder unified anchor-relative sid mapping (fixes a real underflow mapping positions to phantom sid 0), coverage-aware anchor validation, receiver-global cross-window dedup + sibling-window source seeding + late-source propagation, lazy layer flushes frontier-straddling repairs immediately (fixes stranded burst tails). Fountain stays block-mode (separate wire revision). 1768 lib + 104 qf-fec tests green.
-- Detail: docs/todo/todo-1018-convolutional-sliding-window-fec.md
+- Detail: docs/todo/done/todo-1018-convolutional-sliding-window-fec.md
 
 ### TODO-1019 - Adaptive-Tamaraw direction-aware parameters
 
 - DONE (P2, 2026-09-21). Direction axis + client-stats snapshot. Omega `tcp-1019d`: up 88.625 / `-R` 142.163, `up_us` 37-63 vs 827-1379, both Dense so jitter stays ~2 ms. `pacing_rate_bps` is the `up_us` source; do not stuff it into `delivery_rate()`.
-- Detail: docs/todo/todo-1019-tamaraw-direction-aware.md
+- Detail: docs/todo/done/todo-1019-tamaraw-direction-aware.md
 
 ### TODO-1020 - Standalone TUN client -> io_driver migration decision
 
 - DONE (P3, 2026-09-21). Verdict: STAY. The standalone loop is the client lifecycle orchestrator (MASQUE/H3 setup, kill switch, DoH DNS, heartbeat, MTU sync, diagnostics) - none of which has an io_driver home; io_driver is a pure data-plane pump on a prepared ClientDataPlane and would add an Arc<Mutex> to every hot-path call, lose the outbound deadline floor, and emit one datagram per idle wake vs the standalone's burst-limit flush. The measured Omega gap is not scheduler-caused: both schedulers translate next_send_deadline into wake cadence over the same conn.send. The study's actionable finding - the backpressured park path spins the select loop on latched AsyncFd readiness - is scoped as TODO-1021.
-- Detail: docs/todo/todo-1020-tun-io-driver-migration.md
+- Detail: docs/todo/done/todo-1020-tun-io-driver-migration.md
 
 ### TODO-1021 - Backpressured TUN park path spins the select loop
 
 - DONE (P1, 2026-09-21). Both drains now keep consuming their source under carrier backpressure instead of early-returning: fd path appends behind the parked cursor to `WouldBlock` (AsyncFd readiness clears each wake -> select arm pends, spin gone), channel fallback keeps receiving waves so the reader thread never stalls on a full bounded channel. Backlog bounded by `TUN_PACKET_QUEUE_CAPACITY` unsent frames; overflow counted via new `tun_drops=` stat; `carrier_full` reports `Ok(false)` so the 5 ms housekeeping tick paces retries (no self-notify spin). Omega validation: 60 M -> `qtun0 TX dropped`=0, `tun_drops`=0, iperf 0% loss, `send_polls/send_datagrams` 1.67x (baseline ~27x); 140 M saturation -> `qtun0`=0, `tun_drops`=68,984 ~= iperf loss 68,961 (54%) - loss now bounded+counted in userspace, `transport_sent` ~= 63 Mbit/s real single-core capacity.
-- Detail: docs/todo/todo-1021-tun-park-spin.md
+- Detail: docs/todo/done/todo-1021-tun-park-spin.md
 
 ### TODO-1022 - Reorder window never arms on the wire-FEC send path
 
 - DONE (P2, 2026-09-21). Option A + live Omega: Streaming `force_on` committed (`k=64 n=80`); Protected UDP 20 M/256 B showed `yield_window=28390` `drain_entries=2806` `qtun0 TX dropped=0`. Earlier live zeros were `--no-utls` skipping stealth knobs, not a remaining wire-path miss. `FecConfig::from_toml` now accepts `force_on`.
-- Detail: docs/todo/todo-1022-reorder-window-wire-fec-bypass.md
+- Detail: docs/todo/done/todo-1022-reorder-window-wire-fec-bypass.md
 
 ### TODO-1023 - FEC decoder equation matrices unbounded under adversarial repairs
 
 - DONE (P2, 2026-09-21). Decoder4/8/16 `equations` now FIFO-cap at `2*k*depth` with `fec_decoder_equation_evictions_total`. Flood + sliding `n-k` recovery tests green; qf-fec 109/109; fountain was already bounded.
-- Detail: docs/todo/todo-1023-fec-decoder-equations-bound.md
+- Detail: docs/todo/done/todo-1023-fec-decoder-equations-bound.md
 
 ### TODO-1024 - audit-todo-consistency.sh permanently red (95 legacy frontmatter violations)
 
 - DONE (P3, 2026-09-21). 65 legacy details backfilled with minimal frontmatter; audit vocabulary + Check 3 heading-bullet parser updated. `audit-todo-consistency.sh` exits 0 (353 files, 0 violations).
-- Detail: docs/todo/todo-1024-todo-audit-frontmatter-legacy.md
+- Detail: docs/todo/done/todo-1024-todo-audit-frontmatter-legacy.md
 
 ### TODO-1025 - Omega E2E ready-hook scripts live only in /tmp
 
 - DONE (P3, 2026-09-21). Versioned hooks in `scripts/tests/tun-e2e-hooks/` plus `scripts/tests/tun-e2e-omega-udp.sh`. `QF_E2E_READY_HOOK` stays optional on the default e2e path; env contract is in the `tun-e2e-netns.sh` header.
-- Detail: docs/todo/todo-1025-persist-e2e-ready-hook.md
+- Detail: docs/todo/done/todo-1025-persist-e2e-ready-hook.md
 
 ### TODO-1027 - Server TUN MTU 1500 vs client effective 1413 blackholes TCP downlink
 
 - DONE (P1, 2026-09-21). Open/assignment 1413. Real `-R` stall was Windows wscale=2 on inner-VPN SYNs; skip SYN-ACK + RFC1918 dest. Omega `-R` 90.171 Mbit/s 0 retrans, SWAP 131.614, up 93.847, UDP 60 M 0% loss.
-- Detail: docs/todo/todo-1027-server-tun-mtu-downlink.md
+- Detail: docs/todo/done/todo-1027-server-tun-mtu-downlink.md
 
 ### TODO-1026 - TUN uplink backlog retains sent slots until fully drained
 
 - DONE (P3, 2026-09-21). Both client uplink drains call `compact_tun_backlog` after cursor advances: `drain(..cursor)` once the sent prefix hits 64. Unsent cap and `tun_drops` unchanged. Tests cover skip/compact/clear.
-- Detail: docs/todo/todo-1026-tun-backlog-compaction.md
+- Detail: docs/todo/done/todo-1026-tun-backlog-compaction.md
 
 ### TODO-1013 - TUN reader: wave-batched channel handoff
 
 - DONE (2026-09-19, superseded same day). The TUN fd cannot batch reads (one frame per `read`), but the handoff can: `reader_loop_with_shutdown_batched` drains the fd nonblocking per wave (`TUN_READ_BURST=32`) and hands one `Vec<TunPacket>` per channel send+notify - applied to both the standalone client (128-frame drain budget, `(wave, cursor)` backlog) and the standalone server reader (32-frame budget, parked `IntoIter` remainder inside `drain_server_tun_packets`). Omega A/B (`perf stat`, 15 s iperf3 through TUN): epoll_pwait -15%, futex -6%, total syscalls -5%, throughput unchanged. e2e PASS.
 - Superseded for both standalone runtimes (2026-09-20): the reader threads existed only because the `O_NONBLOCK` TUN fd lived outside the Tokio reactor. On unix both sides register the fd via `AsyncFd` (`quicfuscate::interface::TunReadSource`/`reactor_read_end`) and read uplink frames inside the run loop - reader thread, channel, `ppoll`, and notify chain removed on client AND server (`ServerTunIngress::Fd`). Validated A/B on Omega client (12 s iperf3 through TUN): `ppoll` 4,544 -> 0, `read` -20%, total syscalls -16%, throughput within single-core noise. Server e2e PASS both directions incl. crash/restart with "reactor-fd ingress" logged for both generations. `drain_uplink_any` (client) and `drain_server_tun_packets` (server) dispatch fd-vs-channel; Wintun keeps the wave-batched reader thread.
-- Detail: docs/todo/todo-1013-tun-reader-wave-handoff.md
+- Detail: docs/todo/done/todo-1013-tun-reader-wave-handoff.md
 
 ### E2E environment notes (Omega aarch64 Linux, kernel 6.17)
 - Omega is a **single-core** Neoverse-N1 VM (`nproc`=1). The runtime select loop, TUN reader thread, crypto, and both profiling endpoints share one core; absolute dataplane throughput there is contention-bounded (~50-65 Mbit/s ceiling for the standalone TUN path regardless of congestion control). Relative A/B evidence stays valid; absolute ceilings need multi-core hardware.

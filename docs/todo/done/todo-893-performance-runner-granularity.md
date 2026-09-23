@@ -165,7 +165,7 @@ The following contract must be resolved before the task can close:
 - docs/DOCUMENTATION.md
 - docs/MAP.md
 - docs/todo.md
-- docs/todo/todo-893-performance-runner-granularity.md
+- docs/todo/done/todo-893-performance-runner-granularity.md
 
 ## Non-Goals
 

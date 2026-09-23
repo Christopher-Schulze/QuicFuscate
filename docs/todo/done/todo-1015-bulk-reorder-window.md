@@ -21,7 +21,7 @@ bandwidth / 11.2% latency overhead - far cheaper than padding defenses.
 Density rule half already landed (padding rate halves under dense
 ACK-clocked traffic). This TODO is the reorder-window remainder, scoped
 by the design study in
-`docs/todo/todo-1010-stealth-shaping-research-track.md`.
+`docs/todo/done/todo-1010-stealth-shaping-research-track.md`.
 
 ## Implementation plan
 
@@ -119,7 +119,7 @@ Verified under default and `zero_copy_dgram` feature sets.
 
 OPEN: atomic pair emission to lift reorder throughput toward the
 reorder-off ceiling - tracked with full plan + acceptance as
-**TODO-1017** (docs/todo/todo-1017-atomic-pair-emission.md).
+**TODO-1017** (docs/todo/done/todo-1017-atomic-pair-emission.md).
 
 ## Architecture update (2026-09-20, TODO-1016 cycle)
 
