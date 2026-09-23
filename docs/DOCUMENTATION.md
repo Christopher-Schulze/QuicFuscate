@@ -4,6 +4,11 @@
 
 Current task status and evidence ownership are canonical only in `docs/todo.md` and the frontmatter of its linked detail files. Dated audit and reconciliation sections below are historical snapshots for the commit/date named in their heading; their then-current status wording is evidence, not a current task-state claim.
 
+Graphify audit tooling was retired on 2026-09-24. CodeGraph is used for local
+code navigation only; it is not a runtime component or a whole-repository
+coverage gate. The current audit register remains source and Git based under
+TODO-754. Dated Graphify sections below document historical runs only.
+
 ## Documentation Transparency and Feature Contract
 
 - Runtime correctness is defined by checked-in code, targeted tests, and audit scripts, not by aspirational feature wording.

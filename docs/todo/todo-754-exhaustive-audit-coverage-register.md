@@ -11,10 +11,21 @@ depends_on: [TODO-730, TODO-734, TODO-749]
 
 # TODO-754: Make Exhaustive Audit Coverage and TODO Register Truth Machine-Checkable
 
-## Current execution gate (2026-09-23)
+## Current execution gate (2026-09-24)
+
+Graphify was retired on 2026-09-24 under TODO-759. CodeGraph is a local code
+navigation aid, not whole-repository audit evidence. The current validator must
+prove path/detail/archive coverage from Git and the source-owned manifests;
+its negative fixtures must cover missing detail, unavailable parser, and
+omitted feature lane without expecting a Graphify manifest. Dated Graphify
+results below remain historical only. Its current run stops at the existing
+`docs/todo.md` entries TODO-1070 and TODO-1078, which use `- Detail: none`
+instead of canonical detail links. Reconcile those entries before treating the
+full validator as green; `docs/todo/audit-todo-consistency.sh` separately passes
+the current direct-detail corpus.
 
 All dated corpus counts below are historical snapshots. The current planning
-board has 100 direct detail files, and its local structural validator reports
+board has 99 direct detail files, and its local structural validator reports
 zero link/frontmatter/status violations; this does not prove all repository
 paths or product behavior. Complete TODO-730's truthful runner gate,
 TODO-734's native non-vacuous feature lanes, and TODO-749's reproducible
@@ -23,10 +34,9 @@ hosted dependency gate first. Then run the canonical
 tracked, ignored, generated, sensitive, archive, and detail scope. Require
 zero unclassified in-scope paths, zero duplicate/missing current-detail IDs,
 valid dependency/status/link mappings, and failable negative fixtures for a
-missing detail, stale graph, unavailable parser, and omitted feature lane.
-Classify Graphify semantic/relationship output via TODO-759 and Omega source
-attribution via TODO-804 as explicit `BLOCKED`/`UNAVAILABLE` if still open;
-neither is silently promoted to whole-project proof. Record revision, script
+missing detail, unavailable parser, and omitted feature lane.
+Classify Omega source attribution via TODO-804 as explicit `BLOCKED`/`UNAVAILABLE` if still open;
+it is never silently promoted to whole-project proof. Record revision, script
 versions, complete counts and artifacts once, replacing no historical
 evidence. Closure means the coverage **register and result classification**
 are machine-checkable, not that every product/native gate is green.

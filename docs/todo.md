@@ -335,10 +335,6 @@ out of the execution queue.
 - OPEN for a current-nightly Miri feasibility and owned-test run after the disk preflight. TODO-826..TODO-833 closed the implementation boundaries; `qf-memory-pool` owns production and `src/optimize/unsafe.rs` is test/feature gated. Native Linux/Windows/ISA proof remains a closure gate. The old `src/optimize/parts/memory_pool.rs` inventory is historical.
 - Detail: `docs/todo/todo-678-optimize-unsafe-memory-pool-audit.md`
 
-### TODO-759 - Make Graphify extraction and relationship evidence complete or fail closed
-- OPEN for a current-revision local Graphify evidence refresh. Prove authorized semantic/cache availability, parser coverage, resolved endpoints and provenance; otherwise retain exact `BLOCKED`/`UNAVAILABLE` counts in the manifest. TODO-754 consumes this result and is not a prerequisite.
-- Detail: `docs/todo/todo-759-graphify-extraction-relationship-contract.md`
-
 ### TODO-756 - Make frontend E2E browser prerequisites explicit and fail closed
 - OPEN for current-version browser preflight and real Admin/Desktop E2E runs. Historical Playwright `1.58.2` proof passed 70/70 and 23/23; recheck manifest/lock and discovered inventory. Hosted proof is a closure gate; TODO-754's whole-repo register does not block browser testing.
 - Detail: `docs/todo/todo-756-frontend-e2e-browser-prerequisites.md`
@@ -376,7 +372,7 @@ out of the execution queue.
 - Detail: `docs/todo/todo-607-routing-teardown-incomplete.md`
 
 ### TODO-754 - Make exhaustive audit coverage and TODO register truth machine-checkable
-- BLOCKED on TODO-730/734/749. Historical 2026-08 register and source counts are retained in the detail but are not current acceptance. At one revision, the canonical validator must classify every tracked/ignored/generated/sensitive/archive/current-detail path, prove zero missing or duplicate IDs, and fail on negative missing-detail, stale-graph, unavailable-parser and omitted-feature fixtures. TODO-759 Graphify and TODO-804 Omega outcomes remain typed non-pass inputs if unavailable; closure proves register/result integrity, not a green whole-product audit.
+- BLOCKED on TODO-730/734/749. Historical 2026-08 register and source counts are retained in the detail but are not current acceptance. At one revision, the canonical validator must classify every tracked/ignored/generated/sensitive/archive/current-detail path, prove zero missing or duplicate IDs, and fail on negative missing-detail, unavailable-parser and omitted-feature fixtures. CodeGraph may guide code navigation but does not certify whole-repository coverage; TODO-804 Omega outcomes remain typed non-pass inputs if unavailable. Closure proves register/result integrity, not a green whole-product audit.
 - Detail: `docs/todo/todo-754-exhaustive-audit-coverage-register.md`
 
 ### TODO-730 - Make the comprehensive audit runner fail closed and measure real scope
@@ -859,6 +855,10 @@ out of the execution queue.
 - Detail: `docs/todo/todo-1138-live-successful-assignment-e2e.md`
 
 ## Completed
+
+### TODO-759 - Retire Graphify extraction and relationship evidence
+- SCRAP. Graphify is no longer the repository's analysis tool. Its source-owned verifier, audit-validator coupling, and generated-output classification were retired; CodeGraph is the local navigation tool and does not replace whole-repository coverage proof. Historical evidence remains dated and non-current.
+- Detail: `docs/todo/todo-759-graphify-extraction-relationship-contract.md`
 
 ### TODO-1139 - Verify every actionable TODO has an executable plan
 - DONE. The 72 remaining non-SCRAP, non-STOPPED details have executable target or decision gates, owning paths, dependency order, and measurable acceptance in this checkout at source revision `7dfba0fe`. Structural, link, status, and dependency checks pass; native and product proofs remain task-specific. The stopped Devin audit remains outside this claim.

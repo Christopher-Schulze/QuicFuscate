@@ -28,7 +28,6 @@ EXCLUDED_COMPONENTS = {
     "build",
     "dist",
     "fixtures",
-    "graphify-out",
     "local",
     "node_modules",
     "out",

@@ -4,14 +4,23 @@ title: Make Graphify extraction and relationship evidence complete or fail close
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: SCRAP
 created: 2026-08-01
 depends_on: []
 ---
 
 # TODO-759: Make Graphify Extraction and Relationship Evidence Complete or Fail Closed
 
-## Current execution gate (2026-09-23)
+## Retirement (2026-09-24)
+
+This Graphify-specific task is SCRAP because the project now uses CodeGraph for
+local code navigation. The Graphify verifier and its audit-validator integration
+were removed. Dated findings below are historical evidence, not executable
+instructions or current tool status. CodeGraph does not establish complete
+repository path, semantic, runtime, or external-state coverage; TODO-754 retains
+the independent register and result-classification contract.
+
+## Historical execution gate (2026-09-23)
 
 The run-scoped August counts below are historical, not current graph coverage.
 First rerun `scripts/audits/verify-graphify-evidence.sh` against the current
