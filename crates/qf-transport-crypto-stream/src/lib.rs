@@ -113,48 +113,46 @@ impl CryptoStream {
             return Ok(());
         }
         let ack_end = offset.checked_add(len).ok_or(ConnectionError::InvalidPacket)?;
-        let overlapping: Vec<u64> =
-            self.unacked.range(..ack_end).map(|(start, _)| *start).collect();
-        let mut plans = Vec::with_capacity(overlapping.len());
+        let predecessor = self.unacked.range(..offset).next_back();
+        let overlapping = predecessor.into_iter().chain(self.unacked.range(offset..ack_end));
+        let mut plans = Vec::new();
         let mut removed_bytes = 0usize;
         let mut added_bytes = 0usize;
-        for start in overlapping {
-            let Some(data) = self.unacked.get(&start).cloned() else {
-                continue;
-            };
+        for (&start, data) in overlapping {
             let end = checked_u64_add_offset(start, data.len())?;
             if end <= offset {
                 continue;
             }
-            let head_len = if start < offset {
-                Some(usize::try_from(offset - start).map_err(|_| ConnectionError::InvalidPacket)?)
+            let head = if start < offset {
+                let head_len =
+                    usize::try_from(offset - start).map_err(|_| ConnectionError::InvalidPacket)?;
+                Some(data[..head_len].to_vec())
             } else {
                 None
             };
-            let tail_start = if end > ack_end {
-                Some(
-                    usize::try_from(
-                        ack_end.checked_sub(start).ok_or(ConnectionError::InvalidPacket)?,
-                    )
-                    .map_err(|_| ConnectionError::InvalidPacket)?,
+            let tail = if end > ack_end {
+                let tail_start = usize::try_from(
+                    ack_end.checked_sub(start).ok_or(ConnectionError::InvalidPacket)?,
                 )
+                .map_err(|_| ConnectionError::InvalidPacket)?;
+                Some(data[tail_start..].to_vec())
             } else {
                 None
             };
             removed_bytes = removed_bytes
                 .checked_add(data.len())
                 .ok_or(ConnectionError::CryptoBufferExceeded)?;
-            if let Some(head_len) = head_len {
+            if let Some(head) = &head {
                 added_bytes = added_bytes
-                    .checked_add(head_len)
+                    .checked_add(head.len())
                     .ok_or(ConnectionError::CryptoBufferExceeded)?;
             }
-            if let Some(tail_start) = tail_start {
+            if let Some(tail) = &tail {
                 added_bytes = added_bytes
-                    .checked_add(data.len() - tail_start)
+                    .checked_add(tail.len())
                     .ok_or(ConnectionError::CryptoBufferExceeded)?;
             }
-            plans.push((start, data, head_len, tail_start));
+            plans.push((start, head, tail));
         }
         if self.unacked_bytes < removed_bytes {
             return Err(ConnectionError::InvalidState);
@@ -163,17 +161,17 @@ impl CryptoStream {
         let retained_bytes =
             retained_bytes.checked_add(added_bytes).ok_or(ConnectionError::CryptoBufferExceeded)?;
 
-        for (start, data, head_len, tail_start) in plans {
+        for (start, head, tail) in plans {
             let queued_for_retransmission = self.retx.remove(&start);
             self.unacked.remove(&start);
-            if let Some(head_len) = head_len {
-                self.unacked.insert(start, data[..head_len].to_vec());
+            if let Some(head) = head {
+                self.unacked.insert(start, head);
                 if queued_for_retransmission {
                     self.retx.insert(start);
                 }
             }
-            if let Some(tail_start) = tail_start {
-                self.unacked.insert(ack_end, data[tail_start..].to_vec());
+            if let Some(tail) = tail {
+                self.unacked.insert(ack_end, tail);
                 if queued_for_retransmission {
                     self.retx.insert(ack_end);
                 }
@@ -548,6 +546,42 @@ mod tests {
     }
 
     #[test]
+    fn ack_across_retained_ranges_preserves_only_queued_outer_fragments() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"abcdefgh").expect("queue flight");
+        for expected in [b"ab", b"cd", b"ef", b"gh"] {
+            assert_eq!(stream.next_crypto_frame(2).expect("send pair").expect("pair").1, expected);
+        }
+        stream.requeue_all_unacked();
+        stream.ack_crypto(1, 6).expect("ACK middle across four ranges");
+        assert_eq!(stream.unacked_bytes(), 2);
+        assert_eq!(stream.retx.iter().copied().collect::<Vec<_>>(), vec![0, 7]);
+        assert_eq!(stream.next_crypto_frame(2), Ok(Some((0, b"a".to_vec()))));
+        assert_eq!(stream.next_crypto_frame(2), Ok(Some((7, b"h".to_vec()))));
+        stream.ack_crypto(1, 6).expect("duplicate middle ACK");
+        assert_eq!(stream.unacked_bytes(), 2);
+        assert_eq!(stream.unacked.get(&0).map(Vec::as_slice), Some(b"a".as_slice()));
+        assert_eq!(stream.unacked.get(&7).map(Vec::as_slice), Some(b"h".as_slice()));
+    }
+
+    #[test]
+    fn late_ack_retains_unrelated_earlier_ranges_and_clears_retry() {
+        let mut stream = CryptoStream::new();
+        for offset in (0..256).step_by(2) {
+            stream.unacked.insert(offset, vec![0xA5]);
+        }
+        stream.unacked_bytes = stream.unacked.len();
+        stream.requeue_crypto(254, 1).expect("queue last range");
+        stream.ack_crypto(254, 1).expect("ACK last range");
+        assert_eq!(stream.unacked.len(), 127);
+        assert_eq!(stream.unacked_bytes(), 127);
+        assert!(stream.retx.is_empty());
+        assert_eq!(stream.unacked.get(&0).map(Vec::as_slice), Some(&[0xA5][..]));
+        stream.ack_crypto(254, 1).expect("duplicate late ACK");
+        assert_eq!(stream.unacked_bytes(), 127);
+    }
+
+    #[test]
     #[ignore = "manual native PTO requeue measurement"]
     fn benchmark_retransmission_index_at_range_counts() {
         for (range_count, iterations) in [(1, 10_000), (128, 1_000), (4_096, 20), (16_384, 3)] {
@@ -586,6 +620,40 @@ mod tests {
                 "ranges={range_count} queue_ns={queue_nanos} set_ns={set_nanos} \
                  queue_allocs={queue_allocs} queue_bytes={queue_bytes} \
                  set_allocs={set_allocs} set_bytes={set_bytes} iterations={iterations}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual native late-ACK measurement"]
+    fn benchmark_late_crypto_ack_at_range_counts() {
+        for (range_count, iterations) in [(1, 10_000), (128, 1_000), (4_096, 50), (16_384, 10)] {
+            let mut stream = CryptoStream::new();
+            for index in 0..range_count - 1 {
+                stream.unacked.insert((index * 2) as u64, vec![0xA5]);
+            }
+            let last_offset = ((range_count - 1) * 2) as u64;
+            let mut elapsed_nanos = 0u128;
+            let mut allocation_calls = 0usize;
+            let mut allocated_bytes = 0usize;
+            for _ in 0..iterations {
+                stream.unacked.insert(last_offset, vec![0x5A; 1_200]);
+                stream.unacked_bytes = range_count - 1 + 1_200;
+                let calls_before = ALLOCATION_CALLS.load(Ordering::Relaxed);
+                let bytes_before = ALLOCATED_BYTES.load(Ordering::Relaxed);
+                let start = Instant::now();
+                stream.ack_crypto(last_offset, 1_200).expect("ACK late full range");
+                elapsed_nanos += start.elapsed().as_nanos();
+                allocation_calls += ALLOCATION_CALLS.load(Ordering::Relaxed) - calls_before;
+                allocated_bytes += ALLOCATED_BYTES.load(Ordering::Relaxed) - bytes_before;
+                assert_eq!(stream.unacked.len(), range_count - 1);
+                assert_eq!(stream.unacked_bytes, range_count - 1);
+            }
+            println!(
+                "ranges={range_count} ack_ns={} allocs={} bytes={} iterations={iterations}",
+                elapsed_nanos / iterations as u128,
+                allocation_calls / iterations,
+                allocated_bytes / iterations
             );
         }
     }

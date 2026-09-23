@@ -818,8 +818,12 @@
 - Detail: `docs/todo/todo-1129-transactional-receive-admission.md`
 
 ### TODO-1130 - Bound high-offset CRYPTO ACK scans and full-ACK cloning
-- OPEN. `CryptoStream::ack_crypto` currently collects every retained range start below the ACK end, then clones data for overlapping ranges even when fully ACKed. A high-offset ACK can scan unrelated earlier entries. Select only the preceding potentially overlapping range and directly intersecting ranges; plan any head/tail copies before mutation, avoid payload clones for full ACKs, and retain byte-exact queued-retry remapping from TODO-1128.
-- Detail: `docs/todo/todo-1130-crypto-ack-range-scan.md`
+- DONE. A late full ACK examines only its predecessor and intersecting ranges, stages only surviving partial fragments, and preserves queued retry intent. At 16,384 ranges the native debug benchmark fell from about 7.36 ms/16,398 allocations to about 4 µs/1 allocation per ACK. Leaf `15 passed, 2 ignored`, default root `1,865 passed, 1 ignored`, feature root `1,870 passed, 1 ignored`, strict Clippy and formatting pass. A concurrent build-artifact disappearance is tracked separately as TODO-1131.
+- Detail: `docs/todo/done/todo-1130-crypto-ack-range-scan.md`
+
+### TODO-1131 - Diagnose build artifact removal during active Cargo compilation
+- OPEN. During the TODO-1130 feature-suite compile, `target/` disappeared and free disk rose from 4.7 to 13 GiB; rustc then failed to copy a missing incremental object. The responsible process is unknown. Identify the cleanup owner and prevent it from deleting an active Cargo target while keeping the 2 GiB free-space policy; prove a clean rebuild and bounded cleanup coexist.
+- Detail: `docs/todo/todo-1131-cargo-target-cleanup-race.md`
 
 ## Completed
 

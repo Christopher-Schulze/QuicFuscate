@@ -479,6 +479,8 @@ Each encryption-level CRYPTO stream admits at most 4 MiB of unsent bytes and ret
 
 Lost or PTO-probed CRYPTO ranges enter one ordered, deduplicating retransmission index per level. Requeued bytes are sent before fresh CRYPTO data; high-offset loss admission examines only the preceding retained range and intersecting ranges. A partial ACK transfers a queued retransmission intent to each still-unacknowledged fragment, while a full ACK removes it. Split retransmissions keep the suffix queued once at its new offset.
 
+ACK retirement examines only the retained interval immediately before the ACK start and intervals whose starts lie inside the ACK range. It validates all affected byte accounting before mutation, copies only surviving fragments of partial ACKs, and retires fully acknowledged payload without cloning it. Duplicate ACKs leave retained bytes and pending retry intent unchanged.
+
 Inbound CRYPTO reassembly uses one canonical interval map per encryption level. A frame may end no farther than 65,536 bytes beyond the next unread offset; the buffer retains at most 65,536 unique bytes and 1,024 disjoint intervals per level. Already delivered prefixes are discarded, adjacent intervals and identical overlaps merge, and conflicting overlaps or ranges beyond the receive window fail before changing that CRYPTO buffer. The receive window advances only when contiguous bytes are drained toward TLS. Whole-packet receive failure atomicity, including packet-number commitment before a stateful frame rejection, remains TODO-1129.
 
 #### Engine Control Plane (embedded orchestration)
