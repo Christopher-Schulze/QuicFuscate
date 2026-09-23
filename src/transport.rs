@@ -280,7 +280,7 @@ mod tests {
         // Burst is exhausted: every spender class is denied.
         assert!(!conn.try_spend_wire_repair(1));
         assert!(!conn.try_spend_wire_cover(1));
-        assert!(!conn.try_spend_wire_pad(1));
+        assert!(!conn.can_stage_wire_spend(1, 0, std::time::Instant::now()));
     }
 
     #[test]
@@ -291,7 +291,7 @@ mod tests {
         for _ in 0..8 {
             assert!(conn.try_spend_wire_repair(1 << 20));
             assert!(conn.try_spend_wire_cover(1 << 20));
-            assert!(conn.try_spend_wire_pad(1 << 20));
+            assert!(conn.can_stage_wire_spend(1 << 20, 0, std::time::Instant::now()));
         }
     }
 

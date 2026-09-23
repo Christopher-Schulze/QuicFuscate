@@ -324,6 +324,8 @@ impl Connection {
             admitted_batch_dgram_skip: 0,
             admitted_batch_frames: Vec::new(),
             admitted_batch_held_streams: Vec::new(),
+            admitted_batch_control_indices: Vec::new(),
+            admitted_batch_wire_reserved: 0,
             pad_short_header_to: None,
             wire_ledger: None,
             idle_keepalive_mark: None,

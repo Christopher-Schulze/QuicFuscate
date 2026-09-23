@@ -467,6 +467,28 @@ fn traffic_analysis_chaff_is_congestion_deferred_exact_sized_and_sequential() {
 }
 
 #[test]
+fn admitted_batch_emits_one_due_chaff_slot() {
+    let mut pair = bench_paired_1rtt_connections();
+    let deadline = enable_test_traffic_analysis(
+        &mut pair.client,
+        crate::transport::config::TrafficAnalysisDefense::ConstantRate,
+        100,
+        1200,
+    );
+    pair.client.on_traffic_analysis_timeout(deadline);
+    pair.client.recovery.cwnd = 64 * 1024;
+    let mut first = [0u8; 1500];
+    let mut second = [0u8; 1500];
+    let mut outputs: [&mut [u8]; 2] = [&mut first, &mut second];
+
+    let produced = pair.client.send_admitted_batch(&mut outputs, 0).expect("one due chaff slot");
+    assert_eq!(produced.len(), 1);
+    assert_eq!(produced[0].0, 1200);
+    assert!(!pair.client.traffic_analysis.as_ref().unwrap().has_pending_chaff());
+    pair.server.recv(&mut first[..produced[0].0], &pair.recv_info).expect("chaff opens");
+}
+
+#[test]
 fn traffic_analysis_chaff_ack_releases_congestion_budget() {
     let mut pair = bench_paired_1rtt_connections();
     let deadline = enable_test_traffic_analysis(
@@ -747,6 +769,10 @@ fn datagrams_remain_queued_when_short_header_seal_fails() {
     pair.client.dgram_send(&first).expect("first datagram enqueue");
     pair.client.dgram_send(&second).expect("second datagram enqueue");
     assert_eq!(pair.client.stats.dgram_sent, 0);
+    pair.client.pending_control.push_back(Frame::MaxData { max: 1024 });
+    assert!(pair.client.pkt_spaces[2].on_packet_recv(7));
+    pair.client.pkt_spaces[2].note_ack_eliciting(0, 1);
+    pair.client.pending_probe_spaces.push_back(recovery::PacketSpace::Application);
 
     let (write_seal, write_hp) = {
         let crypto = pair.client.crypto.read();
@@ -765,6 +791,9 @@ fn datagrams_remain_queued_when_short_header_seal_fails() {
     assert_eq!(pair.client.dgram_send_queue_len(), 2);
     assert_eq!(pair.client.dgram_send_queue_byte_size(), first.len() + second.len());
     assert_eq!(pair.client.stats.dgram_sent, 0);
+    assert!(matches!(pair.client.pending_control.front(), Some(Frame::MaxData { max: 1024 })));
+    assert!(pair.client.pkt_spaces[2].has_pending_ack());
+    assert_eq!(pair.client.pending_probe_spaces.front(), Some(&recovery::PacketSpace::Application));
 
     {
         let mut crypto = pair.client.crypto.write();
@@ -778,6 +807,9 @@ fn datagrams_remain_queued_when_short_header_seal_fails() {
     assert!(matches!(error, ConnectionError::CryptoError(_)));
     assert_eq!(pair.client.dgram_send_queue_len(), 2);
     assert_eq!(pair.client.stats.dgram_sent, 0);
+    assert!(matches!(pair.client.pending_control.front(), Some(Frame::MaxData { max: 1024 })));
+    assert!(pair.client.pkt_spaces[2].has_pending_ack());
+    assert_eq!(pair.client.pending_probe_spaces.front(), Some(&recovery::PacketSpace::Application));
 
     {
         let mut crypto = pair.client.crypto.write();
@@ -790,6 +822,9 @@ fn datagrams_remain_queued_when_short_header_seal_fails() {
     assert_eq!(pair.server.dgram_recv_vec().expect("first datagram delivery"), first);
     assert_eq!(pair.client.dgram_send_queue_len(), 1);
     assert_eq!(pair.client.stats.dgram_sent, 1);
+    assert!(pair.client.pending_control.is_empty());
+    assert!(!pair.client.pkt_spaces[2].has_pending_ack());
+    assert!(pair.client.pending_probe_spaces.is_empty());
 
     let (written, _) = pair.client.send(&mut packet).expect("retry second datagram");
     pair.server.recv(&mut packet[..written], &pair.recv_info).expect("receive second datagram");

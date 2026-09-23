@@ -301,6 +301,32 @@ impl BudgetLedger {
         true
     }
 
+    /// Check a speculative packet against the allowance already reserved by
+    /// earlier packets in the same unsealed batch, without debiting it.
+    pub fn can_stage_spend(&mut self, bytes: u64, reserved: u64, now: std::time::Instant) -> bool {
+        bytes <= self.allowance(now).saturating_sub(reserved)
+    }
+
+    /// Commit a sealed run atomically. A failed internal precondition restores
+    /// the ledger's counters and send timestamp, leaving the run unsent.
+    pub fn commit_staged_spends(&mut self, spends: &[(u64, std::time::Instant)]) -> bool {
+        let previous =
+            (self.window_start, self.sec_spent, self.burst_start, self.burst_spent, self.last_tx);
+        for &(bytes, now) in spends {
+            if bytes != 0 && !self.try_spend(bytes, now) {
+                (
+                    self.window_start,
+                    self.sec_spent,
+                    self.burst_start,
+                    self.burst_spent,
+                    self.last_tx,
+                ) = previous;
+                return false;
+            }
+        }
+        true
+    }
+
     /// Padding bytes for a packet whose plaintext is `payload_len`, with
     /// `max_pad` as the caller's own ceiling (config/headroom). Returns
     /// the number of padding bytes to append:
@@ -321,6 +347,28 @@ impl BudgetLedger {
         now: std::time::Instant,
     ) -> usize {
         let allowance = self.allowance(now) as usize;
+        let pad = self.padding_for_allowance(payload_len, max_pad, allowance);
+        if pad > 0 {
+            self.sec_spent += pad as u64;
+            self.burst_spent += pad as u64;
+            self.last_tx = now;
+        }
+        pad
+    }
+
+    /// Select exact class/cell padding for an unsealed packet without spending.
+    pub fn preview_padding_target(
+        &mut self,
+        payload_len: usize,
+        max_pad: usize,
+        reserved: u64,
+        now: std::time::Instant,
+    ) -> usize {
+        let allowance = self.allowance(now).saturating_sub(reserved) as usize;
+        self.padding_for_allowance(payload_len, max_pad, allowance)
+    }
+
+    fn padding_for_allowance(&self, payload_len: usize, max_pad: usize, allowance: usize) -> usize {
         if allowance == 0 || max_pad == 0 {
             return 0;
         }
@@ -345,9 +393,6 @@ impl BudgetLedger {
         if pad > allowance {
             return 0;
         }
-        self.sec_spent += pad as u64;
-        self.burst_spent += pad as u64;
-        self.last_tx = now;
         pad
     }
 
@@ -452,6 +497,22 @@ mod tests {
         assert_eq!(ledger.padding_target(200, 1000, now), 325);
         // Remaining: 1000 - 400 - 325 = 275.
         assert_eq!(ledger.remaining(now), 275);
+    }
+
+    #[test]
+    fn staged_padding_and_batch_spend_do_not_debit_before_commit() {
+        let mut ledger = make_ledger(WireShape::FixedCell, 1000, 1000);
+        let now = std::time::Instant::now();
+        assert_eq!(ledger.preview_padding_target(500, 1000, 0, now), 700);
+        assert_eq!(ledger.remaining(now), 1000);
+        assert_eq!(ledger.preview_padding_target(500, 1000, 400, now), 0);
+        assert!(ledger.can_stage_spend(600, 400, now));
+        assert!(!ledger.can_stage_spend(601, 400, now));
+
+        assert!(!ledger.commit_staged_spends(&[(400, now), (700, now)]));
+        assert_eq!(ledger.remaining(now), 1000, "failed commit must restore the whole run");
+        assert!(ledger.commit_staged_spends(&[(400, now), (600, now)]));
+        assert_eq!(ledger.remaining(now), 0);
     }
 
     #[test]

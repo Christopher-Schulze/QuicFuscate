@@ -196,6 +196,10 @@ pub struct Connection {
     pub(super) admitted_batch_dgram_skip: usize,
     pub(super) admitted_batch_frames: Vec<AdmittedShortHeader>,
     pub(super) admitted_batch_held_streams: Vec<u64>,
+    /// Original control-queue indices already framed by the open batch.
+    pub(super) admitted_batch_control_indices: Vec<usize>,
+    /// Ledger bytes reserved by unsealed packets in the open batch.
+    pub(super) admitted_batch_wire_reserved: u64,
     /// When set, the next short-header packet is padded so its sealed length matches.
     pub(super) pad_short_header_to: Option<usize>,
     /// Shared wire byte budget for repairs, padding, and cover traffic
@@ -220,15 +224,34 @@ pub(crate) struct AdmittedShortHeader {
     pub(super) pn_len: usize,
     pub(super) plaintext_end: usize,
     pub(super) staged_datagram: bool,
+    pub(super) staged_controls: Vec<usize>,
+    pub(super) staged_terminal_close: bool,
+    pub(super) staged_ack: Option<StagedApplicationAck>,
+    pub(super) staged_probe_index: Option<usize>,
+    pub(super) staged_pad_target: bool,
+    pub(super) staged_wire_spend: u64,
     pub(super) emitted_chaff: bool,
     pub(super) wrote_ack_eliciting: bool,
     pub(super) stream_transmission_id: Option<u64>,
     pub(super) packet_contents: crate::transport::recovery::SentPacketContents,
-    pub(super) pmtu_probe_sent: bool,
+    pub(super) pmtu_probe_size: Option<usize>,
     pub(super) pmtu_probe_bypassed_congestion: bool,
     pub(super) staged_bulk: bool,
     pub(super) datagram_overhead: usize,
     pub(super) now: std::time::Instant,
+}
+
+pub(super) struct StagedApplicationAck {
+    pub(super) delay: u64,
+    pub(super) ranges: qf_transport_types::AckRanges,
+    pub(super) at: std::time::Instant,
+}
+
+pub(super) struct StagedControls {
+    pub(super) end: usize,
+    pub(super) indices: Vec<usize>,
+    pub(super) ack_eliciting: bool,
+    pub(super) terminal_close: bool,
 }
 
 impl Connection {

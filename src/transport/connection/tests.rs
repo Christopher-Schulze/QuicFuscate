@@ -1655,12 +1655,8 @@ fn local_error_preserves_first_tls_provider_failure() {
 
 /// Terminal timeout must retire recovery state, not only the connection's own counters.
 /// A terminal close must not sit behind ordinary control traffic.
-///
-/// Under congestion bypass the control flush stops at the first ack-eliciting frame, so a
-/// PING or MAX_DATA queued earlier used to hide a later CONNECTION_CLOSE until congestion
-/// reopened or the idle timeout fired.
 #[test]
-fn queued_close_is_hoisted_ahead_of_ack_eliciting_control_frames() {
+fn queued_close_stages_ahead_of_ack_eliciting_control_frames() {
     let mut c = make_conn();
 
     c.pending_control.push_back(Frame::Ping { mtu_probe: None });
@@ -1673,30 +1669,23 @@ fn queued_close_is_hoisted_ahead_of_ack_eliciting_control_frames() {
     c.pending_control.push_back(Frame::Ping { mtu_probe: None });
 
     let mut out = [0u8; 512];
-    let (off, wrote_ack_eliciting) =
-        c.flush_pending_control_frames(&mut out, 0, true).expect("bypass flush must succeed");
+    let staged =
+        c.stage_pending_control_frames(&mut out, 0, true, &[]).expect("bypass stage must succeed");
 
-    assert!(off > 0, "the close must be emitted under congestion bypass");
+    assert!(staged.end > 0, "the close must be framed under congestion bypass");
     assert!(
-        !wrote_ack_eliciting,
+        !staged.ack_eliciting,
         "congestion bypass must not emit unrelated ack-eliciting control frames"
     );
-    assert!(
-        !c.pending_control.iter().any(|f| matches!(f, Frame::ConnectionClose { .. })),
-        "the close must be consumed, not left queued behind the PING"
-    );
-    // The ack-eliciting frames stay queued for a later send that respects the cwnd.
-    assert_eq!(
-        c.pending_control.len(),
-        3,
-        "only the close is emitted under bypass; the rest remain queued in order"
-    );
+    assert_eq!(staged.indices, vec![2]);
+    assert!(staged.terminal_close);
+    assert_eq!(c.pending_control.len(), 4, "framing must not consume the close");
     assert!(matches!(c.pending_control.front(), Some(Frame::Ping { .. })));
 }
 
-/// Hoisting must preserve the relative order of everything else.
+/// Wire priority must preserve queue order without mutating the queue.
 #[test]
-fn hoisting_a_close_preserves_the_order_of_remaining_control_frames() {
+fn staged_close_preserves_the_order_of_remaining_control_frames() {
     let mut c = make_conn();
     c.pending_control.push_back(Frame::MaxData { max: 1 });
     c.pending_control.push_back(Frame::MaxData { max: 2 });
@@ -1706,9 +1695,10 @@ fn hoisting_a_close_preserves_the_order_of_remaining_control_frames() {
     });
     c.pending_control.push_back(Frame::MaxData { max: 3 });
 
-    c.hoist_pending_close_to_front();
-
-    assert!(matches!(c.pending_control.front(), Some(Frame::ApplicationClose { .. })));
+    let mut out = [0u8; 512];
+    let staged = c.stage_pending_control_frames(&mut out, 0, false, &[]).expect("stage controls");
+    assert_eq!(staged.indices, vec![2, 0, 1, 3]);
+    assert!(matches!(c.pending_control.front(), Some(Frame::MaxData { max: 1 })));
     let remaining: Vec<u64> = c
         .pending_control
         .iter()
@@ -1719,9 +1709,8 @@ fn hoisting_a_close_preserves_the_order_of_remaining_control_frames() {
         .collect();
     assert_eq!(remaining, vec![1, 2, 3], "non-close frames keep their relative order");
 
-    // Idempotent: a close already at the front stays there.
-    c.hoist_pending_close_to_front();
-    assert!(matches!(c.pending_control.front(), Some(Frame::ApplicationClose { .. })));
+    let second = c.stage_pending_control_frames(&mut out, 0, false, &[]).expect("repeat stage");
+    assert_eq!(second.indices, staged.indices);
 }
 
 #[test]

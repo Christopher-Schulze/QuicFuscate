@@ -745,8 +745,8 @@
 - Detail: `docs/todo/todo-1111-windows-outer-header-portability.md`
 
 ### TODO-1112 - Commit 1-RTT control and ACK state only after packet sealing
-- OPEN. The TODO-1051 admitted-run builder removes pending control frames and PTO probes and commits Application ACK state while only framing deferred packets. On a later build/seal failure, `abort_admitted_batch` restores held stream transmissions but not those control/ACK/probe states; no packet is returned to the caller. Make all send-side effects transactional through successful sealing and delivery ownership, with fault-injected recovery tests.
-- Detail: `docs/todo/todo-1112-transactional-admitted-send-state.md`
+- DONE. Control, Application ACK, PTO, DATAGRAM, PMTU and local chaff/padding budget effects are staged and committed only after the 1-RTT seal, shared by single and eight-packet admitted sends. Failed second-buffer and AEAD/HP attempts preserve obligations; retry opens at the peer exactly once. Default connection 166/166, `zero_copy_dgram` plus `stream_ring_buffer` connection 169/169, full root library 1,848 passed (one ignored), qf-stealth 145/145, strict library Clippy and formatting pass. Exact STREAM/FIFO/counter rollback is TODO-1122; Core FEC/output-queue handoff is TODO-1123; final emitted-wire budget/trace phase is TODO-1104; release performance measurement is TODO-1071.
+- Detail: `docs/todo/done/todo-1112-transactional-admitted-send-state.md`
 
 ### TODO-1113 - Remove HPKE hazmat private-key debug exposure
 - DONE. The RustCrypto backend generates KEM bytes directly at the rustls ownership boundary; `hpke-rs/hazmat` is absent from default and all-features root dependency trees. Upstream key and context Debug output is redacted. Ten provider tests and eight real-ECH root tests pass; the no-default root build and strict provider Clippy pass. Its pre-existing no-default warnings are in TODO-1079.
@@ -784,6 +784,14 @@
 ### TODO-1121 - Fail closed when core TLS provider setup fails
 - DONE. Core client/server construction returns the original typed TLS error and never publishes a failed connection; provider-less product transport cannot report completion or emit 1-RTT application data. Live server failure abandons its auth attempt once. Cached resumption parameters no longer masquerade as the current CID/version identity, and the authenticated UDP limit replaces the remembered 0-RTT value. Focused core, transport, QKey integration, and full root-library tests pass; strict all-target Clippy's unrelated Rust 1.98 diagnostics remain in TODO-1079.
 - Detail: `docs/todo/done/todo-1121-fail-closed-core-tls-provider-initialization.md`
+
+### TODO-1122 - Keep 1-RTT STREAM ownership and FIFO unchanged until seal
+- OPEN. The 1-RTT frame builder removes new STREAM bytes, advances offsets/credit/statistics, and can reorder retained retransmissions before AEAD/HP succeeds. Stage ranges and FIN across single and eight-packet sends; on failure preserve exact source buffers, FIFO and counters, then prove ordered peer delivery once under default and ring-buffer features.
+- Detail: `docs/todo/todo-1122-transactional-one-rtt-stream-send.md`
+
+### TODO-1123 - Make sealed transport packets safe through Core outgoing admission
+- OPEN. `finish_produced_packet` remains fallible after transport commits a sealed packet; a later batch member can fail after earlier sources have been queued. Establish one provable transport-to-Core ownership boundary for raw, framed and in-QUIC FEC; preserve each mandatory systematic source, reconcile optional repairs and budget, and prove exact peer delivery and queue counts.
+- Detail: `docs/todo/todo-1123-core-outgoing-send-handoff.md`
 
 ## Completed
 

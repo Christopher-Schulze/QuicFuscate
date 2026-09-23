@@ -168,6 +168,7 @@ impl Connection {
         let available_probe_target = self.pmtu.probe_target().filter(|target| {
             self.is_established
                 && self.pmtu.should_send_probe(now)
+                && !self.admitted_batch_frames.iter().any(|frame| frame.pmtu_probe_size.is_some())
                 && *target <= self.dgram_send_max_size
                 && *target <= out.len()
         });
@@ -542,6 +543,11 @@ impl Connection {
         let mut staged_datagram = false;
         let mut staged_bulk = false;
         let mut packet_contents = recovery::SentPacketContents::default();
+        let mut staged_controls = Vec::new();
+        let mut staged_terminal_close = false;
+        let mut staged_ack = None;
+        let mut staged_probe_index = None;
+        let mut staged_wire_spend = 0u64;
 
         // Post-handshake Application-level CRYPTO (e.g. NewSessionTicket) is not
         // emitted here. The early return above guarantees `handshake_incomplete`
@@ -551,27 +557,45 @@ impl Connection {
         // `if handshake_incomplete` block was unreachable dead code.
 
         if !dedicated_pmtu_probe {
-            let (off_after_ctrl, ctrl_ack_eliciting) =
-                self.flush_pending_control_frames(out, off, congestion_bypass)?;
-            off = off_after_ctrl;
-            wrote_ack_eliciting |= ctrl_ack_eliciting;
-            packet_contents.control |= ctrl_ack_eliciting;
-            off = self.maybe_emit_application_ack_frame(out, off)?;
+            let controls = self.stage_pending_control_frames(
+                out,
+                off,
+                congestion_bypass,
+                &self.admitted_batch_control_indices,
+            )?;
+            off = controls.end;
+            wrote_ack_eliciting |= controls.ack_eliciting;
+            packet_contents.control |= controls.ack_eliciting;
+            staged_controls = controls.indices;
+            staged_terminal_close = controls.terminal_close;
+            let prior_ack =
+                self.admitted_batch_frames.iter().any(|frame| frame.staged_ack.is_some());
+            let (ack_end, ack) = self.maybe_stage_application_ack_frame(out, off, prior_ack)?;
+            off = ack_end;
+            staged_ack = ack;
             // RFC 9002 sec. 6.2.4: emit one ack-eliciting PING per pending
             // Application-space PTO probe. Written directly (not via
             // pending_control) so it also fires when the congestion gate was
             // bypassed for the probe; stream/datagram payloads stay gated.
+            let prior_probes = self
+                .admitted_batch_frames
+                .iter()
+                .filter(|frame| frame.staged_probe_index.is_some())
+                .count();
             if let Some(pos) = self
                 .pending_probe_spaces
                 .iter()
-                .position(|s| *s == recovery::PacketSpace::Application)
+                .enumerate()
+                .filter(|(_, space)| **space == recovery::PacketSpace::Application)
+                .nth(prior_probes)
+                .map(|(index, _)| index)
             {
                 let ping = Frame::Ping { mtu_probe: None };
                 let tag_reserve = self.tag_reserve_1rtt();
                 let ping_len = frames::wire_len(&ping)?;
                 if out.len().saturating_sub(off) >= ping_len.saturating_add(tag_reserve) {
-                    self.pending_probe_spaces.remove(pos);
                     off += frames::to_bytes(&ping, &mut out[off..])?;
+                    staged_probe_index = Some(pos);
                     wrote_ack_eliciting = true;
                     packet_contents.control = true;
                 }
@@ -611,7 +635,7 @@ impl Connection {
         // the packet up to the probe target size. The probe is ack-eliciting so
         // the peer's ACK confirms the larger MTU. We only probe when the buffer
         // can hold the probe size (the caller's buffer is typically >= PMTU_MAX).
-        let mut _pmtu_probe_sent = false;
+        let mut pmtu_probe_size = None;
         if dedicated_pmtu_probe
             && !wrote_ack_eliciting
             && outer_mtu_cap >= self.pmtu.probe_target().unwrap_or(0)
@@ -632,9 +656,7 @@ impl Connection {
                 if pad_len > 0 {
                     off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
                 }
-                self.pmtu.on_probe_sent(probe_size, now);
-                _pmtu_probe_sent = true;
-                self.pmtu_probe_pn = Some(pn);
+                pmtu_probe_size = Some(probe_size);
             }
         }
         // A due traffic-analysis slot emits chaff only when the packet remains
@@ -643,7 +665,11 @@ impl Connection {
         // into an ack-eliciting chaff packet.
         let packet_has_real_frames = off > pn_off + pn_len;
         let mut emitted_chaff = false;
-        if !packet_has_real_frames && !congestion_bypass && !dedicated_pmtu_probe {
+        if !packet_has_real_frames
+            && !congestion_bypass
+            && !dedicated_pmtu_probe
+            && self.admitted_batch_frames.is_empty()
+        {
             let tag_reserve = self.tag_reserve_1rtt();
             let chaff_size = self
                 .traffic_analysis
@@ -662,13 +688,20 @@ impl Connection {
                 // tag) before it is emitted. A denied chaff stays pending
                 // for the next slot; it is never sent over the cap.
                 let wire_len = (off + 1 + pad_len + tag_reserve) as u64;
-                if self.try_spend_wire_cover(wire_len) {
+                if self.can_stage_wire_spend(
+                    wire_len,
+                    self.admitted_batch_wire_reserved.saturating_add(staged_wire_spend),
+                    now,
+                ) {
                     use crate::transport::Frame;
                     let ping = Frame::Ping { mtu_probe: None };
                     off += crate::transport::frames::to_bytes(&ping, &mut out[off..])?;
                     wrote_ack_eliciting = true;
                     emitted_chaff = true;
                     packet_contents.control = true;
+                    if self.wire_ledger.is_some() {
+                        staged_wire_spend = staged_wire_spend.saturating_add(wire_len);
+                    }
                     if pad_len > 0 {
                         off += crate::transport::frames::write_padding(pad_len, &mut out[off..])?;
                     }
@@ -680,18 +713,35 @@ impl Connection {
                 self.dgram_send_queue.len(), self.pending_control.len(), self.has_pending_application_ack(), self.writable_streams.len(), self.pending_probe_spaces.len());
             return Err(ConnectionError::Done);
         }
-        off = self.maybe_apply_stealth_padding(out, pn_off, pn_len, off)?;
+        let prior_pad_target =
+            self.admitted_batch_frames.iter().any(|frame| frame.staged_pad_target);
+        let (padded_end, staged_pad_target, pad_spend) = self.maybe_apply_stealth_padding(
+            out,
+            pn_off,
+            pn_len,
+            off,
+            self.admitted_batch_wire_reserved.saturating_add(staged_wire_spend),
+            !prior_pad_target,
+        )?;
+        off = padded_end;
+        staged_wire_spend = staged_wire_spend.saturating_add(pad_spend);
         let frame = AdmittedShortHeader {
             pn,
             pn_off,
             pn_len,
             plaintext_end: off,
             staged_datagram,
+            staged_controls,
+            staged_terminal_close,
+            staged_ack,
+            staged_probe_index,
+            staged_pad_target,
+            staged_wire_spend,
             emitted_chaff,
             wrote_ack_eliciting,
             stream_transmission_id,
             packet_contents,
-            pmtu_probe_sent: _pmtu_probe_sent,
+            pmtu_probe_size,
             pmtu_probe_bypassed_congestion,
             staged_bulk,
             datagram_overhead,
@@ -707,12 +757,13 @@ impl Connection {
             if staged_datagram {
                 self.admitted_batch_dgram_skip = self.admitted_batch_dgram_skip.saturating_add(1);
             }
+            self.admitted_batch_control_indices.extend(frame.staged_controls.iter().copied());
+            self.admitted_batch_control_indices.sort_unstable();
+            self.admitted_batch_wire_reserved =
+                self.admitted_batch_wire_reserved.saturating_add(frame.staged_wire_spend);
             let mut deferred = frame;
             deferred.plaintext_end = off;
             self.admitted_batch_frames.push(deferred);
-            if let Some(ledger) = self.wire_ledger.as_mut() {
-                ledger.note_wire_send(now);
-            }
             return Ok((
                 off,
                 SendInfo {
@@ -726,7 +777,8 @@ impl Connection {
             ));
         }
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
-        let info = self.account_admitted_short_header(off, &frame)?;
+        self.commit_staged_short_header_effects(std::slice::from_ref(&frame))?;
+        let info = self.account_admitted_short_header(off, &frame);
         if let Some(ledger) = self.wire_ledger.as_mut() {
             ledger.note_wire_send(now);
         }
@@ -751,6 +803,8 @@ impl Connection {
         self.admitted_batch_dgram_skip = 0;
         self.admitted_batch_frames.clear();
         self.admitted_batch_held_streams.clear();
+        self.admitted_batch_control_indices.clear();
+        self.admitted_batch_wire_reserved = 0;
 
         let mut sealed_now: Vec<(usize, SendInfo)> = Vec::new();
         let limit = outs.len().min(MAX_ADMITTED_SEAL);
@@ -768,6 +822,13 @@ impl Connection {
                             self.admitted_batch_reserved = self
                                 .admitted_batch_reserved
                                 .saturating_add(self.dgram_send_max_size);
+                        }
+                        if self
+                            .admitted_batch_frames
+                            .last()
+                            .is_some_and(|frame| frame.staged_terminal_close)
+                        {
+                            break;
                         }
                     } else {
                         sealed_now.push((len, info));
@@ -796,6 +857,8 @@ impl Connection {
         self.admitted_batch_defer = false;
         self.admitted_batch_reserved = 0;
         self.admitted_batch_dgram_skip = 0;
+        self.admitted_batch_control_indices.clear();
+        self.admitted_batch_wire_reserved = 0;
         let sealed_lengths = match seal_result {
             Ok(lengths) => lengths,
             Err(error) => {
@@ -803,18 +866,19 @@ impl Connection {
                 return Err(error);
             }
         };
+        if let Err(error) = self.commit_staged_short_header_effects(&frames) {
+            self.restore_held_stream_transmissions();
+            return Err(error);
+        }
         let mut produced = Vec::with_capacity(sealed_now.len() + sealed_lengths.len());
         produced.extend(sealed_now);
         for (total, frame) in sealed_lengths.into_iter().zip(frames) {
-            let info = match self.account_admitted_short_header(total, &frame) {
-                Ok(info) => info,
-                Err(error) => {
-                    self.restore_held_stream_transmissions();
-                    return Err(error);
-                }
-            };
+            let info = self.account_admitted_short_header(total, &frame);
             if let Some(transmission_id) = frame.stream_transmission_id {
                 self.admitted_batch_held_streams.retain(|held| *held != transmission_id);
+            }
+            if let Some(ledger) = self.wire_ledger.as_mut() {
+                ledger.note_wire_send(frame.now);
             }
             produced.push((total, info));
         }
@@ -827,6 +891,8 @@ impl Connection {
         self.admitted_batch_reserved = 0;
         self.admitted_batch_dgram_skip = 0;
         self.admitted_batch_frames.clear();
+        self.admitted_batch_control_indices.clear();
+        self.admitted_batch_wire_reserved = 0;
         self.restore_held_stream_transmissions();
     }
 
@@ -978,10 +1044,7 @@ impl Connection {
         &mut self,
         total: usize,
         frame: &AdmittedShortHeader,
-    ) -> Result<SendInfo, crate::error::ConnectionError> {
-        if frame.staged_datagram {
-            self.commit_staged_datagram_frame()?;
-        }
+    ) -> SendInfo {
         if let Some(scheduler) = self.traffic_analysis.as_mut() {
             if frame.emitted_chaff {
                 scheduler.record_chaff_emitted();
@@ -1009,7 +1072,7 @@ impl Connection {
         self.stats.sent += 1;
         self.stats.sent_bytes += total as u64;
         if frame.wrote_ack_eliciting {
-            if frame.pmtu_probe_sent && frame.pmtu_probe_bypassed_congestion {
+            if frame.pmtu_probe_size.is_some() && frame.pmtu_probe_bypassed_congestion {
                 self.recovery.on_pmtu_probe_sent_in_space(
                     recovery::PacketSpace::Application,
                     frame.pn,
@@ -1038,7 +1101,73 @@ impl Connection {
             }
             self.cwnd = self.recovery.cwnd;
         }
-        Ok(info)
+        info
+    }
+
+    fn commit_staged_short_header_effects(
+        &mut self,
+        frames: &[AdmittedShortHeader],
+    ) -> Result<(), crate::error::ConnectionError> {
+        use crate::error::ConnectionError;
+
+        let staged_datagrams = frames.iter().filter(|frame| frame.staged_datagram).count();
+        if staged_datagrams > self.dgram_send_queue.len()
+            || frames.iter().filter(|frame| frame.staged_ack.is_some()).count() > 1
+            || frames.iter().filter(|frame| frame.pmtu_probe_size.is_some()).count() > 1
+        {
+            return Err(ConnectionError::InvalidState);
+        }
+        let mut control_indices: Vec<usize> =
+            frames.iter().flat_map(|frame| frame.staged_controls.iter().copied()).collect();
+        control_indices.sort_unstable();
+        if control_indices.last().is_some_and(|index| *index >= self.pending_control.len())
+            || control_indices.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(ConnectionError::InvalidState);
+        }
+        let mut probe_indices: Vec<usize> =
+            frames.iter().filter_map(|frame| frame.staged_probe_index).collect();
+        probe_indices.sort_unstable();
+        if probe_indices.last().is_some_and(|index| *index >= self.pending_probe_spaces.len())
+            || probe_indices.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(ConnectionError::InvalidState);
+        }
+
+        if let Some(ledger) = self.wire_ledger.as_mut() {
+            let spends: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame.staged_wire_spend > 0)
+                .map(|frame| (frame.staged_wire_spend, frame.now))
+                .collect();
+            if !ledger.commit_staged_spends(&spends) {
+                return Err(ConnectionError::InvalidState);
+            }
+        }
+
+        for _ in 0..staged_datagrams {
+            self.commit_staged_datagram_frame()?;
+        }
+
+        for index in control_indices.into_iter().rev() {
+            self.pending_control.remove(index);
+        }
+        for index in probe_indices.into_iter().rev() {
+            self.pending_probe_spaces.remove(index);
+        }
+        for frame in frames {
+            if frame.staged_pad_target {
+                self.pad_short_header_to = None;
+            }
+            if let Some(ack) = &frame.staged_ack {
+                self.commit_staged_application_ack(ack);
+            }
+            if let Some(size) = frame.pmtu_probe_size {
+                self.pmtu.on_probe_sent(size, frame.now);
+                self.pmtu_probe_pn = Some(frame.pn);
+            }
+        }
+        Ok(())
     }
 
     /// Install or replace the shared wire byte ledger (TODO-1052).
@@ -1074,13 +1203,8 @@ impl Connection {
         }
     }
 
-    /// Atomically ask the ledger to pay `bytes` of image-matching padding
-    /// (`pad_short_header_to` for repair datagrams). Same contract.
-    pub(crate) fn try_spend_wire_pad(&mut self, bytes: u64) -> bool {
-        match self.wire_ledger.as_mut() {
-            Some(ledger) => ledger.try_spend(bytes, self.clock.now()),
-            None => true,
-        }
+    pub(crate) fn can_stage_wire_spend(&mut self, bytes: u64, reserved: u64, now: Instant) -> bool {
+        self.wire_ledger.as_mut().is_none_or(|ledger| ledger.can_stage_spend(bytes, reserved, now))
     }
 
     /// Ask the persona trace whether a client packet is due now and the

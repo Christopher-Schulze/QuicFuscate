@@ -1,4 +1,4 @@
-use super::state::AdmittedShortHeader;
+use super::state::{AdmittedShortHeader, StagedApplicationAck, StagedControls};
 use super::*;
 use crate::transport::DatagramClass;
 
@@ -833,88 +833,59 @@ impl Connection {
         )
     }
 
-    /// Flushes pending control frames. Returns `(new_off, wrote_ack_eliciting)`
-    /// where `wrote_ack_eliciting` is true if any ack-eliciting frame was
-    /// emitted (e.g. PING, MAX_DATA, NEW_CONNECTION_ID). This is used by the
-    /// caller to decide whether the packet is congestion-controlled.
-    ///
-    /// When `congestion_bypass` is true, the caller is emitting an ACK-only
-    /// packet to bypass the congestion gate (RFC 9002 sec. 7.2). In that mode only
-    /// non-ack-eliciting control frames (CONNECTION_CLOSE / APPLICATION_CLOSE)
-    /// may be emitted - emitting ack-eliciting frames would inflate
-    /// bytes_in_flight beyond cwnd, violating RFC 9002 sec. 7.2 ("A sender MUST
-    /// NOT send a packet if it would cause bytes_in_flight to exceed the
-    /// congestion window"). Ack-eliciting control frames are left in the queue
-    /// and flushed on a later non-bypassed send.
-    #[inline(always)]
-    /// Move a queued terminal close to the front of the control queue.
-    ///
-    /// Close frames are not ack-eliciting, so once one is at the front it is emitted even under
-    /// congestion bypass. Relative order of the remaining frames is preserved, and the queue holds
-    /// at most one close because `close()` is first-close-wins; if several were ever present, the
-    /// earliest is the one promoted.
-    pub(super) fn hoist_pending_close_to_front(&mut self) {
-        let close_index = self.pending_control.iter().position(|frame| {
-            matches!(frame, Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. })
-        });
-        let Some(index) = close_index else {
-            return;
-        };
-        if index == 0 {
-            return;
-        }
-        if let Some(close) = self.pending_control.remove(index) {
-            self.pending_control.push_front(close);
-        }
-    }
-
-    pub(super) fn flush_pending_control_frames(
-        &mut self,
+    /// Serialize eligible controls without consuming the queue. A terminal close is first on
+    /// wire even when earlier ack-eliciting controls are blocked by congestion bypass.
+    /// Queue removal occurs only after the sealed packet is accepted.
+    pub(super) fn stage_pending_control_frames(
+        &self,
         out: &mut [u8],
         mut off: usize,
         congestion_bypass: bool,
-    ) -> Result<(usize, bool), crate::error::ConnectionError> {
-        // A terminal close is a unique, highest-priority state and must not sit behind ordinary
-        // control traffic. Under congestion bypass the loop below stops at the first ack-eliciting
-        // frame, so a PING or MAX_DATA queued earlier would hide a later CONNECTION_CLOSE until
-        // congestion reopened or the idle timeout fired.
-        self.hoist_pending_close_to_front();
-
-        let mut wrote_ack_eliciting = false;
-        while let Some(ctrl) = self.pending_control.front() {
-            // When bypassing the congestion gate, skip ack-eliciting control
-            // frames (PING, MAX_DATA, NEW_CONNECTION_ID, HANDSHAKE_DONE,
-            // RESET_STREAM, STOP_SENDING, PATH_CHALLENGE, PATH_RESPONSE,
-            // DATA_BLOCKED, STREAM_DATA_BLOCKED, ...). They are left in the
-            // queue and emitted on a later send that respects the cwnd.
+        already_staged: &[usize],
+    ) -> Result<StagedControls, crate::error::ConnectionError> {
+        // A close is serialized first without rearranging the queue. Queue mutation waits for seal.
+        let close_index = self.pending_control.iter().enumerate().find_map(|(index, frame)| {
+            (already_staged.binary_search(&index).is_err()
+                && matches!(frame, Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. }))
+            .then_some(index)
+        });
+        let mut indices = Vec::new();
+        let mut ack_eliciting = false;
+        let mut terminal_close = false;
+        for index in close_index.into_iter().chain(0..self.pending_control.len()) {
+            if already_staged.binary_search(&index).is_ok()
+                || (close_index == Some(index) && terminal_close)
+            {
+                continue;
+            }
+            let ctrl = &self.pending_control[index];
             if congestion_bypass && Self::frame_is_ack_eliciting(ctrl) {
                 break;
             }
             let need = frames::wire_len(ctrl)?;
-            let tag_reserve = self.tag_reserve_1rtt();
-            if out.len().saturating_sub(off) >= need.saturating_add(tag_reserve) {
-                let tail =
-                    out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
-                off += frames::to_bytes(ctrl, tail)?;
-                if Self::frame_is_ack_eliciting(ctrl) {
-                    wrote_ack_eliciting = true;
-                }
-                self.pending_control.pop_front();
-            } else {
+            if out.len().saturating_sub(off) < need.saturating_add(self.tag_reserve_1rtt()) {
                 break;
             }
+            let tail = out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+            off += frames::to_bytes(ctrl, tail)?;
+            ack_eliciting |= Self::frame_is_ack_eliciting(ctrl);
+            terminal_close |=
+                matches!(ctrl, Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. });
+            indices.push(index);
         }
-        Ok((off, wrote_ack_eliciting))
+        Ok(StagedControls { end: off, indices, ack_eliciting, terminal_close })
     }
 
     #[inline(always)]
-    pub(super) fn maybe_emit_application_ack_frame(
-        &mut self,
+    pub(super) fn maybe_stage_application_ack_frame(
+        &self,
         out: &mut [u8],
         mut off: usize,
-    ) -> Result<usize, crate::error::ConnectionError> {
-        // Inspect without consuming: the capacity check and serialization below can both fail,
-        // and a dropped ACK is not guaranteed to be re-triggered by another inbound packet.
+        already_staged: bool,
+    ) -> Result<(usize, Option<StagedApplicationAck>), crate::error::ConnectionError> {
+        if already_staged {
+            return Ok((off, None));
+        }
         let now = self.clock.now();
         if let Some((ack_delay, ack_ranges)) =
             self.pkt_spaces[2].peek_ack_at(self.config.ack_delay_exponent, now)
@@ -927,36 +898,31 @@ impl Connection {
             let ack = Frame::Ack { ack_delay, ranges: ack_ranges, ecn_counts: ecn };
             let need = frames::wire_len(&ack)?;
             let tag_reserve = self.tag_reserve_1rtt();
-            let mut ack_written = false;
             if out.len().saturating_sub(off) >= need.saturating_add(tag_reserve) {
                 let tail =
                     out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
                 off += frames::to_bytes(&ack, tail)?;
-                ack_written = true;
-            }
-            if ack_written {
-                // Committed only now that the bytes are in the packet.
-                self.pkt_spaces[2].commit_ack_at(now);
-                if let Some(obs) = &self.observer {
-                    if let Frame::Ack { ranges, .. } = &ack {
-                        obs.on_ack(ack_delay, ranges);
-                    }
-                }
-
-                let exp = self.config.ack_delay_exponent.min(20);
-                let ack_delay_us = ack_delay << exp;
-                crate::telemetry::ACK_DELAY_LAST_US
-                    .store(ack_delay_us, std::sync::atomic::Ordering::Relaxed);
-                // Move the observer Arc out instead of cloning it: apply_policy
-                // needs &mut self, and the policy target can never emit observer
-                // events, so the slot can stay empty for the call's duration.
-                if let Some(obs) = self.observer.take() {
-                    obs.apply_policy(self);
-                    self.observer = Some(obs);
-                }
+                let Frame::Ack { ranges, .. } = ack else {
+                    return Err(crate::error::ConnectionError::InvalidState);
+                };
+                return Ok((off, Some(StagedApplicationAck { delay: ack_delay, ranges, at: now })));
             }
         }
-        Ok(off)
+        Ok((off, None))
+    }
+
+    pub(super) fn commit_staged_application_ack(&mut self, staged: &StagedApplicationAck) {
+        self.pkt_spaces[2].commit_ack_at(staged.at);
+        if let Some(observer) = &self.observer {
+            observer.on_ack(staged.delay, &staged.ranges);
+        }
+        let exponent = self.config.ack_delay_exponent.min(20);
+        crate::telemetry::ACK_DELAY_LAST_US
+            .store(staged.delay << exponent, std::sync::atomic::Ordering::Relaxed);
+        if let Some(observer) = self.observer.take() {
+            observer.apply_policy(self);
+            self.observer = Some(observer);
+        }
     }
 
     /// Flushes one retransmitted or new STREAM range. Returns `(new_off,
@@ -1349,7 +1315,9 @@ impl Connection {
         pn_off: usize,
         pn_len: usize,
         mut off: usize,
-    ) -> Result<usize, crate::error::ConnectionError> {
+        reserved_wire_spend: u64,
+        allow_pad_target: bool,
+    ) -> Result<(usize, bool, u64), crate::error::ConnectionError> {
         // --- Traffic analysis defense modes (TODO-455) ---
         //
         // FullPadding / ConstantRate take precedence over the legacy
@@ -1357,20 +1325,30 @@ impl Connection {
         // target size regardless of `stealth_padding_rate`, eliminating
         // size-based traffic analysis.
         let defense = self.config.traffic_analysis_defense;
-        if let Some(target) = self.pad_short_header_to.take() {
+        if let Some(target) = self.pad_short_header_to.filter(|_| allow_pad_target) {
             let tag_reserve = self.tag_reserve_1rtt();
             let avail = out.len().saturating_sub(off + tag_reserve);
+            let mut staged_spend = 0;
             if target > off + tag_reserve {
                 let pad_len = (target - off - tag_reserve).min(avail);
                 // TODO-1052: the image-matching pad rides the shared wire
                 // ledger like every other stealth byte. Under an exhausted
                 // ledger the repair datagram goes out unpadded rather than
                 // spending bytes the budget never granted.
-                if pad_len > 0 && self.try_spend_wire_pad(pad_len as u64) {
+                if pad_len > 0
+                    && self.can_stage_wire_spend(
+                        pad_len as u64,
+                        reserved_wire_spend,
+                        self.clock.now(),
+                    )
+                {
                     off += frames::write_padding(pad_len, &mut out[off..])?;
+                    if self.wire_ledger.is_some() {
+                        staged_spend = pad_len as u64;
+                    }
                 }
             }
-            return Ok(off);
+            return Ok((off, true, staged_spend));
         }
         if matches!(defense, TrafficAnalysisDefense::FullPadding)
             || matches!(defense, TrafficAnalysisDefense::ConstantRate)
@@ -1391,7 +1369,7 @@ impl Connection {
                     off += frames::write_padding(pad_len, &mut out[off..])?;
                 }
             }
-            return Ok(off);
+            return Ok((off, false, 0));
         }
 
         if self.config.stealth_padding_enabled {
@@ -1401,14 +1379,21 @@ impl Connection {
             let ad_len = pn_off + pn_len;
             let pt_len_now = off.saturating_sub(ad_len);
             if avail > 0 {
-                let pad_len = self.compute_stealth_padding(pt_len_now, avail);
+                let now = self.clock.now();
+                let pad_len = if let Some(ledger) = self.wire_ledger.as_mut() {
+                    ledger.preview_padding_target(pt_len_now, avail, reserved_wire_spend, now)
+                } else {
+                    self.compute_stealth_padding(pt_len_now, avail)
+                };
                 if pad_len > 0 {
                     let written = frames::write_padding(pad_len, &mut out[off..])?;
                     off += written;
+                    let staged_spend = if self.wire_ledger.is_some() { written as u64 } else { 0 };
+                    return Ok((off, false, staged_spend));
                 }
             }
         }
-        Ok(off)
+        Ok((off, false, 0))
     }
 
     /// Queues a cover PING frame to be emitted in the next outgoing 1-RTT packet.

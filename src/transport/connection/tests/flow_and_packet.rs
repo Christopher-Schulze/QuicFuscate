@@ -1223,6 +1223,150 @@ fn admitted_uniform_run_seals_once_and_opens_on_the_peer() {
 }
 
 #[test]
+fn failed_admitted_run_preserves_control_ack_and_probe() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.enable_datagrams(4, 4);
+    pair.client.recovery.cwnd = 8 * 2048;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    pair.client.pending_control.push_back(Frame::MaxData { max: 1024 });
+    assert!(pair.client.pkt_spaces[2].on_packet_recv(7));
+    pair.client.pkt_spaces[2].note_ack_eliciting(0, 1);
+    pair.client.pending_probe_spaces.push_back(recovery::PacketSpace::Application);
+    let stream_payload = b"retained after aborted batch";
+    pair.client.stream_send(0, stream_payload, false).unwrap();
+    pair.client.dgram_send(&[0x5a; 32]).unwrap();
+    pair.client.dgram_send(&[0xa5; 32]).unwrap();
+    let now = pair.client.clock.now();
+    pair.client.set_wire_ledger(Some(qf_stealth::BudgetLedger::new(
+        qf_stealth::WireBudget {
+            cap_bytes_per_sec: 1000,
+            cap_bytes_per_burst: 1000,
+            shape: qf_stealth::WireShape::FixedCell,
+        },
+        None,
+        900,
+        now,
+    )));
+    pair.client.set_short_header_pad_target(900);
+    let before_sent = pair.client.stats.sent;
+    let before_budget = pair.client.wire_ledger_mut().unwrap().remaining(now);
+    let mut first = [0u8; 2048];
+    let mut too_small = [0u8; 1];
+    let mut outs: [&mut [u8]; 2] = [&mut first, &mut too_small];
+
+    assert!(matches!(
+        pair.client.send_admitted_batch(&mut outs, 0),
+        Err(ConnectionError::BufferTooShort)
+    ));
+    assert!(matches!(pair.client.pending_control.front(), Some(Frame::MaxData { max: 1024 })));
+    assert!(pair.client.pkt_spaces[2].has_pending_ack());
+    assert_eq!(pair.client.pending_probe_spaces.front(), Some(&recovery::PacketSpace::Application));
+    assert_eq!(pair.client.dgram_send_queue_len(), 2);
+    assert_eq!(pair.client.stats.sent, before_sent);
+    assert_eq!(pair.client.pad_short_header_to, Some(900));
+    assert_eq!(pair.client.wire_ledger_mut().unwrap().remaining(now), before_budget);
+
+    let mut storage = vec![vec![0u8; 2048]; 2];
+    let mut refs: Vec<&mut [u8]> = storage.iter_mut().map(|buffer| buffer.as_mut_slice()).collect();
+    let produced = pair.client.send_admitted_batch(&mut refs, 0).expect("retry admitted batch");
+    assert_eq!(produced.len(), 2);
+    assert!(pair.client.pending_control.is_empty());
+    assert!(!pair.client.pkt_spaces[2].has_pending_ack());
+    assert!(pair.client.pending_probe_spaces.is_empty());
+    assert_eq!(pair.client.dgram_send_queue_len(), 0);
+    assert_eq!(pair.client.stats.sent, before_sent + 2);
+    assert_eq!(pair.client.pad_short_header_to, None);
+    assert!(pair.client.wire_ledger_mut().unwrap().remaining(now) < before_budget);
+    for (index, (len, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*len], &pair.recv_info).expect("peer opens retry");
+        let expected = if index == 0 { &[0x5a; 32] } else { &[0xa5; 32] };
+        assert_eq!(pair.server.dgram_recv_vec().expect("one datagram"), expected);
+    }
+    let mut received = [0u8; 64];
+    let (length, fin) =
+        pair.server.stream_recv(0, &mut received).expect("retained stream delivered");
+    assert_eq!(&received[..length], stream_payload);
+    assert!(!fin);
+}
+
+#[test]
+fn failed_admitted_seal_preserves_unsent_obligations() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.enable_datagrams(4, 4);
+    pair.client.recovery.cwnd = 8 * 2048;
+    pair.client.cwnd = pair.client.recovery.cwnd;
+    pair.client.pending_control.push_back(Frame::MaxData { max: 2048 });
+    assert!(pair.client.pkt_spaces[2].on_packet_recv(9));
+    pair.client.pkt_spaces[2].note_ack_eliciting(0, 1);
+    pair.client.pending_probe_spaces.push_back(recovery::PacketSpace::Application);
+    pair.client.dgram_send(&[0x31; 32]).unwrap();
+    pair.client.dgram_send(&[0x32; 32]).unwrap();
+    let before_sent = pair.client.stats.sent;
+    pair.client.crypto_1rtt.store(None);
+    let mut storage = vec![vec![0u8; 2048]; 2];
+    let mut refs: Vec<&mut [u8]> = storage.iter_mut().map(|buffer| buffer.as_mut_slice()).collect();
+
+    assert!(matches!(
+        pair.client.send_admitted_batch(&mut refs, 0),
+        Err(ConnectionError::TlsError(_))
+    ));
+    assert!(matches!(pair.client.pending_control.front(), Some(Frame::MaxData { max: 2048 })));
+    assert!(pair.client.pkt_spaces[2].has_pending_ack());
+    assert_eq!(pair.client.pending_probe_spaces.front(), Some(&recovery::PacketSpace::Application));
+    assert_eq!(pair.client.dgram_send_queue_len(), 2);
+    assert_eq!(pair.client.stats.sent, before_sent);
+
+    pair.client.sync_1rtt();
+    let produced = pair.client.send_admitted_batch(&mut refs, 0).expect("retry after seal failure");
+    assert_eq!(produced.len(), 2);
+    assert!(pair.client.pending_control.is_empty());
+    assert!(!pair.client.pkt_spaces[2].has_pending_ack());
+    assert!(pair.client.pending_probe_spaces.is_empty());
+    assert_eq!(pair.client.dgram_send_queue_len(), 0);
+    for (index, (len, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*len], &pair.recv_info).expect("peer opens retry");
+        let expected = if index == 0 { &[0x31; 32] } else { &[0x32; 32] };
+        assert_eq!(pair.server.dgram_recv_vec().expect("one datagram"), expected);
+    }
+}
+
+#[test]
+fn failed_admitted_run_does_not_mark_pmtu_probe_sent() {
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.enable_datagrams(4, 4);
+    pair.server.enable_datagrams(4, 4);
+    pair.client.dgram_send_max_size = 1500;
+    pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.dgram_send(&[0x5a; 24]).unwrap();
+    let now = pair.client.clock.now();
+    let mut probe = [0u8; 1600];
+    let mut too_small = [0u8; 1];
+    let mut failed: [&mut [u8]; 2] = [&mut probe, &mut too_small];
+
+    assert_eq!(
+        pair.client.send_admitted_batch(&mut failed, 0).unwrap_err(),
+        ConnectionError::BufferTooShort
+    );
+    assert!(pair.client.pmtu_probe_pn.is_none());
+    assert!(pair.client.pmtu.should_send_probe(now));
+    assert_eq!(pair.client.dgram_send_queue_len(), 1);
+
+    let mut storage = vec![vec![0u8; 1600]; 2];
+    let mut outputs: Vec<&mut [u8]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+    let produced = pair.client.send_admitted_batch(&mut outputs, 0).expect("retry probe and data");
+    assert_eq!(produced.len(), 2);
+    assert_eq!(produced[0].0, 1500);
+    assert!(pair.client.pmtu_probe_pn.is_some());
+    assert_eq!(pair.client.dgram_send_queue_len(), 0);
+    for (index, (length, _)) in produced.iter().enumerate() {
+        pair.server.recv(&mut storage[index][..*length], &pair.recv_info).expect("retry opens");
+    }
+    assert_eq!(pair.server.dgram_recv_vec().expect("one datagram"), [0x5a; 24]);
+    assert!(matches!(pair.server.dgram_recv_vec(), Err(ConnectionError::Done)));
+}
+
+#[test]
 fn short_header_pad_target_sets_sealed_length() {
     let mut pair = bench_paired_1rtt_connections();
     pair.client.enable_datagrams(4, 4);
