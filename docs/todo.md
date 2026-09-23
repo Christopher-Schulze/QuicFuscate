@@ -806,12 +806,16 @@
 - Detail: `docs/todo/done/todo-1126-crypto-retention-backpressure.md`
 
 ### TODO-1127 - Bound inbound CRYPTO reassembly by the unread offset
-- OPEN. `CryptoStream::recv` advances its nominal 64 KiB window from the highest received offset, so stepped out-of-order Initial/Handshake input can grow unauthenticated memory without bound; stale and overlapping ranges are not normalized. Anchor the window to `recv_off`, cap retained bytes and intervals, validate overlap byte identity, and prove reordered real TLS completion.
-- Detail: `docs/todo/todo-1127-bounded-crypto-reassembly.md`
+- DONE. Each CRYPTO level now has a receive-offset-anchored 65,536-byte window, at most 65,536 retained unique bytes and 1,024 canonical intervals; stale prefixes and equal overlaps normalize, conflicting overlaps fail without leaf mutation. Reordered real Initial and Handshake TLS flights complete. Leaf `10/10`, default root `1,865 passed, 1 ignored`, feature root `1,870 passed, 1 ignored`, strict library Clippy and formatting pass. TODO-1129 owns packet-level receive atomicity; pre-existing strict test Clippy diagnostics remain TODO-1079.
+- Detail: `docs/todo/done/todo-1127-bounded-crypto-reassembly.md`
 
 ### TODO-1128 - Remove quadratic CRYPTO retransmission requeue scans
 - OPEN. `CryptoStream::requeue_all_unacked` and `requeue_crypto` call linear `VecDeque::contains` for each retained range and sort already ordered offsets. Measure realistic PTO range counts and replace the queue with one ordered deduplicating index if that improves end-to-end latency without changing retransmission priority or exact ACK/loss behavior.
 - Detail: `docs/todo/todo-1128-crypto-retransmit-index.md`
+
+### TODO-1129 - Commit receive packet numbers only after stateful frame admission
+- OPEN. The receive path marks a packet number before stateful CRYPTO and other fallible frame handlers run. A rejected packet can retain duplicate-detection or earlier-frame effects. Inventory all post-preflight failures and establish one bounded packet-level admission/commit boundary; TODO-1127 fixes the CRYPTO buffer contract separately.
+- Detail: `docs/todo/todo-1129-transactional-receive-admission.md`
 
 ## Completed
 

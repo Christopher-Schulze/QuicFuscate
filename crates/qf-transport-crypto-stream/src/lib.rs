@@ -20,12 +20,12 @@ pub struct CryptoStream {
     recv_buf: BTreeMap<u64, Vec<u8>>,
     /// Next expected receive offset.
     recv_off: u64,
-    /// Maximum receive offset seen.
-    recv_max: u64,
 }
 
 /// Maximum unsent or sent-but-unacknowledged CRYPTO bytes per encryption level.
 pub const MAX_CRYPTO_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CRYPTO_RECV_WINDOW_BYTES: u64 = 65_536;
+const MAX_CRYPTO_RECV_INTERVALS: usize = 1_024;
 
 #[inline]
 fn checked_u64_add_offset(offset: u64, length: usize) -> Result<u64, ConnectionError> {
@@ -229,13 +229,91 @@ impl CryptoStream {
     /// Receives a CRYPTO frame, which may be out of order.
     pub fn recv(&mut self, offset: u64, data: Vec<u8>) -> Result<(), ConnectionError> {
         let data_end = checked_u64_add_offset(offset, data.len())?;
-        let receive_window_end =
-            self.recv_max.checked_add(65536).ok_or(ConnectionError::FlowControl)?;
-        if data_end > receive_window_end {
-            return Err(ConnectionError::FlowControl);
+        if data_end <= self.recv_off {
+            return Ok(());
         }
-        self.recv_max = self.recv_max.max(data_end);
-        self.recv_buf.insert(offset, data);
+        let receive_window_end = self.recv_off.saturating_add(MAX_CRYPTO_RECV_WINDOW_BYTES);
+        if data_end > receive_window_end {
+            return Err(ConnectionError::CryptoBufferExceeded);
+        }
+        let start = offset.max(self.recv_off);
+        let trim = usize::try_from(start - offset).map_err(|_| ConnectionError::InvalidPacket)?;
+        let incoming = &data[trim..];
+        if incoming.is_empty() {
+            return Ok(());
+        }
+
+        let mut merged_start = start;
+        let mut merged_end = data_end;
+        let mut merged_keys = Vec::new();
+        let mut removed_bytes = 0usize;
+        let mut covered = false;
+        for (&existing_start, existing) in &self.recv_buf {
+            let existing_end = checked_u64_add_offset(existing_start, existing.len())?;
+            if existing_end < merged_start {
+                continue;
+            }
+            if existing_start > merged_end {
+                break;
+            }
+            let overlap_start = start.max(existing_start);
+            let overlap_end = data_end.min(existing_end);
+            if overlap_start < overlap_end {
+                let input_offset = usize::try_from(overlap_start - start)
+                    .map_err(|_| ConnectionError::InvalidPacket)?;
+                let existing_offset = usize::try_from(overlap_start - existing_start)
+                    .map_err(|_| ConnectionError::InvalidPacket)?;
+                let overlap_len = usize::try_from(overlap_end - overlap_start)
+                    .map_err(|_| ConnectionError::InvalidPacket)?;
+                if incoming[input_offset..input_offset + overlap_len]
+                    != existing[existing_offset..existing_offset + overlap_len]
+                {
+                    return Err(ConnectionError::InvalidFrame);
+                }
+            }
+            covered |= existing_start <= start && existing_end >= data_end;
+            merged_start = merged_start.min(existing_start);
+            merged_end = merged_end.max(existing_end);
+            removed_bytes = removed_bytes
+                .checked_add(existing.len())
+                .ok_or(ConnectionError::CryptoBufferExceeded)?;
+            merged_keys.push(existing_start);
+        }
+        if covered {
+            return Ok(());
+        }
+        let merged_len = usize::try_from(merged_end - merged_start)
+            .map_err(|_| ConnectionError::CryptoBufferExceeded)?;
+        let retained_bytes = self
+            .recv_buf
+            .values()
+            .try_fold(0usize, |total, interval| total.checked_add(interval.len()))
+            .ok_or(ConnectionError::CryptoBufferExceeded)?;
+        let next_retained = retained_bytes
+            .checked_sub(removed_bytes)
+            .and_then(|remaining| remaining.checked_add(merged_len))
+            .ok_or(ConnectionError::InvalidState)?;
+        if next_retained > MAX_CRYPTO_RECV_WINDOW_BYTES as usize
+            || self.recv_buf.len() - merged_keys.len() + 1 > MAX_CRYPTO_RECV_INTERVALS
+        {
+            return Err(ConnectionError::CryptoBufferExceeded);
+        }
+
+        let mut merged = vec![0u8; merged_len];
+        let incoming_offset =
+            usize::try_from(start - merged_start).map_err(|_| ConnectionError::InvalidPacket)?;
+        merged[incoming_offset..incoming_offset + incoming.len()].copy_from_slice(incoming);
+        for &existing_start in &merged_keys {
+            let existing =
+                self.recv_buf.get(&existing_start).ok_or(ConnectionError::InvalidState)?;
+            let merged_offset = usize::try_from(existing_start - merged_start)
+                .map_err(|_| ConnectionError::InvalidPacket)?;
+            merged[merged_offset..merged_offset + existing.len()].copy_from_slice(existing);
+        }
+        for key in merged_keys {
+            self.recv_buf.remove(&key);
+        }
+        self.recv_buf.insert(merged_start, merged);
         Ok(())
     }
 
@@ -273,7 +351,6 @@ impl CryptoStream {
         self.retx.clear();
         self.recv_buf.clear();
         self.recv_off = 0;
-        self.recv_max = 0;
     }
 }
 
@@ -314,7 +391,6 @@ mod tests {
         assert_eq!(stream.next_crypto_frame(usize::MAX), Ok(None));
         assert_eq!(stream.send_off, 0);
         assert_eq!(stream.recv_off, 0);
-        assert_eq!(stream.recv_max, 0);
     }
 
     #[test]
@@ -403,5 +479,69 @@ mod tests {
             Ok(Some(((MAX_CRYPTO_BUFFERED_BYTES + 2) as u64, b"xt".to_vec())))
         );
         assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES);
+    }
+
+    #[test]
+    fn receive_window_stays_anchored_to_next_unread_byte() {
+        let mut stream = CryptoStream::new();
+        stream.recv(65_535, vec![0xA5]).expect("edge byte within window");
+        assert_eq!(stream.recv(65_536, vec![0x5A]), Err(ConnectionError::CryptoBufferExceeded));
+        assert_eq!(stream.recv_buf.len(), 1);
+        assert_eq!(stream.recv_off, 0);
+        stream.recv(0, b"ok".to_vec()).expect("receive missing prefix");
+        let mut consumed = [0u8; 2];
+        assert_eq!(stream.read(&mut consumed), 2);
+        assert_eq!(&consumed, b"ok");
+        stream.recv(65_536, vec![0x5A]).expect("window advances only after delivery");
+        assert_eq!(stream.recv_buf.len(), 1);
+    }
+
+    #[test]
+    fn receive_merges_reordered_identical_overlaps_and_trims_delivered_prefix() {
+        let mut stream = CryptoStream::new();
+        stream.recv(2, b"cdef".to_vec()).expect("receive later range");
+        stream.recv(0, b"abcd".to_vec()).expect("receive missing prefix");
+        let mut prefix = [0u8; 3];
+        assert_eq!(stream.read(&mut prefix), 3);
+        assert_eq!(&prefix, b"abc");
+        stream.recv(1, b"bcde".to_vec()).expect("identical partial duplicate");
+        stream.recv(0, b"abcdef".to_vec()).expect("delivered-prefix retransmission");
+        let mut suffix = [0u8; 4];
+        assert_eq!(stream.read(&mut suffix), 3);
+        assert_eq!(&suffix[..3], b"def");
+        assert!(stream.recv_buf.is_empty());
+    }
+
+    #[test]
+    fn conflicting_crypto_overlap_is_rejected_without_mutation() {
+        let mut stream = CryptoStream::new();
+        stream.recv(0, b"abcd".to_vec()).expect("receive first range");
+        let retained_allocation = stream.recv_buf.get(&0).expect("retained range").as_ptr();
+        stream.recv(1, b"bc".to_vec()).expect("admit exact duplicate");
+        assert_eq!(
+            stream.recv_buf.get(&0).expect("same retained range").as_ptr(),
+            retained_allocation
+        );
+        assert_eq!(stream.recv(2, b"XY".to_vec()), Err(ConnectionError::InvalidFrame));
+        assert_eq!(stream.recv_buf.get(&0).map(Vec::as_slice), Some(b"abcd".as_slice()));
+        assert_eq!(stream.recv_off, 0);
+    }
+
+    #[test]
+    fn receive_interval_count_is_bounded_independently_of_bytes() {
+        let mut stream = CryptoStream::new();
+        for offset in (1..=2_047).step_by(2) {
+            stream.recv(offset, vec![0xA5]).expect("admit bounded sparse interval");
+        }
+        assert_eq!(stream.recv_buf.len(), 1_024);
+        assert_eq!(stream.recv(2_049, vec![0x5A]), Err(ConnectionError::CryptoBufferExceeded));
+        assert_eq!(stream.recv_buf.len(), 1_024);
+        stream.recv(0, vec![0xA5]).expect("merge first sparse interval");
+        assert_eq!(stream.recv_buf.len(), 1_024);
+        let mut first = [0u8; 2];
+        assert_eq!(stream.read(&mut first), 2);
+        assert_eq!(stream.recv_buf.len(), 1_023);
+        stream.recv(2_049, vec![0x5A]).expect("released interval slot permits new range");
+        assert_eq!(stream.recv_buf.len(), 1_024);
     }
 }

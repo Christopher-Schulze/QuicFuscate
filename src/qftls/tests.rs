@@ -582,6 +582,71 @@ fn drive_provider_handshake(
     panic!("TLS handshake did not complete within the bounded pump");
 }
 
+#[test]
+fn reordered_crypto_reassembly_completes_real_rustls_handshake() {
+    let mut client = RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client");
+    let mut server = RustlsProvider::new(true, false, PROTOCOL_VERSION, &[]).expect("server");
+    let client_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let server_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let (offset, hello) = client
+        .next_crypto_frame(Level::Initial, usize::MAX)
+        .expect("take ClientHello")
+        .expect("ClientHello available");
+    assert_eq!(offset, 0);
+    assert!(hello.len() >= 3 && hello.len() <= 65_536);
+
+    let first_end = hello.len() / 3;
+    let second_end = hello.len() * 2 / 3;
+    let mut reassembly = crate::transport::packet::CryptoStream::new();
+    reassembly
+        .recv(first_end as u64, hello[first_end..second_end].to_vec())
+        .expect("admit middle fragment");
+    reassembly.recv(second_end as u64, hello[second_end..].to_vec()).expect("admit tail fragment");
+    assert!(!reassembly.has_data());
+    reassembly.recv(0, hello[..first_end].to_vec()).expect("admit missing prefix");
+    let mut chunk = [0u8; 128];
+    while reassembly.has_data() {
+        let length = reassembly.read(&mut chunk);
+        assert!(length > 0);
+        server
+            .provide_quic_data(Level::Initial, &chunk[..length])
+            .expect("feed reordered TLS bytes");
+    }
+    server.poll_secrets_and_install(&server_keys).expect("poll server flight");
+    while let Some((_offset, bytes)) =
+        server.next_crypto_frame(Level::Initial, usize::MAX).expect("server Initial flight")
+    {
+        client.provide_quic_data(Level::Initial, &bytes).expect("feed server Initial");
+    }
+    let (handshake_offset, handshake) = server
+        .next_crypto_frame(Level::Handshake, usize::MAX)
+        .expect("server Handshake flight")
+        .expect("server Handshake available");
+    assert_eq!(handshake_offset, 0);
+    assert!(handshake.len() >= 3);
+    let first_end = handshake.len() / 3;
+    let second_end = handshake.len() * 2 / 3;
+    let mut handshake_reassembly = crate::transport::packet::CryptoStream::new();
+    handshake_reassembly
+        .recv(first_end as u64, handshake[first_end..second_end].to_vec())
+        .expect("admit middle Handshake fragment");
+    handshake_reassembly
+        .recv(second_end as u64, handshake[second_end..].to_vec())
+        .expect("admit tail Handshake fragment");
+    assert!(!handshake_reassembly.has_data());
+    handshake_reassembly.recv(0, handshake[..first_end].to_vec()).expect("admit Handshake prefix");
+    while handshake_reassembly.has_data() {
+        let length = handshake_reassembly.read(&mut chunk);
+        assert!(length > 0);
+        client
+            .provide_quic_data(Level::Handshake, &chunk[..length])
+            .expect("feed reordered Handshake bytes");
+    }
+    drive_provider_handshake(&mut client, &mut server, &client_keys, &server_keys);
+    assert!(client.handshake_complete());
+    assert!(server.handshake_complete());
+}
+
 fn seed_early_data_ticket(profile: &TlsProfile) {
     let mut client = provider_with_early_data(false, true);
     let mut server = provider_with_early_data(true, true);
