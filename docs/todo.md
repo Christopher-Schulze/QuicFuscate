@@ -810,12 +810,16 @@
 - Detail: `docs/todo/done/todo-1127-bounded-crypto-reassembly.md`
 
 ### TODO-1128 - Remove quadratic CRYPTO retransmission requeue scans
-- OPEN. `CryptoStream::requeue_all_unacked` and `requeue_crypto` call linear `VecDeque::contains` for each retained range and sort already ordered offsets. Measure realistic PTO range counts and replace the queue with one ordered deduplicating index if that improves end-to-end latency without changing retransmission priority or exact ACK/loss behavior.
-- Detail: `docs/todo/todo-1128-crypto-retransmit-index.md`
+- DONE. One ordered retransmission index removes quadratic membership scans, full sorting and the high-offset linear loss scan. A focused red test proved that partial ACK could discard a surviving retry; ACK splits now remap the queued intent byte-exactly. At 16,384 ranges, debug PTO requeue measured 8.68 ms versus 806.19 ms for the old queue, with higher small-node allocation recorded. Leaf `13 passed, 1 ignored`, default root `1,865 passed, 1 ignored`, feature root `1,870 passed, 1 ignored`, strict library Clippy and formatting pass. TODO-1130 owns the adjacent high-offset ACK scan.
+- Detail: `docs/todo/done/todo-1128-crypto-retransmit-index.md`
 
 ### TODO-1129 - Commit receive packet numbers only after stateful frame admission
 - OPEN. The receive path marks a packet number before stateful CRYPTO and other fallible frame handlers run. A rejected packet can retain duplicate-detection or earlier-frame effects. Inventory all post-preflight failures and establish one bounded packet-level admission/commit boundary; TODO-1127 fixes the CRYPTO buffer contract separately.
 - Detail: `docs/todo/todo-1129-transactional-receive-admission.md`
+
+### TODO-1130 - Bound high-offset CRYPTO ACK scans and full-ACK cloning
+- OPEN. `CryptoStream::ack_crypto` currently collects every retained range start below the ACK end, then clones data for overlapping ranges even when fully ACKed. A high-offset ACK can scan unrelated earlier entries. Select only the preceding potentially overlapping range and directly intersecting ranges; plan any head/tail copies before mutation, avoid payload clones for full ACKs, and retain byte-exact queued-retry remapping from TODO-1128.
+- Detail: `docs/todo/todo-1130-crypto-ack-range-scan.md`
 
 ## Completed
 

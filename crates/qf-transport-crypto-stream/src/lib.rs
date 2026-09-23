@@ -1,7 +1,7 @@
 //! Reliable CRYPTO-frame buffering shared by each QUIC encryption level.
 
 use qf_error::ConnectionError;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// CryptoStream manages CRYPTO frame data for each encryption level.
 #[derive(Default)]
@@ -15,7 +15,7 @@ pub struct CryptoStream {
     /// Total bytes held in `unacked`.
     unacked_bytes: usize,
     /// Offsets queued for retransmission after loss/PTO, sorted by offset.
-    retx: VecDeque<u64>,
+    retx: BTreeSet<u64>,
     /// Receive buffer for incoming CRYPTO frames, which may arrive out of order.
     recv_buf: BTreeMap<u64, Vec<u8>>,
     /// Next expected receive offset.
@@ -61,14 +61,14 @@ impl CryptoStream {
         if max_len == 0 {
             return Ok(None);
         }
-        while let Some(&offset) = self.retx.front() {
+        while let Some(&offset) = self.retx.first() {
             let Some(data) = self.unacked.get(&offset) else {
-                self.retx.pop_front();
+                self.retx.pop_first();
                 continue;
             };
             if data.len() <= max_len {
                 let data = data.clone();
-                self.retx.pop_front();
+                self.retx.pop_first();
                 return Ok(Some((offset, data)));
             }
             if max_len == 0 {
@@ -81,8 +81,8 @@ impl CryptoStream {
             self.unacked.remove(&offset);
             self.unacked.insert(offset, prefix.clone());
             self.unacked.insert(suffix_offset, suffix);
-            self.retx.pop_front();
-            self.retx.push_front(suffix_offset);
+            self.retx.pop_first();
+            self.retx.insert(suffix_offset);
             return Ok(Some((offset, prefix)));
         }
         if self.send_buf.is_empty() {
@@ -164,12 +164,19 @@ impl CryptoStream {
             retained_bytes.checked_add(added_bytes).ok_or(ConnectionError::CryptoBufferExceeded)?;
 
         for (start, data, head_len, tail_start) in plans {
+            let queued_for_retransmission = self.retx.remove(&start);
             self.unacked.remove(&start);
             if let Some(head_len) = head_len {
                 self.unacked.insert(start, data[..head_len].to_vec());
+                if queued_for_retransmission {
+                    self.retx.insert(start);
+                }
             }
             if let Some(tail_start) = tail_start {
                 self.unacked.insert(ack_end, data[tail_start..].to_vec());
+                if queued_for_retransmission {
+                    self.retx.insert(ack_end);
+                }
             }
         }
         self.unacked_bytes = retained_bytes;
@@ -182,38 +189,26 @@ impl CryptoStream {
             return Ok(());
         }
         let end = offset.checked_add(len).ok_or(ConnectionError::InvalidPacket)?;
-        let offsets: Vec<u64> = self
-            .unacked
-            .range(..end)
-            .map(|(start, data)| {
-                let data_end = checked_u64_add_offset(*start, data.len())?;
-                Ok((*start, data_end))
-            })
-            .collect::<Result<Vec<_>, ConnectionError>>()?
-            .into_iter()
-            .filter(|(_, data_end)| *data_end > offset)
-            .map(|(start, _)| start)
-            .collect();
-        for offset in offsets {
-            if !self.retx.contains(&offset) {
-                self.retx.push_back(offset);
+        let mut offsets = Vec::new();
+        if let Some((&start, data)) = self.unacked.range(..offset).next_back() {
+            if checked_u64_add_offset(start, data.len())? > offset {
+                offsets.push(start);
             }
         }
-        let mut sorted: Vec<u64> = self.retx.iter().copied().collect();
-        sorted.sort_unstable();
-        self.retx = sorted.into_iter().collect();
+        for (&start, data) in self.unacked.range(offset..end) {
+            if checked_u64_add_offset(start, data.len())? > offset {
+                offsets.push(start);
+            }
+        }
+        for offset in offsets {
+            self.retx.insert(offset);
+        }
         Ok(())
     }
 
     /// Requeues every retained unacked range for retransmission.
     pub fn requeue_all_unacked(&mut self) {
-        let mut offsets: Vec<u64> = self.unacked.keys().copied().collect();
-        offsets.sort_unstable();
-        for offset in offsets {
-            if !self.retx.contains(&offset) {
-                self.retx.push_back(offset);
-            }
-        }
+        self.retx.extend(self.unacked.keys().copied());
     }
 
     /// Returns the total bytes currently retained as sent-but-unacked.
@@ -358,6 +353,34 @@ impl CryptoStream {
 mod tests {
     use super::{CryptoStream, MAX_CRYPTO_BUFFERED_BYTES};
     use qf_error::ConnectionError;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    struct CountingAllocator;
+
+    static ALLOCATION_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    // SAFETY: all allocation and deallocation requests are forwarded unchanged to System.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+                ALLOCATED_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) };
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
 
     #[test]
     fn crypto_stream_range_overflow_is_typed_and_atomic() {
@@ -479,6 +502,92 @@ mod tests {
             Ok(Some(((MAX_CRYPTO_BUFFERED_BYTES + 2) as u64, b"xt".to_vec())))
         );
         assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES);
+    }
+
+    #[test]
+    fn partial_ack_preserves_queued_retransmission_of_unacked_suffix() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"abcdef").expect("queue flight");
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((0, b"abcdef".to_vec()))));
+        stream.requeue_crypto(0, 6).expect("mark flight lost");
+        stream.ack_crypto(0, 2).expect("ACK prefix after loss");
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((2, b"cdef".to_vec()))));
+        assert_eq!(stream.next_crypto_frame(6), Ok(None));
+    }
+
+    #[test]
+    fn middle_ack_preserves_both_queued_retransmission_fragments() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"abcdef").expect("queue flight");
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((0, b"abcdef".to_vec()))));
+        stream.requeue_all_unacked();
+        stream.ack_crypto(2, 2).expect("ACK middle after PTO");
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((0, b"ab".to_vec()))));
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((4, b"ef".to_vec()))));
+        assert_eq!(stream.next_crypto_frame(6), Ok(None));
+    }
+
+    #[test]
+    fn duplicate_pto_and_partial_retry_keep_one_unacked_suffix() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"abcdef").expect("queue flight");
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((0, b"abcdef".to_vec()))));
+        stream.requeue_all_unacked();
+        stream.requeue_all_unacked();
+        stream.requeue_crypto(0, 6).expect("duplicate loss report");
+        assert_eq!(stream.retx.len(), 1);
+        assert_eq!(stream.next_crypto_frame(2), Ok(Some((0, b"ab".to_vec()))));
+        assert_eq!(stream.retx.iter().copied().collect::<Vec<_>>(), vec![2]);
+        stream.ack_crypto(0, 2).expect("ACK retransmitted prefix");
+        assert_eq!(stream.next_crypto_frame(6), Ok(Some((2, b"cdef".to_vec()))));
+        assert_eq!(stream.next_crypto_frame(6), Ok(None));
+        stream.requeue_all_unacked();
+        stream.ack_crypto(2, 4).expect("ACK remaining bytes");
+        assert!(stream.retx.is_empty());
+        assert_eq!(stream.next_crypto_frame(6), Ok(None));
+    }
+
+    #[test]
+    #[ignore = "manual native PTO requeue measurement"]
+    fn benchmark_retransmission_index_at_range_counts() {
+        for (range_count, iterations) in [(1, 10_000), (128, 1_000), (4_096, 20), (16_384, 3)] {
+            let mut stream = CryptoStream::new();
+            for offset in 0..range_count {
+                stream.unacked.insert(offset as u64, vec![0xA5]);
+            }
+            let mut queue = VecDeque::new();
+            let queue_alloc_start = ALLOCATION_CALLS.load(Ordering::Relaxed);
+            let queue_bytes_start = ALLOCATED_BYTES.load(Ordering::Relaxed);
+            let start = Instant::now();
+            for _ in 0..iterations {
+                queue.clear();
+                for &offset in stream.unacked.keys() {
+                    if !queue.contains(&offset) {
+                        queue.push_back(offset);
+                    }
+                }
+                assert_eq!(queue.len(), range_count);
+            }
+            let queue_nanos = start.elapsed().as_nanos() / iterations as u128;
+            let queue_allocs = ALLOCATION_CALLS.load(Ordering::Relaxed) - queue_alloc_start;
+            let queue_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed) - queue_bytes_start;
+            let set_alloc_start = ALLOCATION_CALLS.load(Ordering::Relaxed);
+            let set_bytes_start = ALLOCATED_BYTES.load(Ordering::Relaxed);
+            let start = Instant::now();
+            for _ in 0..iterations {
+                stream.retx.clear();
+                stream.requeue_all_unacked();
+                assert_eq!(stream.retx.len(), range_count);
+            }
+            let set_nanos = start.elapsed().as_nanos() / iterations as u128;
+            let set_allocs = ALLOCATION_CALLS.load(Ordering::Relaxed) - set_alloc_start;
+            let set_bytes = ALLOCATED_BYTES.load(Ordering::Relaxed) - set_bytes_start;
+            println!(
+                "ranges={range_count} queue_ns={queue_nanos} set_ns={set_nanos} \
+                 queue_allocs={queue_allocs} queue_bytes={queue_bytes} \
+                 set_allocs={set_allocs} set_bytes={set_bytes} iterations={iterations}"
+            );
+        }
     }
 
     #[test]
