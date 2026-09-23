@@ -91,9 +91,9 @@ if (( DRY_RUN )); then
   exit 0
 fi
 
-free_gb="$(df -g / | awk 'NR==2 {print $4}')"
-if [[ -z "$free_gb" ]] || (( free_gb < 2 )); then
-  echo "Build abgebrochen - nicht genug Speicher. Dein MacBook wuerde abstuerzen. Bitte manuell Platz schaffen." >&2
+free_kib="$(df -Pk / | awk 'NR==2 {print $4}')"
+if ! [[ "$free_kib" =~ ^[0-9]+$ ]] || (( free_kib < 2 * 1024 * 1024 )); then
+  echo "FAIL: at least 2 GiB of free disk space is required before the bakeoff." >&2
   exit 1
 fi
 

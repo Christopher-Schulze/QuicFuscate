@@ -86,6 +86,12 @@ for cell in requested:
     assert "--bench" in item["argv"], item
 assert all("simd_xor" not in str(item) for item in items), items
 for item in items:
+    if "cell" not in item:
+        name = item.get("name", "")
+        assert name in ("selection", "report") or name.startswith("scope:"), item
+        assert item["status"] in ("PASS", "SKIP"), item
+        assert item["result"] == item["status"] and "reason" in item, item
+        continue
     for key in ("cell", "status", "result", "reason", "argv", "environment", "command_status"):
         assert key in item, (key, item)
 PY
