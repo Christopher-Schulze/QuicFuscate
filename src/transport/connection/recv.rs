@@ -99,6 +99,29 @@ impl Connection {
         buf: &mut [u8],
         info: &RecvInfo,
     ) -> Result<usize, crate::error::ConnectionError> {
+        self.recv_with_packet_open_state(buf, info).0
+    }
+
+    /// Reports whether QUIC opened the packet before receive failed. Initial
+    /// packet keys are public, so this is not peer-identity authentication.
+    #[inline(always)]
+    pub(crate) fn recv_with_packet_open_state(
+        &mut self,
+        buf: &mut [u8],
+        info: &RecvInfo,
+    ) -> (Result<usize, crate::error::ConnectionError>, bool) {
+        let mut packet_opened = false;
+        let result = self.recv_inner(buf, info, &mut packet_opened);
+        (result, packet_opened)
+    }
+
+    #[inline(always)]
+    fn recv_inner(
+        &mut self,
+        buf: &mut [u8],
+        info: &RecvInfo,
+        packet_opened: &mut bool,
+    ) -> Result<usize, crate::error::ConnectionError> {
         use crate::error::ConnectionError;
         use udpfast::unlikely;
         if unlikely(buf.is_empty()) {
@@ -288,6 +311,7 @@ impl Connection {
                 }
             }
         };
+        *packet_opened = true;
         let pkt_ty = hdr_native.ty;
         let space_idx = match pkt_ty {
             PacketType::Initial => 0,
@@ -758,6 +782,16 @@ impl Connection {
             self.is_established = true;
         }
         Ok(len)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_test_short_frame(
+        &mut self,
+        out: &mut [u8],
+        frame: &Frame<'_>,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        self.send_targeted_short_header_frame(out, self.local_addr, self.peer_addr, frame)
+            .map(|(length, _)| length)
     }
 
     #[inline(always)]

@@ -24,6 +24,11 @@ A rejected packet can therefore change duplicate-detection, ACK, key,
 recovery or earlier-frame state despite the receive call returning an error.
 TODO-1127 fixes the CRYPTO buffer itself; TODO-1132 closes capacity and
 overlap failures but does not fix premature packet-number admission.
+Pre-open AEAD/HP failures also call `record_local_error` in `recv.rs` even
+though Core treats their datagrams as possible probes and keeps the connection
+live. This can leave a transient forged-packet error in the first-wins local
+root-cause slot. Remove that terminal-state pollution without losing typed
+diagnostics or the authenticated close path.
 
 RFC 9000 Sections 7.5 and 13.1 require a handshake CRYPTO buffer overflow
 to close with `CRYPTO_BUFFER_EXCEEDED` and forbid acknowledging a packet until
@@ -57,6 +62,9 @@ that policy, including packet-number, TLS, path and stealth state.
   or an RFC-permitted frame-discard policy explicitly requires an ACK; this
   project closes rather than discards exhausted CRYPTO. Accepted multi-frame
   packets apply effects exactly once in wire order.
+- Pre-open probe rejection must not occupy the terminal local-error slot or
+  alter packet keys, packet-number history, TLS state, or application delivery;
+  bounded diagnostic telemetry may record it.
 - Keep preflight bounded by packet size and encryption level. Do not clone
   whole connections, invoke TLS twice, or create a second frame parser with
   divergent semantics. Share parsed frame metadata or stage irreversible

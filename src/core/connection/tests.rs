@@ -239,6 +239,117 @@ fn test_tls_connection_pair(
     panic!("real QUIC/TLS handshake did not complete within the bounded packet pump");
 }
 
+#[test]
+fn core_emits_protected_crypto_close_before_probe_fallback() {
+    let mut receiver_stealth = StealthConfig::default();
+    receiver_stealth.reality_cover_targets = vec!["127.0.0.1:443".to_string()];
+    let (mut sender, mut receiver) =
+        test_tls_connection_pair(StealthConfig::default(), receiver_stealth);
+    receiver
+        .stealth_manager
+        .reality_proxy
+        .as_ref()
+        .expect("configured Reality proxy")
+        .send_cached_response(sender.local_addr, b"queued cover response".to_vec());
+    let mut packet = [0u8; 2048];
+    assert_eq!(
+        receiver.conn.process_crypto_frame(
+            qf_transport_types::QuicEncryptionLevel::Application,
+            65_536,
+            std::borrow::Cow::Borrowed(b"x"),
+        ),
+        Err(crate::error::ConnectionError::CryptoBufferExceeded)
+    );
+    let frame = crate::transport::Frame::HandshakeDone;
+    let length = sender
+        .conn
+        .send_test_short_frame(&mut packet, &frame)
+        .expect("seal protected invalid frame");
+    assert_eq!(
+        receiver.recv_on_path_mut(&mut packet[..length], sender.local_addr, receiver.local_addr),
+        Ok(length)
+    );
+    assert!(receiver.conn.is_closed());
+    assert_eq!(receiver.stealth_manager.fallback_invocations_for_test(), 0);
+    assert_eq!(
+        receiver.conn.local_error(),
+        Some(&crate::error::ConnectionError::CryptoBufferExceeded)
+    );
+
+    let close_length = receiver.send(&mut packet).expect("Core emits queued protected close");
+    sender
+        .conn
+        .recv(
+            &mut packet[..close_length],
+            &crate::transport::RecvInfo {
+                from: receiver.local_addr,
+                to: sender.local_addr,
+                ecn: None,
+            },
+        )
+        .expect("peer opens Core close");
+    assert!(matches!(
+        sender.conn.remote_error(),
+        Some(crate::error::ConnectionError::PeerConnectionClosed { error_code: 0x0d, .. })
+    ));
+    assert!(receiver.stealth_manager.poll_fallback().is_some());
+}
+
+#[test]
+fn tls_terminal_failure_suppresses_later_probe_fallback() {
+    let mut receiver = test_connection();
+    let result = receiver.conn.process_crypto_frame(
+        qf_transport_types::QuicEncryptionLevel::Initial,
+        0,
+        std::borrow::Cow::Owned(vec![0xff; 64]),
+    );
+    assert!(matches!(result, Err(crate::error::ConnectionError::TlsError(_))));
+    assert!(receiver.conn.is_closed());
+
+    let mut probe = [0xA5u8; 32];
+    assert_eq!(
+        receiver.recv_on_path_mut(&mut probe, receiver.peer_addr, receiver.local_addr),
+        Ok(probe.len())
+    );
+    assert_eq!(receiver.stealth_manager.fallback_invocations_for_test(), 0);
+}
+
+#[test]
+fn protected_live_error_and_unauthenticated_probe_take_distinct_core_paths() {
+    let (mut sender, mut receiver) =
+        test_tls_connection_pair(StealthConfig::default(), StealthConfig::default());
+    let mut packet = [0u8; 2048];
+    let invalid = crate::transport::Frame::HandshakeDone;
+    let length = sender
+        .conn
+        .send_test_short_frame(&mut packet, &invalid)
+        .expect("seal protocol-invalid protected frame");
+    assert_eq!(
+        receiver.recv_on_path_mut(&mut packet[..length], sender.local_addr, receiver.local_addr),
+        Ok(length)
+    );
+    assert!(!receiver.conn.is_closed());
+    assert_eq!(receiver.stealth_manager.fallback_invocations_for_test(), 0);
+
+    let mut probe = [0xA5u8; 32];
+    assert_eq!(
+        receiver.recv_on_path_mut(&mut probe, sender.local_addr, receiver.local_addr),
+        Ok(probe.len())
+    );
+    assert!(!receiver.conn.is_closed());
+    assert_eq!(receiver.stealth_manager.fallback_invocations_for_test(), 1);
+
+    let valid = crate::transport::Frame::Ping { mtu_probe: None };
+    let length =
+        sender.conn.send_test_short_frame(&mut packet, &valid).expect("seal valid protected frame");
+    assert_eq!(
+        receiver.recv_on_path_mut(&mut packet[..length], sender.local_addr, receiver.local_addr),
+        Ok(length)
+    );
+    assert!(!receiver.conn.is_closed());
+    assert_eq!(receiver.stealth_manager.fallback_invocations_for_test(), 1);
+}
+
 fn framed_tunnel_packet(packet: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(H3_TUNNEL_FRAME_HEADER_LEN + packet.len());
     frame.extend_from_slice(H3_TUNNEL_FRAME_MAGIC);

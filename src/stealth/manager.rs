@@ -48,6 +48,8 @@ pub struct StealthManager {
     /// Receiver for upstream responses (Reality Fallback)
     pub(crate) fallback_rx:
         Arc<Mutex<tokio::sync::mpsc::Receiver<crate::reality::FallbackResponse>>>,
+    #[cfg(test)]
+    fallback_invocations: AtomicUsize,
     /// Cover handshake cache for reality-grade TLS mimikry (TODO-415).
     /// When enabled, holds cached TLS handshake material from a cover site
     /// that can be replayed to probes for byte-identical mimikry.
@@ -234,6 +236,8 @@ impl StealthManager {
             _optimization_manager: optimization_manager,
             reality_proxy,
             fallback_rx: Arc::new(Mutex::new(rx)),
+            #[cfg(test)]
+            fallback_invocations: AtomicUsize::new(0),
             cover_cache,
             _background_owner: runtime_owner,
         }
@@ -1136,6 +1140,8 @@ impl StealthManager {
     /// directly - no upstream relay needed. Otherwise, falls back to the
     /// `RealityProxy` relay path.
     pub(crate) fn handle_fallback(&self, packet: &[u8], source: std::net::SocketAddr) {
+        #[cfg(test)]
+        self.fallback_invocations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Phase 1 (TODO-415): serve cached cover material directly to probes.
         if let Some(material) = self.cover_handshake_material() {
             log::debug!(
@@ -1158,6 +1164,11 @@ impl StealthManager {
         if let Some(proxy) = &self.reality_proxy {
             proxy.forward_probe(packet, source);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fallback_invocations_for_test(&self) -> usize {
+        self.fallback_invocations.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns cached cover-site TLS handshake material if reality-grade mimikry

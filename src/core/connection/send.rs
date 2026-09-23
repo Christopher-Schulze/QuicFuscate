@@ -466,6 +466,9 @@ impl QuicFuscateConnection {
         &mut self,
         buf: &mut [u8],
     ) -> Result<(usize, crate::transport::SendInfo), crate::error::ConnectionError> {
+        if self.conn.is_closed() {
+            return self.conn.send(buf);
+        }
         let now = self.clock.now();
 
         // --- LOSS/PTO RECOVERY TIMER ---

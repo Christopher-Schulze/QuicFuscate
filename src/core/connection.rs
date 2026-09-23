@@ -1235,18 +1235,21 @@ impl QuicFuscateConnection {
     }
 
     /// Stealth pre-processing + `conn.recv` for one QUIC datagram already
-    /// staged in mutable memory. Returns `Err` only for terminal TLS-class
-    /// failures; transient transport errors are logged and treated as probing
-    /// traffic so a single forged datagram cannot tear down the connection.
+    /// staged in mutable memory. Only failures before QUIC packet opening
+    /// may enter probe fallback; a local close remains available for send.
     fn deliver_wire_payload(
         &mut self,
         data: &mut [u8],
         from: SocketAddr,
         to: SocketAddr,
     ) -> Result<(), crate::error::ConnectionError> {
+        if self.conn.is_closed() {
+            return Ok(());
+        }
         self.stealth_manager.process_incoming_packet(data, from);
         let recv_info = crate::transport::RecvInfo { from, to, ecn: None };
-        match self.conn.recv(data, &recv_info) {
+        let (result, packet_opened) = self.conn.recv_with_packet_open_state(data, &recv_info);
+        match result {
             Ok(_) => {
                 if let Some(runtime) = self.maybenot.as_mut() {
                     runtime.note_wire_recv(self.clock.now());
@@ -1254,11 +1257,21 @@ impl QuicFuscateConnection {
                 self.absorb_quic_fec_datagrams();
                 Ok(())
             }
+            Err(error) if self.conn.is_closed() => {
+                debug!("transport::recv closed connection after protected or terminal input: {error:?}");
+                Ok(())
+            }
             Err(
                 error @ (crate::error::ConnectionError::TlsError(_)
                 | crate::error::ConnectionError::TlsAlert(_)
                 | crate::error::ConnectionError::PeerCertificateUnsupported),
             ) => Err(error),
+            Err(error) if packet_opened => {
+                debug!(
+                    "transport::recv rejected protected packet without probe fallback: {error:?}"
+                );
+                Ok(())
+            }
             Err(error) => {
                 debug!("transport::recv failed (possible probe) len={}: {:?}", data.len(), error);
                 self.stealth_manager.handle_fallback(data, from);
@@ -1299,6 +1312,9 @@ impl QuicFuscateConnection {
             };
             if let Err(error) = result {
                 terminal_receive_error = Some(error);
+                break;
+            }
+            if self.conn.is_closed() {
                 break;
             }
         }
@@ -1359,6 +1375,9 @@ impl QuicFuscateConnection {
             };
             if let Err(error) = result {
                 terminal_receive_error = Some(error);
+                break;
+            }
+            if self.conn.is_closed() {
                 break;
             }
         }

@@ -830,8 +830,12 @@
 - Detail: `docs/todo/done/todo-1132-inbound-crypto-error-close.md`
 
 ### TODO-1133 - Keep authenticated QUIC failures out of Reality probe fallback
-- OPEN. Core currently forwards every non-TLS transport receive error to the Reality fallback, including errors from authenticated packets after a local QUIC close. Classify authentication and terminal state at one transport/Core boundary, preserve the protected close path, and keep unauthenticated probe cover behavior.
-- Detail: `docs/todo/todo-1133-authenticated-error-probe-routing.md`
+- DONE. Transport now reports whether QUIC opened the packet; Core routes only pre-open failures to Reality fallback and gives a queued terminal QUIC close priority over a cached cover response. Paired tests verify zero fallback on a protected invalid frame, one on an unopenable probe, and peer-opened `0x0d` close. Default root `1,872 passed, 1 ignored`, feature root `1,877 passed, 1 ignored`, strict Clippy and formatting pass. Initial opening does not prove peer identity; packet-commit issues remain TODO-1129 and live client assignment close flush remains TODO-1134.
+- Detail: `docs/todo/done/todo-1133-authenticated-error-probe-routing.md`
+
+### TODO-1134 - Flush a terminal QUIC close before client assignment teardown
+- OPEN. The client assignment loop checks `is_closed()` after receive and returns before its next outbound flush; a locally queued QUIC close can be lost even though Core can seal it. Add one bounded post-receive close send and prove peer delivery on the live client loop.
+- Detail: `docs/todo/todo-1134-client-assignment-close-flush.md`
 
 ## Completed
 
