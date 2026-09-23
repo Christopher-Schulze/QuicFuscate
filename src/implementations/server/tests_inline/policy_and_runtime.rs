@@ -275,11 +275,12 @@ fn tls_construction_failure_abandons_server_auth_attempt_once() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: Some(qkey_id.into_bytes()),
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
     let mut packet = [0u8; 256];
-    let packet_len = format_header(&header, &mut packet).expect("Initial header");
+    let packet_len = format_header(&header, &mut packet).expect("Initial header") + 20;
     let metrics = Metrics::new();
     let stealth_config = Arc::new(std::sync::Mutex::new(StealthConfig::default()));
     let fec_config = Arc::new(std::sync::Mutex::new(FecConfig::default()));

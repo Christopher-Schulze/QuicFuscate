@@ -166,6 +166,7 @@ fn private_packet_for_test_with_phase(
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: None,
         versions: None,
         key_phase,
     };
@@ -399,14 +400,16 @@ fn initial_header_token_roundtrip() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: Some(vec![0x01, 0x02, 0x03, 0x04]),
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
     let mut buf = vec![0u8; 64];
     let off = format_header(&header, &mut buf).expect("format header");
-    let (parsed, parsed_off) = parse_header(&buf[..off], 0).expect("parse header");
+    let (parsed, parsed_off) = parse_header(&buf[..off + 20], 0).expect("parse header");
     assert_eq!(parsed.ty, PacketType::Initial);
     assert_eq!(parsed.token, header.token);
+    assert_eq!(parsed.length, Some(20));
     assert_eq!(off, parsed_off);
 }
 
@@ -420,14 +423,16 @@ fn initial_header_empty_token_roundtrip() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
     let mut buf = vec![0u8; 32];
     let off = format_header(&header, &mut buf).expect("format header");
-    let (parsed, parsed_off) = parse_header(&buf[..off], 0).expect("parse header");
+    let (parsed, parsed_off) = parse_header(&buf[..off + 20], 0).expect("parse header");
     assert_eq!(parsed.ty, PacketType::Initial);
     assert!(parsed.token.is_none());
+    assert_eq!(parsed.length, Some(20));
     assert_eq!(off, parsed_off);
 }
 
@@ -441,6 +446,7 @@ fn packet_boundaries_reject_oversized_cids_before_mutation() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
@@ -698,6 +704,7 @@ fn retry_integrity_roundtrips_for_v1_and_v2() {
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(vec![0x01, 0x02, 0x03]),
+            length: None,
             versions: None,
             key_phase: false,
         };
@@ -727,12 +734,13 @@ fn v2_long_header_types_roundtrip_with_rfc9369_mapping() {
             pkt_num: 0,
             pkt_num_len: 0,
             token: None,
+            length: Some(20),
             versions: None,
             key_phase: false,
         };
         let mut packet = [0u8; 64];
         let len = format_header(&header, &mut packet).expect("format v2 header");
-        let (parsed, _) = parse_header(&packet[..len], 0).expect("parse v2 header");
+        let (parsed, _) = parse_header(&packet[..len + 20], 0).expect("parse v2 header");
         assert_eq!(parsed.ty, packet_type);
         assert_eq!(parsed.version, crate::transport::PROTOCOL_VERSION_V2);
     }
@@ -764,13 +772,14 @@ fn unprotect_requires_keys_for_encrypted_packets() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
     let mut buf = vec![0u8; 64];
     let off = format_header(&header, &mut buf).expect("format");
     let crypto = CryptoContext::default();
-    let err = unprotect_and_decrypt(&crypto, &mut buf[..off], 0, 0).expect_err("must fail");
+    let err = unprotect_and_decrypt(&crypto, &mut buf[..off + 20], 0, 0).expect_err("must fail");
     assert!(matches!(err, ConnectionError::Done));
 }
 
@@ -818,6 +827,7 @@ fn short_header_decrypt_falls_back_to_previous_read_key() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: None,
         versions: None,
         key_phase: false,
     };
@@ -1308,6 +1318,7 @@ fn unprotect_rejects_missing_sample_before_header_or_payload_processing() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
@@ -1372,4 +1383,154 @@ fn derived_initial_keys_match_rustls_initial_seal() {
         .decrypt_in_place(9, header, &mut outbound[..sealed])
         .expect("rustls open");
     assert_eq!(plain, plaintext);
+}
+
+fn long_header_fixture(ty: PacketType, version: u32, declared: u64) -> Header {
+    Header {
+        ty,
+        version,
+        dcid: vec![0x11, 0x22, 0x33],
+        scid: vec![0x44, 0x55],
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: if ty == PacketType::Initial { Some(vec![0xaa]) } else { None },
+        length: Some(declared),
+        versions: None,
+        key_phase: false,
+    }
+}
+
+#[test]
+fn long_header_length_roundtrips_v1_v2_with_minimal_varint() {
+    for version in [crate::transport::PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        for ty in [PacketType::Initial, PacketType::Handshake, PacketType::ZeroRTT] {
+            for declared in [20u64, 63, 64, 16_383, 16_384] {
+                let header = long_header_fixture(ty, version, declared);
+                let mut buf = vec![0u8; 16_500];
+                let off = format_header(&header, &mut buf).expect("format header");
+                // The Length varint sits directly before the packet number and
+                // must be minimally encoded.
+                let varint_width = crate::transport::pn::varint::varint_len(declared);
+                let (decoded, used) =
+                    crate::transport::varint::read_varint(&buf[off - varint_width..])
+                        .expect("read length varint");
+                assert_eq!(decoded, declared);
+                assert_eq!(used, varint_width);
+                let packet_end = off + declared as usize;
+                let (parsed, parsed_off) =
+                    parse_header(&buf[..packet_end], 0).expect("parse header");
+                assert_eq!(parsed.ty, ty);
+                assert_eq!(parsed.version, version);
+                assert_eq!(parsed.length, Some(declared));
+                assert_eq!(parsed_off, off);
+            }
+        }
+    }
+}
+
+#[test]
+fn long_header_format_requires_length_field() {
+    for ty in [PacketType::Initial, PacketType::Handshake, PacketType::ZeroRTT] {
+        let mut header = long_header_fixture(ty, crate::transport::PROTOCOL_VERSION, 20);
+        header.length = None;
+        let mut out = [0u8; 128];
+        assert_eq!(format_header(&header, &mut out), Err(ConnectionError::InvalidPacket));
+        for declared in [0u64, 19] {
+            header.length = Some(declared);
+            assert_eq!(format_header(&header, &mut out), Err(ConnectionError::InvalidPacket));
+        }
+        header.length = Some(u64::MAX);
+        assert_eq!(format_header(&header, &mut out), Err(ConnectionError::InvalidPacket));
+    }
+    // Short and Retry headers carry no Length field.
+    let mut short = Header {
+        ty: PacketType::Short,
+        version: 0,
+        dcid: vec![0x01],
+        scid: Vec::new(),
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: None,
+        length: Some(20),
+        versions: None,
+        key_phase: false,
+    };
+    let mut out = [0u8; 128];
+    assert_eq!(format_header(&short, &mut out), Err(ConnectionError::InvalidPacket));
+    short.length = None;
+    let mut retry = Header {
+        ty: PacketType::Retry,
+        version: crate::transport::PROTOCOL_VERSION,
+        dcid: vec![0x01],
+        scid: vec![0x02],
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: Some(vec![0x03]),
+        length: Some(20),
+        versions: None,
+        key_phase: false,
+    };
+    assert_eq!(format_header(&retry, &mut out), Err(ConnectionError::InvalidPacket));
+    retry.length = None;
+    assert!(format_header(&retry, &mut out).is_ok());
+}
+
+#[test]
+fn long_header_parse_rejects_bad_declared_spans() {
+    let header = long_header_fixture(PacketType::Initial, crate::transport::PROTOCOL_VERSION, 64);
+    let mut buf = vec![0u8; 256];
+    let off = format_header(&header, &mut buf).expect("format header");
+    // One byte short of the declared span: truncated datagram.
+    assert_eq!(parse_header(&buf[..off + 63], 0), Err(ConnectionError::BufferTooShort));
+    // No payload bytes at all.
+    assert_eq!(parse_header(&buf[..off], 0), Err(ConnectionError::BufferTooShort));
+    // Declared span exceeds the datagram by far.
+    assert_eq!(parse_header(&buf[..off + 20], 0), Err(ConnectionError::BufferTooShort));
+    // Length varint itself truncated: a 2-byte varint needs both bytes.
+    let mut truncated = buf[..off].to_vec();
+    truncated.pop();
+    assert_eq!(parse_header(&truncated, 0), Err(ConnectionError::BufferTooShort));
+    // A declared Length below the protected-payload minimum is impossible.
+    let header = long_header_fixture(PacketType::Initial, crate::transport::PROTOCOL_VERSION, 20);
+    let mut tiny = vec![0u8; 128];
+    let off = format_header(&header, &mut tiny).expect("format header");
+    tiny[off - 1] = 0x10; // overwrite the single-byte varint with value 16
+    assert_eq!(parse_header(&tiny[..off + 16], 0), Err(ConnectionError::InvalidPacket));
+    // A maximal varint declaration far beyond the datagram is rejected.
+    let mut huge = tiny[..off - 1].to_vec();
+    huge.extend_from_slice(&[0xffu8; 8]);
+    huge.resize(off + 64, 0);
+    assert_eq!(parse_header(&huge, 0), Err(ConnectionError::BufferTooShort));
+}
+
+#[test]
+fn packet_wire_span_walks_coalesced_datagram() {
+    let initial = long_header_fixture(PacketType::Initial, crate::transport::PROTOCOL_VERSION, 24);
+    let handshake =
+        long_header_fixture(PacketType::Handshake, crate::transport::PROTOCOL_VERSION, 30);
+    let mut datagram = vec![0u8; 256];
+    let first_off = format_header(&initial, &mut datagram).expect("initial header");
+    let first_end = first_off + 24;
+    let second_off = format_header(&handshake, &mut datagram[first_end..]).expect("hs header");
+    let second_start = first_end;
+    let second_end = second_start + second_off + 30;
+    // A short-header trailer consumes the rest of the datagram.
+    let trailer_len = 48usize;
+    datagram[second_end] = FIXED_BIT;
+
+    let first_span = packet_wire_span(&datagram[..second_end + trailer_len], 0);
+    assert_eq!(first_span, first_end);
+    let second_span = packet_wire_span(&datagram[first_end..second_end + trailer_len], 0);
+    assert_eq!(second_span, second_off + 30);
+    let third_span = packet_wire_span(&datagram[second_end..second_end + trailer_len], 0);
+    assert_eq!(third_span, trailer_len);
+    // Unparseable input consumes the remainder so the processing path can
+    // report the authoritative error.
+    let garbage = [0xffu8; 32];
+    assert_eq!(packet_wire_span(&garbage, 0), garbage.len());
+    // A declared span larger than the remaining datagram consumes the rest
+    // for the same reason.
+    let mut short_tail = datagram[..first_end].to_vec();
+    short_tail.truncate(first_end - 10);
+    assert_eq!(packet_wire_span(&short_tail, 0), short_tail.len());
 }

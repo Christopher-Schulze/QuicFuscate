@@ -435,6 +435,168 @@ pub fn unprotect_and_decrypt_parsed(
     }
 }
 
+/// Minimum RFC 9000 Length value for a long-header packet. Header
+/// protection samples `pn_off + MAX_PKT_NUM_LEN .. + SAMPLE_LEN` inside the
+/// packet, so the Length field - packet-number bytes plus the protected
+/// payload including the AEAD tag - can never be smaller than this.
+pub(crate) const MIN_PROTECTED_PACKET_LEN: u64 = (MAX_PKT_NUM_LEN + SAMPLE_LEN) as u64;
+
+/// Widest QUIC varint encoding in bytes.
+const MAX_VARINT_LEN: usize = 8;
+
+/// Wire length of the long-header prefix for `h`: first byte, version,
+/// connection IDs and - for Initial packets - the token varint plus token
+/// bytes. This is everything before the RFC 9000 Length field.
+fn long_header_prefix_len(h: &Header) -> Result<usize, ConnectionError> {
+    checked_cid_wire_len(h.dcid.len())?;
+    checked_cid_wire_len(h.scid.len())?;
+    let token = h.token.as_deref().unwrap_or(&[]);
+    let token_value = checked_varint_value(token.len())?;
+    let mut required = 5usize;
+    required = checked_usize_add(required, 1)?;
+    required = checked_usize_add(required, h.dcid.len())?;
+    required = checked_usize_add(required, 1)?;
+    required = checked_usize_add(required, h.scid.len())?;
+    match h.ty {
+        PacketType::Initial => {
+            required =
+                checked_usize_add(required, crate::transport::pn::varint::varint_len(token_value))?;
+            checked_usize_add(required, token.len())
+        }
+        PacketType::Retry => checked_usize_add(required, token.len()),
+        PacketType::Handshake | PacketType::ZeroRTT => {
+            if h.token.is_some() {
+                return Err(ConnectionError::InvalidPacket);
+            }
+            Ok(required)
+        }
+        _ => Err(ConnectionError::InvalidPacket),
+    }
+}
+
+/// Worst-case reservation for a long-header packet's protected region:
+/// prefix plus the widest Length varint plus the widest packet number.
+/// Senders stage the payload after this offset; [`seal_long_header_packet`]
+/// compacts the header once the final Length value is known.
+pub fn long_header_reserve(h: &Header) -> Result<usize, ConnectionError> {
+    let prefix = long_header_prefix_len(h)?;
+    checked_usize_add(prefix, MAX_VARINT_LEN + MAX_PKT_NUM_LEN)
+}
+
+/// Resolve the RFC 9000 Length value for an outgoing long-header packet.
+///
+/// Length covers the encoded packet number plus the protected payload
+/// (frames plus AEAD tag). It is never smaller than
+/// [`MIN_PROTECTED_PACKET_LEN`] so the header-protection sample always fits,
+/// and it grows until `pn_off + Length >= min_packet_len`, where `pn_off`
+/// itself depends on the minimally encoded varint width. The feasible set
+/// is solved per varint band (width fixed inside each band), so the result
+/// is always the smallest admissible, minimally encoded value that still
+/// fits `out_len`.
+fn resolve_long_packet_length(
+    h: &Header,
+    pn_len: usize,
+    ciphertext_len: usize,
+    min_packet_len: usize,
+    out_len: usize,
+) -> Result<u64, ConnectionError> {
+    let prefix = long_header_prefix_len(h)? as u64;
+    // Length covers the packet-number bytes plus the protected payload
+    // (frames plus AEAD tag) and can never be smaller than the header-
+    // protection sample minimum.
+    let floor = (pn_len as u64)
+        .checked_add(ciphertext_len as u64)
+        .ok_or(ConnectionError::InvalidPacket)?
+        .max(MIN_PROTECTED_PACKET_LEN);
+    // The encoded Length varint width depends on Length itself, so the
+    // feasible set is solved per varint band: within a band the width is
+    // fixed and the smallest admissible value is max(floor, band_lo,
+    // needed) where needed makes prefix + width + Length reach
+    // min_packet_len. Bands are tried in order, yielding the smallest
+    // feasible, minimally encoded value - which also maximizes the chance
+    // the finished packet still fits the caller's buffer.
+    const VARINT_BANDS: [(u64, u64); 4] =
+        [(0, 0x3f), (0x40, 0x3fff), (0x4000, 0x3fff_ffff), (0x4000_0000, MAX_QUIC_VARINT)];
+    const VARINT_WIDTHS: [u64; 4] = [1, 2, 4, 8];
+    for (band, width) in VARINT_BANDS.iter().zip(VARINT_WIDTHS.iter()) {
+        let needed = (min_packet_len as u64).saturating_sub(prefix + width);
+        let candidate = floor.max(band.0).max(needed);
+        if candidate > band.1 {
+            continue;
+        }
+        if prefix + width + candidate > out_len as u64 {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        return Ok(candidate);
+    }
+    Err(ConnectionError::InvalidPacket)
+}
+
+/// Finalize a staged long-header packet and seal it exactly once.
+///
+/// `header_reserve` bytes at the start of `out` hold worst-case header
+/// space (see [`long_header_reserve`]); `payload_len` plaintext frame bytes
+/// follow at `out[header_reserve..]`. The payload is extended with
+/// zero-filled PADDING frames up to the resolved RFC Length (sample minimum
+/// and `min_packet_len`), the compact header and packet number are written,
+/// the payload is moved into place, and the packet is sealed. Returns the
+/// sealed packet length.
+pub fn seal_long_header_packet(
+    crypto: &CryptoContext,
+    h: &mut Header,
+    pn: u64,
+    pn_len: usize,
+    header_reserve: usize,
+    payload_len: usize,
+    min_packet_len: usize,
+    out: &mut [u8],
+) -> Result<usize, ConnectionError> {
+    let ciphertext_len = checked_usize_add(payload_len, AEAD_TAG_LEN)?;
+    let length = resolve_long_packet_length(h, pn_len, ciphertext_len, min_packet_len, out.len())?;
+    let length_usize = usize::try_from(length).map_err(|_| ConnectionError::InvalidPacket)?;
+    let payload_target = length_usize
+        .checked_sub(pn_len)
+        .and_then(|value| value.checked_sub(AEAD_TAG_LEN))
+        .ok_or(ConnectionError::InvalidPacket)?;
+    if payload_target < payload_len {
+        return Err(ConnectionError::InvalidPacket);
+    }
+    let staged_end = checked_usize_add(header_reserve, payload_target)?;
+    if staged_end > out.len() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    // Trailing plaintext bytes are PADDING frames (RFC 9000 section 19.1).
+    out[header_reserve + payload_len..staged_end].fill(0);
+    h.length = Some(length);
+    let pn_off = format_header(h, out)?;
+    let payload_dest = checked_usize_add(pn_off, pn_len)?;
+    let packet_end = checked_usize_add(payload_dest, payload_target)?;
+    let packet_end = checked_usize_add(packet_end, AEAD_TAG_LEN)?;
+    if packet_end > out.len() {
+        return Err(ConnectionError::BufferTooShort);
+    }
+    out.copy_within(header_reserve..staged_end, payload_dest);
+    encode_pkt_num(pn, pn_len, &mut out[pn_off..payload_dest])?;
+    encrypt_and_protect(crypto, &mut out[..packet_end], payload_dest, pn, pn_len, h.ty)
+}
+
+/// Declared wire span of the first packet in `buf`: the RFC Length-bounded
+/// span for Initial, Handshake and 0-RTT packets, or the remaining datagram
+/// for Short, Retry, Version Negotiation and unparseable input (the packet
+/// processing path then reports the authoritative error itself).
+pub fn packet_wire_span(buf: &[u8], short_dcid_len: usize) -> usize {
+    match parse_header(buf, short_dcid_len) {
+        Ok((hdr, pn_off)) => match hdr.ty {
+            PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT => {
+                let declared = usize::try_from(hdr.length.unwrap_or(0)).unwrap_or(usize::MAX);
+                pn_off.saturating_add(declared).min(buf.len())
+            }
+            _ => buf.len(),
+        },
+        Err(_) => buf.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

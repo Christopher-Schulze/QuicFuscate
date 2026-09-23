@@ -33,7 +33,7 @@ impl Connection {
         };
         let space_idx = if packet_type == PacketType::Handshake { 1 } else { 0 };
         let pn = self.next_send_packet_number(space_idx)?;
-        let header = packet::Header {
+        let mut header = packet::Header {
             ty: packet_type,
             version: self.config.version,
             dcid: self.dcid.to_vec(),
@@ -47,8 +47,8 @@ impl Connection {
             },
             versions: None,
             key_phase: false,
+            length: None,
         };
-        let pn_off = packet::format_header(&header, out)?;
         let pn_len = if pn < (1 << 8) {
             1
         } else if pn < (1 << 16) {
@@ -58,36 +58,26 @@ impl Connection {
         } else {
             4
         };
-        let header_len = pn_off + pn_len;
-        if out.len() < header_len {
+        // Reserve worst-case header+PN space. seal_long_header_packet resolves
+        // the RFC Length, rewrites the compact header and seals once.
+        let header_reserve = packet::long_header_reserve(&header)?;
+        if out.len() < header_reserve {
             return Err(ConnectionError::BufferTooShort);
         }
-        let mut truncated_pn = [0u8; 4];
-        packet::encode_pkt_num(pn, pn_len, &mut truncated_pn[..pn_len])?;
-        out[pn_off..header_len].copy_from_slice(&truncated_pn[..pn_len]);
-
         let close = &self.pending_control[close_index];
-        let close_len = frames::wire_len(close)?;
-        let sample_end = pn_off + packet::MAX_PKT_NUM_LEN + packet::SAMPLE_LEN;
-        let total = (header_len + close_len + packet::AEAD_TAG_LEN)
-            .max(sample_end)
-            .max(if packet_type == PacketType::Initial { MIN_CLIENT_INITIAL_LEN } else { 0 });
-        if out.len() < total {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let frame_end = header_len + frames::to_bytes(close, &mut out[header_len..])?;
-        if frame_end < total - packet::AEAD_TAG_LEN {
-            frames::write_padding(total - packet::AEAD_TAG_LEN - frame_end, &mut out[frame_end..])?;
-        }
+        let payload_len = frames::to_bytes(close, &mut out[header_reserve..])?;
+        let min_total = if packet_type == PacketType::Initial { MIN_CLIENT_INITIAL_LEN } else { 0 };
         let used = {
             let crypto = self.crypto.read();
-            packet::encrypt_and_protect(
+            packet::seal_long_header_packet(
                 &crypto,
-                &mut out[..total],
-                header_len,
+                &mut header,
                 pn,
                 pn_len,
-                packet_type,
+                header_reserve,
+                payload_len,
+                min_total,
+                out,
             )?
         };
         self.advance_send_packet_number(space_idx)?;
@@ -255,7 +245,7 @@ impl Connection {
                 } else {
                     None
                 };
-                let base_hdr = packet::Header {
+                let mut base_hdr = packet::Header {
                     ty: pkt_ty,
                     version: self.config.version,
                     dcid: self.dcid.to_vec(),
@@ -265,6 +255,7 @@ impl Connection {
                     token,
                     versions: None,
                     key_phase: false,
+                    length: None,
                 };
                 let space_idx = match pkt_ty {
                     PacketType::Initial => 0,
@@ -272,7 +263,6 @@ impl Connection {
                     _ => 2,
                 };
                 let pn = self.next_send_packet_number(space_idx)?;
-                let hdr_len_wo_pn = packet::format_header(&base_hdr, out)?;
                 let pn_len = if pn < (1 << 8) {
                     1
                 } else if pn < (1 << 16) {
@@ -282,14 +272,14 @@ impl Connection {
                 } else {
                     4
                 };
-                if out.len() < hdr_len_wo_pn + pn_len {
+                // Reserve worst-case header+PN space. seal_long_header_packet
+                // resolves the RFC Length, rewrites the compact header and
+                // seals once with the final packet-number offset.
+                let header_reserve = packet::long_header_reserve(&base_hdr)?;
+                if out.len() < header_reserve {
                     return Err(ConnectionError::BufferTooShort);
                 }
-                let mut tmp = [0u8; 4];
-                packet::encode_pkt_num(pn, pn_len, &mut tmp[..pn_len])?;
-                out[hdr_len_wo_pn..hdr_len_wo_pn + pn_len].copy_from_slice(&tmp[..pn_len]);
-                let header_len = hdr_len_wo_pn + pn_len;
-                let mut off = header_len;
+                let mut off = header_reserve;
 
                 // The CRYPTO data budget must reserve room for everything written into
                 // the same packet *after* the data: the AEAD tag (16), the CRYPTO frame
@@ -369,30 +359,25 @@ impl Connection {
                     }
                 }
 
-                let pn_off = hdr_len_wo_pn;
-                let sample_min = pn_off + 4 + packet::SAMPLE_LEN;
-                let mut target_total = header_len + 16;
-                if sample_min > target_total {
-                    target_total = sample_min;
-                }
-                // Ensure we can actually carry the frames we already wrote, plus the AEAD tag.
-                // sample_min only guarantees enough ciphertext for header protection sampling,
-                // but we may have already written more plaintext than that budget.
-                let frames_min_total = off.saturating_add(16);
-                if frames_min_total > target_total {
-                    target_total = frames_min_total;
-                }
-                if matches!(pkt_ty, PacketType::Initial) && MIN_CLIENT_INITIAL_LEN > target_total {
-                    target_total = MIN_CLIENT_INITIAL_LEN;
-                }
-                if out.len() < target_total {
-                    return Err(ConnectionError::BufferTooShort);
-                }
-                let target_off = target_total - 16;
-                if off < target_off {
-                    let pad_len = target_off - off;
-                    frames::write_padding(pad_len, &mut out[off..])?;
-                }
+                // RFC 9000 section 14.1 keeps client Initials at the 1200-byte
+                // minimum; the seal path resolves the final Length varint and
+                // pads with PADDING frames accordingly.
+                let payload_len = off - header_reserve;
+                let min_total =
+                    if matches!(pkt_ty, PacketType::Initial) { MIN_CLIENT_INITIAL_LEN } else { 0 };
+                let used = {
+                    let crypto = self.crypto.read();
+                    packet::seal_long_header_packet(
+                        &crypto,
+                        &mut base_hdr,
+                        pn,
+                        pn_len,
+                        header_reserve,
+                        payload_len,
+                        min_total,
+                        out,
+                    )?
+                };
 
                 trace_send_packet(
                     self.is_server,
@@ -400,21 +385,9 @@ impl Connection {
                     space_idx,
                     pn,
                     pn_len,
-                    header_len,
-                    target_total,
+                    header_reserve,
+                    used,
                 );
-
-                let used = {
-                    let crypto = self.crypto.read();
-                    packet::encrypt_and_protect(
-                        &crypto,
-                        &mut out[..target_total],
-                        header_len,
-                        pn,
-                        pn_len,
-                        pkt_ty,
-                    )?
-                };
                 self.advance_send_packet_number(space_idx)?;
                 self.stats.sent += 1;
                 self.stats.sent_bytes += used as u64;
@@ -905,7 +878,7 @@ impl Connection {
     ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
         use crate::error::ConnectionError;
 
-        let base_hdr = packet::Header {
+        let mut base_hdr = packet::Header {
             ty: PacketType::ZeroRTT,
             version: self.config.version,
             dcid: self.dcid.to_vec(),
@@ -915,10 +888,10 @@ impl Connection {
             token: None,
             versions: None,
             key_phase: false,
+            length: None,
         };
         let space_idx = 2; // Application space; shared with 1-RTT per RFC 9001.
         let pn = self.next_send_packet_number(space_idx)?;
-        let hdr_len_wo_pn = packet::format_header(&base_hdr, out)?;
         let pn_len = if pn < (1 << 8) {
             1
         } else if pn < (1 << 16) {
@@ -928,15 +901,13 @@ impl Connection {
         } else {
             4
         };
-        if out.len() < hdr_len_wo_pn + pn_len {
+        // Reserve worst-case header+PN space. seal_long_header_packet resolves
+        // the RFC Length, rewrites the compact header and seals once.
+        let header_reserve = packet::long_header_reserve(&base_hdr)?;
+        if out.len() < header_reserve {
             return Err(ConnectionError::BufferTooShort);
         }
-        let mut tmp = [0u8; 4];
-        packet::encode_pkt_num(pn, pn_len, &mut tmp[..pn_len])?;
-        out[hdr_len_wo_pn..hdr_len_wo_pn + pn_len].copy_from_slice(&tmp[..pn_len]);
-        let header_len = hdr_len_wo_pn + pn_len;
-        let pn_off = hdr_len_wo_pn;
-        let mut off = header_len;
+        let mut off = header_reserve;
 
         let (off_after_stream, staged_stream) = self.stage_next_stream_frame(out, off, true)?;
         off = off_after_stream;
@@ -945,30 +916,25 @@ impl Connection {
             // emitting an empty early-data packet.
             return Err(ConnectionError::Done);
         }
-
-        // The header-protection sample window must fit inside the ciphertext:
-        // pad short payloads up to the sample boundary plus the AEAD tag.
-        let tag_reserve = crate::transport::packet::AEAD_TAG_LEN;
-        let sample_min = pn_off + 4 + packet::SAMPLE_LEN;
-        let mut target_total = header_len + tag_reserve;
-        if sample_min > target_total {
-            target_total = sample_min;
-        }
-        let frames_min_total = off.saturating_add(tag_reserve);
-        if frames_min_total > target_total {
-            target_total = frames_min_total;
-        }
-        if out.len() < target_total {
-            return Err(ConnectionError::BufferTooShort);
-        }
-        let target_off = target_total - tag_reserve;
-        if off < target_off {
-            frames::write_padding(target_off - off, &mut out[off..])?;
-        }
+        let payload_len = off - header_reserve;
 
         if let Some(stream_frame) = &staged_stream {
             self.preflight_staged_stream_frames(&[(pn, stream_frame)])?;
         }
+
+        let used = {
+            let crypto = self.crypto.read();
+            packet::seal_long_header_packet(
+                &crypto,
+                &mut base_hdr,
+                pn,
+                pn_len,
+                header_reserve,
+                payload_len,
+                0,
+                out,
+            )?
+        };
 
         trace_send_packet(
             self.is_server,
@@ -976,21 +942,9 @@ impl Connection {
             space_idx,
             pn,
             pn_len,
-            header_len,
-            target_total,
+            header_reserve,
+            used,
         );
-
-        let used = {
-            let crypto = self.crypto.read();
-            packet::encrypt_and_protect(
-                &crypto,
-                &mut out[..target_total],
-                header_len,
-                pn,
-                pn_len,
-                PacketType::ZeroRTT,
-            )?
-        };
         self.advance_send_packet_number(space_idx)?;
         if let Some(stream_frame) = &staged_stream {
             self.commit_staged_stream_frames(&[(pn, stream_frame)])?;

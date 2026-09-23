@@ -268,6 +268,7 @@ fn retry_packet_for_test(
         pkt_num: 0,
         pkt_num_len: 0,
         token: Some(token.to_vec()),
+        length: None,
         versions: None,
         key_phase: false,
     };
@@ -563,6 +564,7 @@ fn valid_retry_adopts_cid_and_token_without_reusing_packet_numbers() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: Some(token.clone()),
+        length: None,
         versions: None,
         key_phase: false,
     };
@@ -1134,6 +1136,7 @@ fn live_v1_and_v2_retry_recover_after_a_lost_post_retry_initial() {
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(vec![0x10, 0x20, 0x30, 0x40]),
+            length: None,
             versions: None,
             key_phase: false,
         };
@@ -1233,10 +1236,9 @@ fn live_server_initial_prevents_later_retry_on_both_versions() {
         second_server.recv(&mut client_initial, &client_to_server).unwrap();
         let (second_len, _) = second_server.send(&mut packet).unwrap();
         let recv_before = client.stats.recv;
-        assert_eq!(
-            client.recv(&mut packet[..second_len], &server_to_client),
-            Ok(second_len - packet::AEAD_TAG_LEN)
-        );
+        // The mismatched Initial is dropped after the frame contract, but the
+        // datagram carrying it is still fully consumed.
+        assert_eq!(client.recv(&mut packet[..second_len], &server_to_client), Ok(second_len));
         assert_eq!(client.peer_initial_scid, Some(ConnectionId::from_ref(server_scid)));
         assert_eq!(client.dcid, ConnectionId::from_ref(server_scid));
         assert_eq!(client.stats.recv, recv_before);
@@ -2412,6 +2414,414 @@ fn multiple_timeouts_accumulate() {
     c.on_timeout();
     c.on_timeout();
     assert!(c.timeout_count >= 2, "multiple on_timeout calls must accumulate timeout_count");
+}
+
+fn live_tls_client_server(
+    version: u32,
+    label: &str,
+) -> (Connection, Connection, RecvInfo, RecvInfo) {
+    let client_addr = "127.0.0.1:29101".parse().unwrap();
+    let server_addr = "127.0.0.1:29102".parse().unwrap();
+    let mut client_config = Config::new_with_version(version).unwrap();
+    client_config.verify_peer = false;
+    let mut server_config = Config::new_with_version(version).unwrap();
+    server_config.verify_peer = false;
+    let mut client =
+        Connection::new_client(b"len-client-scid", client_addr, server_addr, client_config)
+            .unwrap();
+    let server_scid = b"len-server-scid";
+    client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+    let mut server = packet::accept(
+        server_scid,
+        Some(server_scid),
+        server_addr,
+        client_addr,
+        &mut server_config,
+    )
+    .unwrap();
+    server.set_destination_cid(client.scid);
+    let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
+        "QUICFUSCATE_TLS_COVER",
+        "0",
+    )]));
+    client.set_environment_snapshot(std::sync::Arc::clone(&environment));
+    server.set_environment_snapshot(environment);
+    client.enable_tls(label).unwrap();
+    server.enable_tls(label).unwrap();
+    let mut profile = crate::qftls::TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some("localhost".to_string());
+    client.configure_tls(&profile, "localhost").unwrap();
+    server.configure_tls(&profile, "localhost").unwrap();
+    let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
+    let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
+    (client, server, client_to_server, server_to_client)
+}
+
+#[test]
+fn sent_flights_carry_minimal_rfc_length_field() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        let (mut client, mut server, c2s, s2c) = live_tls_client_server(version, "rfc-length-send");
+        let mut packet = [0u8; 4096];
+        let (client_len, _) = client.send(&mut packet).unwrap();
+        let (client_hdr, client_pn_off) = packet::parse_header(&packet[..client_len], 0).unwrap();
+        assert_eq!(client_hdr.ty, PacketType::Initial);
+        let declared = client_hdr.length.expect("Initial carries Length") as usize;
+        assert_eq!(client_pn_off + declared, client_len);
+        let varint_width = qf_transport_pn::varint::varint_len(client_hdr.length.unwrap());
+        let (decoded, used) = crate::transport::varint::read_varint(
+            &packet[client_pn_off - varint_width..client_pn_off],
+        )
+        .unwrap();
+        assert_eq!(decoded as usize, declared);
+        assert_eq!(used, varint_width);
+        server.recv(&mut packet[..client_len], &c2s).unwrap();
+
+        let (server_len, _) = server.send(&mut packet).unwrap();
+        let (server_hdr, server_pn_off) = packet::parse_header(&packet[..server_len], 0).unwrap();
+        assert_eq!(server_hdr.ty, PacketType::Initial);
+        assert_eq!(
+            server_pn_off + server_hdr.length.expect("server Initial Length") as usize,
+            server_len
+        );
+        client.recv(&mut packet[..server_len], &s2c).unwrap();
+
+        // Whatever the server emits next - a further Initial or the first
+        // Handshake packet - must carry the same RFC Length contract.
+        let (next_len, _) = server.send(&mut packet).expect("second server flight");
+        let (next_hdr, next_pn_off) = packet::parse_header(&packet[..next_len], 0).unwrap();
+        assert!(matches!(next_hdr.ty, PacketType::Initial | PacketType::Handshake));
+        assert_eq!(next_pn_off + next_hdr.length.unwrap() as usize, next_len);
+    }
+}
+
+#[test]
+fn coalesced_datagram_processes_each_declared_packet() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        let (mut client, mut server, c2s, s2c) = live_tls_client_server(version, "rfc-coalesce");
+        let mut packet = [0u8; 4096];
+        let (client_len, _) = client.send(&mut packet).unwrap();
+        server.recv(&mut packet[..client_len], &c2s).unwrap();
+        let (first_len, _) = server.send(&mut packet).unwrap();
+        let first_flight = packet[..first_len].to_vec();
+        let (second_len, _) = server.send(&mut packet).expect("second server flight");
+        let mut datagram = first_flight;
+        datagram.extend_from_slice(&packet[..second_len]);
+        let recv_before = client.stats.recv;
+        assert_eq!(client.recv(&mut datagram, &s2c), Ok(datagram.len()));
+        assert_eq!(client.stats.recv, recv_before + 2);
+    }
+}
+
+#[test]
+fn trailing_bytes_after_declared_span_fail_closed() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        let (mut client, mut server, c2s, _s2c) = live_tls_client_server(version, "rfc-trailing");
+        let mut packet = [0u8; 4096];
+        let (client_len, _) = client.send(&mut packet).unwrap();
+        let mut datagram = packet[..client_len].to_vec();
+        datagram.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef]);
+        let recv_before = server.stats.recv;
+        // The garbage trailer is processed as its own packet and rejected;
+        // it must never be absorbed into the declared Initial span.
+        assert!(server.recv(&mut datagram, &c2s).is_err());
+        assert_eq!(server.stats.recv, recv_before + 1);
+    }
+}
+
+fn dump_dgram_parse(lines: &mut Vec<String>, idx: usize, dir: &str, dgram: &[u8]) {
+    lines.push(format!("DGRAM {idx} {dir} len={}", dgram.len()));
+    let mut off = 0usize;
+    let mut k = 0usize;
+    while off < dgram.len() {
+        let rest = &dgram[off..];
+        match packet::parse_header(rest, 0) {
+            Ok((hdr, pn_off)) => {
+                let span = packet::packet_wire_span(rest, 0);
+                let (ver, tok) = match hdr.ty {
+                    PacketType::Initial => (
+                        format!("0x{:08x}", hdr.version),
+                        hdr.token.as_deref().map_or(0, |t| t.len()).to_string(),
+                    ),
+                    PacketType::Handshake | PacketType::ZeroRTT | PacketType::Retry => {
+                        (format!("0x{:08x}", hdr.version), "-".to_string())
+                    }
+                    PacketType::Short => ("-".to_string(), "-".to_string()),
+                    _ => (format!("0x{:08x}", hdr.version), "-".to_string()),
+                };
+                let len_field = hdr.length.map_or("-".to_string(), |v| v.to_string());
+                let end = off + span;
+                let ty = hdr.ty;
+                lines.push(format!(
+                    "PKT {k} off={off} ver={ver} ty={ty:?} pn_off={pn_off} len={len_field} tok={tok} span={end}"
+                ));
+                off += span;
+            }
+            Err(_) => {
+                lines.push(format!("PKT {k} off={off} ty=error span={}", dgram.len()));
+                break;
+            }
+        }
+        k += 1;
+    }
+}
+
+/// Writes the recorded wire datagrams as a LINKTYPE_RAW pcap: each payload is
+/// wrapped in a synthesized IPv4/UDP envelope so an independent dissector
+/// (tshark) can decode the QUIC packets. The QUIC bytes are exactly what was
+/// passed to `send_to` on the real sockets.
+fn write_dgram_pcap(
+    path: &str,
+    records: &[(std::net::SocketAddr, std::net::SocketAddr, Vec<u8>)],
+) -> std::io::Result<()> {
+    let mut pcap = Vec::new();
+    // Global header, little-endian (magic d4 c3 b2 a1), LINKTYPE_RAW = 101.
+    pcap.extend_from_slice(&0xa1b2c3d4u32.to_le_bytes());
+    pcap.extend_from_slice(&2u16.to_le_bytes());
+    pcap.extend_from_slice(&4u16.to_le_bytes());
+    pcap.extend_from_slice(&0i32.to_le_bytes());
+    pcap.extend_from_slice(&0u32.to_le_bytes());
+    pcap.extend_from_slice(&65535u32.to_le_bytes());
+    pcap.extend_from_slice(&101u32.to_le_bytes());
+    let mut usec = 0u32;
+    for (src, dst, payload) in records {
+        let (std::net::SocketAddr::V4(src4), std::net::SocketAddr::V4(dst4)) = (src, dst) else {
+            continue;
+        };
+        let frame_len = 20 + 8 + payload.len();
+        if frame_len > u16::MAX as usize {
+            continue;
+        }
+        usec += 100;
+        pcap.extend_from_slice(&0u32.to_le_bytes());
+        pcap.extend_from_slice(&usec.to_le_bytes());
+        pcap.extend_from_slice(&(frame_len as u32).to_le_bytes());
+        pcap.extend_from_slice(&(frame_len as u32).to_le_bytes());
+        // IPv4 header (no options): version 4, IHL 5, protocol 17.
+        let mut ip = [0u8; 20];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&(frame_len as u16).to_be_bytes());
+        ip[6] = 0x40; // DF
+        ip[8] = 64; // TTL
+        ip[9] = 17; // UDP
+        ip[12..16].copy_from_slice(&src4.ip().octets());
+        ip[16..20].copy_from_slice(&dst4.ip().octets());
+        let mut sum =
+            ip.chunks_exact(2).fold(0u32, |acc, w| acc + u16::from_be_bytes([w[0], w[1]]) as u32);
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        ip[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+        pcap.extend_from_slice(&ip);
+        // UDP header; checksum 0 = "no checksum" (legal for IPv4).
+        pcap.extend_from_slice(&src4.port().to_be_bytes());
+        pcap.extend_from_slice(&dst4.port().to_be_bytes());
+        pcap.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        pcap.extend_from_slice(&0u16.to_be_bytes());
+        pcap.extend_from_slice(payload);
+    }
+    std::fs::write(path, pcap)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn udp_pump_direction(
+    src: &mut Connection,
+    src_sock: &std::net::UdpSocket,
+    dst: &mut Connection,
+    dst_sock: &std::net::UdpSocket,
+    dst_addr: std::net::SocketAddr,
+    dir: &str,
+    dump: &mut Vec<String>,
+    dgram_idx: &mut usize,
+    recorded: &mut Vec<(std::net::SocketAddr, std::net::SocketAddr, Vec<u8>)>,
+) {
+    let mut out = [0u8; 4096];
+    let mut staging: Vec<u8> = Vec::new();
+    // Always drain the destination socket: datagrams already queued there
+    // must reach `dst` even when `src` has nothing left to send this turn.
+    let mut drain_dst = |dump: &mut Vec<String>, dgram_idx: &mut usize| loop {
+        let mut d = [0u8; 4096];
+        match dst_sock.recv_from(&mut d) {
+            Ok((len, from)) => {
+                dump_dgram_parse(dump, *dgram_idx, dir, &d[..len]);
+                *dgram_idx += 1;
+                let info = RecvInfo { from, to: dst_addr, ecn: None };
+                match dst.recv(&mut d[..len], &info) {
+                    Ok(_) | Err(ConnectionError::Done) => {}
+                    Err(error) => panic!("{dir} recv failed: {error:?}"),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("udp recv_from failed: {error}"),
+        }
+    };
+    // Coalesce consecutive long-header packets into one datagram exactly as
+    // RFC 9000 section 12.2 permits; a Short packet always ends a datagram.
+    let src_addr = src_sock.local_addr().expect("src local addr");
+    let mut emit = |bytes: &[u8]| {
+        src_sock.send_to(bytes, dst_addr).expect("udp send_to");
+        recorded.push((src_addr, dst_addr, bytes.to_vec()));
+    };
+    loop {
+        match src.send(&mut out) {
+            Ok((n, _)) if n > 0 => {
+                let long = out[0] & packet::FORM_BIT != 0;
+                if long && staging.len() + n <= 2048 {
+                    staging.extend_from_slice(&out[..n]);
+                    continue;
+                }
+                if !staging.is_empty() {
+                    emit(&staging);
+                    staging.clear();
+                }
+                emit(&out[..n]);
+            }
+            Ok(_) => break,
+            Err(ConnectionError::Done) => break,
+            Err(error) => panic!("{dir} send failed: {error:?}"),
+        }
+    }
+    if !staging.is_empty() {
+        emit(&staging);
+    }
+    drain_dst(dump, dgram_idx);
+}
+
+/// Drives real UDP-socket handshakes for v1 and v2, records the local
+/// parser's view of every received datagram, and - when QF_FLIGHT_DUMP /
+/// QF_DGRAM_PCAP are set - writes the dump plus a raw-IP pcap of the exact
+/// wire bytes for the independent-capture comparison gate.
+#[test]
+fn live_udp_first_flights_carry_rfc_length_and_coalesce() {
+    let mut dump: Vec<String> = Vec::new();
+    let mut dgram_idx = 0usize;
+    let mut recorded: Vec<(std::net::SocketAddr, std::net::SocketAddr, Vec<u8>)> = Vec::new();
+    // QF_UDP_VERSION=1|2 restricts the run to one version so capture artifacts
+    // (keylog, pcap, private dump) stay single-session for the wire-proof tool.
+    let only_version = std::env::var("QF_UDP_VERSION")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| if v == 2 { crate::transport::PROTOCOL_VERSION_V2 } else { PROTOCOL_VERSION });
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        if let Some(only) = only_version {
+            if version != only {
+                continue;
+            }
+        }
+        let client_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind client");
+        let server_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind server");
+        client_sock.set_nonblocking(true).expect("nonblocking");
+        server_sock.set_nonblocking(true).expect("nonblocking");
+        let client_addr = client_sock.local_addr().expect("client addr");
+        let server_addr = server_sock.local_addr().expect("server addr");
+        dump.push(format!(
+            "# version=0x{version:08x} client_port={} server_port={}",
+            client_addr.port(),
+            server_addr.port()
+        ));
+
+        let mut client_config = Config::new_with_version(version).unwrap();
+        client_config.verify_peer = false;
+        let mut server_config = Config::new_with_version(version).unwrap();
+        server_config.verify_peer = false;
+        let mut client =
+            Connection::new_client(b"udp-client-scid", client_addr, server_addr, client_config)
+                .unwrap();
+        let server_scid = b"udp-server-scid";
+        client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+        let mut server = packet::accept(
+            server_scid,
+            Some(server_scid),
+            server_addr,
+            client_addr,
+            &mut server_config,
+        )
+        .unwrap();
+        server.set_destination_cid(client.scid);
+        let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_TLS_COVER",
+            "0",
+        )]));
+        client.set_environment_snapshot(std::sync::Arc::clone(&environment));
+        server.set_environment_snapshot(environment);
+        client.enable_tls("udp-flight").unwrap();
+        server.enable_tls("udp-flight").unwrap();
+        let mut profile = crate::qftls::TlsProfile::chrome_130();
+        profile.timing_jitter = None;
+        profile.sni = Some("localhost".to_string());
+        client.configure_tls(&profile, "localhost").unwrap();
+        server.configure_tls(&profile, "localhost").unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !(client.is_established() && server.is_established()) {
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "TIMEOUT client_est={} server_est={} client_sent={} client_recv={} server_sent={} server_recv={} hs_c={} hs_s={}",
+                    client.is_established(),
+                    server.is_established(),
+                    client.stats.sent,
+                    client.stats.recv,
+                    server.stats.sent,
+                    server.stats.recv,
+                    client.tls_handshake_complete(),
+                    server.tls_handshake_complete()
+                );
+                for line in &dump {
+                    eprintln!("{line}");
+                }
+                panic!("UDP handshake timed out");
+            }
+            udp_pump_direction(
+                &mut client,
+                &client_sock,
+                &mut server,
+                &server_sock,
+                server_addr,
+                "c2s",
+                &mut dump,
+                &mut dgram_idx,
+                &mut recorded,
+            );
+            udp_pump_direction(
+                &mut server,
+                &server_sock,
+                &mut client,
+                &client_sock,
+                client_addr,
+                "s2c",
+                &mut dump,
+                &mut dgram_idx,
+                &mut recorded,
+            );
+            // NOTE: `on_timeout()` is the terminal idle-timeout path (closes +
+            // drains the connection), not a timer poll - the pump never calls
+            // it, matching `complete_live_version_handshake`.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(client.tls_handshake_complete());
+        assert!(server.tls_handshake_complete());
+    }
+
+    // Every captured long-header packet declared an in-span Length: re-walk
+    // the dump and assert each Initial/Handshake/0-RTT entry carried one.
+    for line in &dump {
+        if line.starts_with("PKT ")
+            && (line.contains("ty=Initial")
+                || line.contains("ty=Handshake")
+                || line.contains("ty=ZeroRTT"))
+        {
+            assert!(!line.contains("len=-"), "long-header packet without declared Length: {line}");
+        }
+    }
+
+    if let Ok(path) = std::env::var("QF_FLIGHT_DUMP") {
+        std::fs::write(&path, dump.join("\n") + "\n").expect("write flight dump");
+        eprintln!("wrote flight dump to {path} ({} lines)", dump.len());
+    }
+    if let Ok(path) = std::env::var("QF_DGRAM_PCAP") {
+        write_dgram_pcap(&path, &recorded).expect("write datagram pcap");
+        eprintln!("wrote datagram pcap to {path} ({} datagrams)", recorded.len());
+    }
 }
 
 mod flow_and_packet;

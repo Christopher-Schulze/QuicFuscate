@@ -32,6 +32,7 @@ fn short_header_roundtrip() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: None,
         versions: None,
         key_phase: true,
     };
@@ -55,12 +56,13 @@ fn long_header_roundtrip_initial() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: Some(20),
         versions: None,
         key_phase: false,
     };
     let mut buf = vec![0u8; 64];
     let used = format_header(&hdr, &mut buf).expect("format_header");
-    let (parsed, pn_off) = parse_header(&buf[..used], 0).expect("parse_header");
+    let (parsed, pn_off) = parse_header(&buf[..used + 20], 0).expect("parse_header");
     assert!(pn_off > 0);
     assert_eq!(parsed.ty, PacketType::Initial);
     assert_eq!(parsed.version, hdr.version);
@@ -123,6 +125,7 @@ fn malformed_headers_fail_before_output_mutation() {
         pkt_num: 0,
         pkt_num_len: 0,
         token: None,
+        length: Some(20),
         versions: None,
         key_phase: false,
     };

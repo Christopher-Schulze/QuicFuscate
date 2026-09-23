@@ -236,12 +236,13 @@ fn sustained_admission_retries_new_initials_and_preserves_established_traffic() 
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(token),
+            length: Some(20),
             versions: None,
             key_phase: false,
         };
         let mut storage = [0u8; 256];
         let length = format_header(&header, &mut storage).expect("Initial header");
-        storage[..length].to_vec()
+        storage[..length + 20].to_vec()
     }
 
     let config = ServerConfig {
@@ -326,12 +327,13 @@ fn validated_retry_uses_retry_scid_for_initial_keys_and_restores_qkey_identity()
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(token),
+            length: Some(20),
             versions: None,
             key_phase: false,
         };
         let mut storage = [0u8; 256];
         let length = format_header(&header, &mut storage).expect("Initial header");
-        storage[..length].to_vec()
+        storage[..length + 20].to_vec()
     }
 
     let token_hex = "a".repeat(64);

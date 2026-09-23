@@ -1,7 +1,8 @@
 use super::PacketType;
 use super::{
     checked_buffer_end, checked_cid_wire_len, checked_usize_add, checked_varint_value,
-    AEAD_TAG_LEN, FIXED_BIT, FORM_BIT, KEY_PHASE_BIT, MAX_CID_LEN, MAX_PKT_NUM_LEN, TYPE_MASK,
+    AEAD_TAG_LEN, FIXED_BIT, FORM_BIT, KEY_PHASE_BIT, MAX_CID_LEN, MAX_PKT_NUM_LEN,
+    MAX_QUIC_VARINT, MIN_PROTECTED_PACKET_LEN, TYPE_MASK,
 };
 use crate::error::ConnectionError;
 
@@ -22,6 +23,12 @@ pub struct Header {
     pub pkt_num_len: usize,
     /// Token from Initial or Retry packets.
     pub token: Option<Vec<u8>>,
+    /// RFC 9000 Length field for long-header packets: packet-number bytes
+    /// plus the protected payload including the AEAD tag. Required when
+    /// formatting Initial, Handshake or 0-RTT headers, populated by
+    /// `parse_header`, and always `None` for Short, Retry and Version
+    /// Negotiation headers which carry no Length field.
+    pub length: Option<u64>,
     /// Supported versions from Version Negotiation packets.
     pub versions: Option<Vec<u32>>,
     /// Key phase bit for 1-RTT key rotation.
@@ -113,6 +120,7 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
             pkt_num: 0,
             pkt_num_len: 0,
             token: None,
+            length: None,
             versions: None,
             key_phase: (first & KEY_PHASE_BIT) != 0,
         };
@@ -146,6 +154,7 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
     let ty_bits = first & TYPE_MASK;
     let ty = crate::transport::version::packet_type_from_long_header(version, ty_bits)?;
     let mut token = None;
+    let mut length = None;
     let mut versions = None;
     if ty == PacketType::VersionNegotiation {
         let remaining = buf.len().saturating_sub(off);
@@ -177,6 +186,24 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
         }
         off = tag_start;
     }
+    if matches!(ty, PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT) {
+        // RFC 9000 sections 17.2.2-17.2.4: the Length varint precedes the
+        // packet number and declares the bytes covered by it (packet number
+        // plus protected payload including the AEAD tag).
+        let (value, used) = crate::transport::varint::read_varint(&buf[off..])?;
+        off = checked_usize_add(off, used)?;
+        // Header protection samples pn_off + 4 .. pn_off + 20 inside the
+        // packet; any smaller declared Length is an impossible shape.
+        if value < MIN_PROTECTED_PACKET_LEN {
+            return Err(ConnectionError::InvalidPacket);
+        }
+        let declared = usize::try_from(value).map_err(|_| ConnectionError::InvalidPacket)?;
+        let declared_end = checked_usize_add(off, declared)?;
+        if declared_end > buf.len() {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        length = Some(value);
+    }
     let hdr = Header {
         ty,
         version,
@@ -185,6 +212,7 @@ pub fn parse_header(buf: &[u8], short_dcid_len: usize) -> Result<(Header, usize)
         pkt_num: 0,
         pkt_num_len: 0,
         token,
+        length,
         versions,
         key_phase: false,
     };
@@ -217,7 +245,8 @@ pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionErro
     match h.ty {
         PacketType::Short => {
             checked_cid_wire_len(h.dcid.len())?;
-            if !h.scid.is_empty() || h.token.is_some() || h.versions.is_some() {
+            if !h.scid.is_empty() || h.token.is_some() || h.versions.is_some() || h.length.is_some()
+            {
                 return Err(ConnectionError::InvalidPacket);
             }
             let end = checked_buffer_end(out.len(), 1, h.dcid.len())?;
@@ -230,27 +259,33 @@ pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionErro
             Ok(end)
         }
         PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT | PacketType::Retry => {
-            // Long header: [first][version:4][dcid_len:1][dcid][scid_len:1][scid].
+            // Long header: [first][version:4][dcid_len:1][dcid][scid_len:1][scid],
+            // then token (Initial/Retry) and the RFC 9000 Length varint for
+            // Initial, Handshake and 0-RTT packets.
             let dcid_len = checked_cid_wire_len(h.dcid.len())?;
             let scid_len = checked_cid_wire_len(h.scid.len())?;
             let token = h.token.as_deref().unwrap_or(&[]);
             let token_value = checked_varint_value(token.len())?;
             let type_bits = crate::transport::version::long_header_type_bits(h.version, h.ty)?;
-            let mut required = 5usize;
-            required = checked_usize_add(required, 1)?;
-            required = checked_usize_add(required, h.dcid.len())?;
-            required = checked_usize_add(required, 1)?;
-            required = checked_usize_add(required, h.scid.len())?;
-            if h.ty == PacketType::Initial {
-                required = checked_usize_add(
-                    required,
-                    crate::transport::pn::varint::varint_len(token_value),
-                )?;
-            }
-            if h.ty == PacketType::Initial || h.ty == PacketType::Retry {
-                required = checked_usize_add(required, token.len())?;
-            } else if h.token.is_some() {
-                return Err(ConnectionError::InvalidPacket);
+            let length = match h.ty {
+                PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT => {
+                    let value = h.length.ok_or(ConnectionError::InvalidPacket)?;
+                    if !(MIN_PROTECTED_PACKET_LEN..=MAX_QUIC_VARINT).contains(&value) {
+                        return Err(ConnectionError::InvalidPacket);
+                    }
+                    Some(value)
+                }
+                _ => {
+                    if h.length.is_some() {
+                        return Err(ConnectionError::InvalidPacket);
+                    }
+                    None
+                }
+            };
+            let mut required = super::long_header_prefix_len(h)?;
+            if let Some(value) = length {
+                required =
+                    checked_usize_add(required, crate::transport::pn::varint::varint_len(value))?;
             }
             if out.len() < required {
                 return Err(ConnectionError::BufferTooShort);
@@ -280,6 +315,10 @@ pub fn format_header(h: &Header, out: &mut [u8]) -> Result<usize, ConnectionErro
                 let token_end = checked_buffer_end(out.len(), off, token.len())?;
                 out[off..token_end].copy_from_slice(token);
                 off = token_end;
+            }
+            if let Some(value) = length {
+                let written = crate::transport::varint::write_varint(value, &mut out[off..])?;
+                off = checked_usize_add(off, written)?;
             }
             Ok(off)
         }

@@ -220,6 +220,7 @@ pub fn bench_retry_case() -> BenchRetryCase {
         pkt_num: 0,
         pkt_num_len: 0,
         token: Some(vec![0x10, 0x20, 0x30, 0x40]),
+        length: None,
         versions: None,
         key_phase: false,
     };

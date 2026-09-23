@@ -211,6 +211,10 @@ fn parse_frame(linktype: u16, frame: &[u8]) -> Option<Datagram> {
             }
             20
         }
+        // LINKTYPE_RAW: the frame begins directly at the IP header. Emitted by
+        // the loopback datagram recorder in transport::connection::tests so
+        // captures without kernel BPF access still feed this proof.
+        101 => 0,
         _ => return None,
     };
     let ip = frame.get(ip_off..)?;
@@ -601,14 +605,22 @@ fn analyze_datagram(datagram: &Datagram, state: &mut State, report: &mut Report)
             if is_initial {
                 let Some((tok_len, n)) = read_varint(&buf[pos..]) else { return };
                 pos += n + tok_len as usize;
+                if pos > buf.len() {
+                    return;
+                }
             }
-            // This stack deliberately omits the RFC 9000 Length field on
-            // long-header packets (see transport::packet::format_header):
-            // the packet number follows the header fields directly and the
-            // packet always consumes the rest of the datagram. Long-header
-            // packets therefore cannot be coalesced.
+            // RFC 9000 sections 17.2.2-17.2.4: every remaining long-header
+            // type carries a Length varint covering the packet number plus
+            // the protected payload. The declared span bounds this packet;
+            // following bytes belong to the next coalesced packet.
+            let Some((declared, n)) = read_varint(&buf[pos..]) else { return };
+            pos += n;
+            let Ok(declared) = usize::try_from(declared) else { return };
             let pn_offset = pos;
-            let end = buf.len();
+            let Some(end) = pos.checked_add(declared) else { return };
+            if end > buf.len() {
+                return;
+            }
             if is_initial || is_handshake {
                 analyze_long(
                     &buf[off..end],

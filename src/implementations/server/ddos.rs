@@ -129,6 +129,7 @@ impl RetryTokenManager {
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(token),
+            length: None,
             versions: None,
             key_phase: false,
         };
@@ -380,12 +381,13 @@ mod tests {
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(b"a1b2c3d4e5f6".to_vec()),
+            length: Some(20),
             versions: None,
             key_phase: false,
         };
         let mut storage = [0u8; 128];
         let initial_len = format_header(&initial_header, &mut storage).unwrap();
-        let issue = manager.issue_for_initial(&storage[..initial_len], ip).unwrap();
+        let issue = manager.issue_for_initial(&storage[..initial_len + 20], ip).unwrap();
         let (retry, _) = parse_header(&issue.packet, 0).unwrap();
 
         assert_eq!(retry.ty, PacketType::Retry);
@@ -416,12 +418,13 @@ mod tests {
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(credential.clone()),
+            length: Some(20),
             versions: None,
             key_phase: false,
         };
         let mut storage = [0u8; 512];
         let initial_len = format_header(&initial_header, &mut storage).unwrap();
-        let issue = manager.issue_for_initial(&storage[..initial_len], source_ip).unwrap();
+        let issue = manager.issue_for_initial(&storage[..initial_len + 20], source_ip).unwrap();
         let (retry, _) = parse_header(&issue.packet, 0).unwrap();
         let token = retry.token.as_deref().expect("Retry token");
         let expected_token_len = RETRY_TOKEN_MAGIC.len()

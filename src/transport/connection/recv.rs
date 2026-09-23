@@ -104,6 +104,11 @@ impl Connection {
 
     /// Reports whether QUIC opened the packet before receive failed. Initial
     /// packet keys are public, so this is not peer-identity authentication.
+    ///
+    /// Coalesced datagrams (RFC 9000 section 12.2) are processed packet by
+    /// packet: the declared long-header Length bounds each span while Short,
+    /// Retry and Version Negotiation packets consume the remaining datagram.
+    /// A failure in one packet ends the datagram with that packet's error.
     #[inline(always)]
     pub(crate) fn recv_with_packet_open_state(
         &mut self,
@@ -111,7 +116,19 @@ impl Connection {
         info: &RecvInfo,
     ) -> (Result<usize, crate::error::ConnectionError>, bool) {
         let mut packet_opened = false;
-        let result = self.recv_inner(buf, info, &mut packet_opened);
+        let short_dcid_len = self.scid.as_ref().len();
+        let mut offset = 0usize;
+        let result = loop {
+            let span = packet::packet_wire_span(&buf[offset..], short_dcid_len);
+            let end = offset.saturating_add(span).min(buf.len());
+            if let Err(error) = self.recv_inner(&mut buf[offset..end], info, &mut packet_opened) {
+                break Err(error);
+            }
+            offset = end;
+            if offset >= buf.len() {
+                break Ok(offset);
+            }
+        };
         (result, packet_opened)
     }
 
