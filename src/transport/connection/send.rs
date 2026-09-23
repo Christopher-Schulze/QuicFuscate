@@ -341,10 +341,21 @@ impl Connection {
                 ));
             }
 
-            // No pending Initial/Handshake CRYPTO to send. If the handshake is still in
-            // progress there is nothing else to do this turn; once it is complete we fall
-            // through to the 1-RTT path below.
+            // No pending Initial/Handshake CRYPTO to send. While the handshake
+            // is still in progress a client with installed 0-RTT keys may emit
+            // early STREAM data in a ZeroRTT packet; otherwise there is
+            // nothing else to do this turn. Once the handshake completes we
+            // fall through to the 1-RTT path below.
             if handshake_incomplete {
+                if !self.is_server {
+                    let zero_rtt_seal_ready = {
+                        let crypto = self.crypto.read();
+                        crypto.seal_0rtt.is_some() && crypto.hp_0rtt.is_some()
+                    };
+                    if zero_rtt_seal_ready && self.has_sendable_early_stream_frame() {
+                        return self.send_zero_rtt_packet(out, now);
+                    }
+                }
                 log::trace!("send_with_datagram_overhead: early Done handshake_incomplete dgram_queue_len={}", self.dgram_send_queue.len());
                 return Err(ConnectionError::Done);
             }
@@ -461,7 +472,7 @@ impl Connection {
                     .unwrap_or(0);
                 let stream_limit = out.len().saturating_sub(datagram_reserve);
                 let (off_after_stream, stream_ack_eliciting, emitted_transmission) =
-                    self.maybe_flush_one_writable_stream(&mut out[..stream_limit], off)?;
+                    self.maybe_flush_one_writable_stream(&mut out[..stream_limit], off, false)?;
                 off = off_after_stream;
                 wrote_ack_eliciting |= stream_ack_eliciting;
                 packet_contents.stream |= stream_ack_eliciting;
@@ -532,7 +543,7 @@ impl Connection {
                 let avail = out.len().saturating_sub(off + 1 + tag_reserve);
                 let needed = (chaff_size as usize).saturating_sub(off + 1 + tag_reserve);
                 let pad_len = needed.min(avail);
-                // TODO-1052: a chaff packet is cover-class spend — the
+                // TODO-1052: a chaff packet is cover-class spend - the
                 // ledger pays the whole wire image (header + PING + pad +
                 // tag) before it is emitted. A denied chaff stays pending
                 // for the next slot; it is never sent over the cap.
@@ -711,6 +722,144 @@ impl Connection {
         }
     }
 
+    /// Emit one 0-RTT packet from a complete stream message explicitly marked
+    /// replay-safe by the application. This path is client-only.
+    ///
+    /// 0-RTT shares the Application packet-number space with 1-RTT. Rejected
+    /// early-data transmissions are requeued through ordinary stream recovery.
+    /// DATAGRAM frames and unmarked streams, including the VPN tunnel stream,
+    /// are never offered early.
+    fn send_zero_rtt_packet(
+        &mut self,
+        out: &mut [u8],
+        now: std::time::Instant,
+    ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
+        use crate::error::ConnectionError;
+
+        let base_hdr = packet::Header {
+            ty: PacketType::ZeroRTT,
+            version: self.config.version,
+            dcid: self.dcid.to_vec(),
+            scid: self.scid.to_vec(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: None,
+            versions: None,
+            key_phase: false,
+        };
+        let space_idx = 2; // Application space; shared with 1-RTT per RFC 9001.
+        let pn = self.next_send_packet_number(space_idx)?;
+        let hdr_len_wo_pn = packet::format_header(&base_hdr, out)?;
+        let pn_len = if pn < (1 << 8) {
+            1
+        } else if pn < (1 << 16) {
+            2
+        } else if pn < (1 << 24) {
+            3
+        } else {
+            4
+        };
+        if out.len() < hdr_len_wo_pn + pn_len {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        let mut tmp = [0u8; 4];
+        packet::encode_pkt_num(pn, pn_len, &mut tmp[..pn_len])?;
+        out[hdr_len_wo_pn..hdr_len_wo_pn + pn_len].copy_from_slice(&tmp[..pn_len]);
+        let header_len = hdr_len_wo_pn + pn_len;
+        let pn_off = hdr_len_wo_pn;
+        let mut off = header_len;
+
+        let (off_after_stream, wrote_stream, emission) =
+            self.maybe_flush_one_writable_stream(out, off, true)?;
+        off = off_after_stream;
+        if !wrote_stream {
+            // Nothing could be staged after all, so return Done rather than
+            // emitting an empty early-data packet.
+            return Err(ConnectionError::Done);
+        }
+
+        // The header-protection sample window must fit inside the ciphertext:
+        // pad short payloads up to the sample boundary plus the AEAD tag.
+        let tag_reserve = crate::transport::packet::AEAD_TAG_LEN;
+        let sample_min = pn_off + 4 + packet::SAMPLE_LEN;
+        let mut target_total = header_len + tag_reserve;
+        if sample_min > target_total {
+            target_total = sample_min;
+        }
+        let frames_min_total = off.saturating_add(tag_reserve);
+        if frames_min_total > target_total {
+            target_total = frames_min_total;
+        }
+        if out.len() < target_total {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        let target_off = target_total - tag_reserve;
+        if off < target_off {
+            frames::write_padding(target_off - off, &mut out[off..])?;
+        }
+
+        trace_send_packet(
+            self.is_server,
+            PacketType::ZeroRTT,
+            space_idx,
+            pn,
+            pn_len,
+            header_len,
+            target_total,
+        );
+
+        let used = {
+            let crypto = self.crypto.read();
+            packet::encrypt_and_protect(
+                &crypto,
+                &mut out[..target_total],
+                header_len,
+                pn,
+                pn_len,
+                PacketType::ZeroRTT,
+            )?
+        };
+        self.advance_send_packet_number(space_idx)?;
+        self.stats.sent += 1;
+        self.stats.sent_bytes += used as u64;
+        self.recovery.on_packet_sent_in_space(
+            recovery::PacketSpace::from_index(space_idx),
+            pn,
+            used,
+            true,
+            true,
+            None,
+            now,
+        );
+        self.bytes_in_flight = self.recovery.bytes_in_flight;
+        self.cwnd = self.recovery.cwnd;
+        if self.bytes_in_flight_started.is_none() {
+            self.bytes_in_flight_started = Some(now);
+        }
+        self.pmtu.on_packet_sent(used, now);
+        if used > self.pmtu.min_mtu() {
+            self.pmtu_above_floor_pns.insert(pn);
+        }
+        if let Some(emission) = emission {
+            self.commit_stream_transmission(emission.id, pn);
+        }
+        self.zero_rtt_sent_pns.insert(pn);
+        if let Some(ledger) = self.wire_ledger.as_mut() {
+            ledger.note_wire_send(now);
+        }
+        Ok((
+            used,
+            SendInfo {
+                at: now,
+                from: self.local_addr,
+                to: self.peer_addr,
+                congestion_controlled: true,
+                path_control: false,
+                bulk_only: false,
+            },
+        ))
+    }
+
     fn account_admitted_short_header(
         &mut self,
         total: usize,
@@ -791,7 +940,7 @@ impl Connection {
 
     /// Atomically ask the ledger to pay `bytes` for a repair datagram.
     /// `true` = paid, the caller may emit; `false` = denied, the caller
-    /// must drop or delay the repair — repairs are never sent over the
+    /// must drop or delay the repair - repairs are never sent over the
     /// cap. Without an installed ledger the spend always succeeds
     /// (off/performance carry no stealth budget).
     pub(crate) fn try_spend_wire_repair(&mut self, bytes: u64) -> bool {
@@ -822,8 +971,8 @@ impl Connection {
 
     /// Ask the persona trace whether a client packet is due now and the
     /// shared budget can pay for it (TODO-1054). Returns the captured wire
-    /// length the PING datagram must be padded to — the caller pads via
-    /// `set_short_header_pad_target` — or `None` to stay silent. Ledgerless
+    /// length the PING datagram must be padded to - the caller pads via
+    /// `set_short_header_pad_target` - or `None` to stay silent. Ledgerless
     /// connections (`off`/`performance`) have no trace and never answer
     /// `Some`.
     pub(crate) fn cover_ping_due(&mut self) -> Option<u64> {
@@ -833,7 +982,7 @@ impl Connection {
     /// Whether an idle-timeout keepalive PING is due (TODO-1054 risk):
     /// when the peer has been silent past `max_idle_timeout/2`, emit one
     /// PING so the connection survives a trace that is quieter than the
-    /// idle horizon. Fires once per silent stretch — the mark re-arms only
+    /// idle horizon. Fires once per silent stretch - the mark re-arms only
     /// when inbound activity resumes. This is a keepalive, not mimicry;
     /// the caller still has to pay it from the wire budget.
     pub(crate) fn idle_keepalive_due(&mut self) -> bool {
@@ -851,7 +1000,7 @@ impl Connection {
     /// Compute stealth padding length given current plaintext payload length and budget.
     ///
     /// - With a `BudgetLedger` installed (TODO-1052): the ledger is the only
-    ///   padding authority — persona-trace classes or fixed cell, capped by
+    ///   padding authority - persona-trace classes or fixed cell, capped by
     ///   the remaining shared allowance.
     /// - `TrafficAnalysisDefense::FullPadding`/`ConstantRate`: always pad to
     ///   the full available budget (no rate gating).
@@ -871,18 +1020,17 @@ impl Connection {
         // TODO-1052: when a wire ledger is installed it is the only padding
         // authority. It replays the persona's captured length classes (or
         // the fixed cell), enforces the shared per-second/burst cap, and
-        // returns 0 when exhausted or when no class fits — the packet
+        // returns 0 when exhausted or when no class fits - the packet
         // then goes out at its natural length. The `stealth_padding_rate`
         // RNG gate is dead under the ledger: the cap is the only throttle.
-        if self.wire_ledger.is_some() {
+        if let Some(ledger) = self.wire_ledger.as_mut() {
             // `stealth_padding_max_size` belongs to the dead strategy
-            // model — under the ledger the allowance and the physical
+            // model - under the ledger the allowance and the physical
             // space left in the datagram are the only bounds.
             let max = budget;
             if max == 0 || !self.config.stealth_padding_enabled {
                 return 0;
             }
-            let ledger = self.wire_ledger.as_mut().expect("checked above");
             return ledger.padding_target(cur_pt_len, max, self.clock.now());
         }
 

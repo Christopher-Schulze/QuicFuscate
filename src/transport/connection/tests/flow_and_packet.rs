@@ -91,6 +91,279 @@ fn outbound_packet_send_rejects_invalid_packet_number_before_mutation() {
     assert_eq!(pair.client.next_send_pn_by_space[2], before);
 }
 
+#[test]
+fn zero_rtt_preflight_rejects_unidirectional_and_server_initiated_streams() {
+    assert!(Connection::preflight_frame_payload(&[0x0A, 0x00, 0x00], PacketType::ZeroRTT).is_ok());
+    assert!(matches!(
+        Connection::preflight_frame_payload(&[0x0A, 0x02, 0x00], PacketType::ZeroRTT),
+        Err(ConnectionError::InvalidFrame)
+    ));
+    assert!(matches!(
+        Connection::preflight_frame_payload(&[0x0A, 0x03, 0x00], PacketType::ZeroRTT),
+        Err(ConnectionError::InvalidFrame)
+    ));
+}
+
+#[test]
+fn zero_rtt_sends_only_explicit_safe_stream_data() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+    use crate::transport::anti_replay::{AntiReplayConfig, StrikeRegister};
+
+    let client_scid = b"early-client-scid";
+    let server_scid = b"early-server-scid";
+    let early_secret = [0x5Au8; 32];
+    let mut client_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    client_config.enable_early_data = true;
+    let mut client =
+        Connection::new_client(client_scid, local(), peer(), client_config).expect("client");
+    client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+    client.pmtu = pmtu_state(false, PmtuPolicy::default());
+    client.enable_tls("0rtt-stream-test").expect("client TLS provider");
+    assert!(!client.zero_rtt_active(), "no resumption ticket means no early keys");
+    {
+        let mut crypto = client.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_write_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &early_secret)
+            .expect("install test early sealer");
+    }
+    assert!(client.zero_rtt_active());
+    client.enable_datagrams(8, 8);
+    client.dgram_send(b"tun-datagram").expect("queue tunnel payload");
+    client.stream_send(4, b"unmarked tunnel stream", true).expect("queue ordinary stream");
+    client
+        .stream_send_replay_safe_0rtt(0, b"safe control", true)
+        .expect("queue replay-safe one-shot stream");
+
+    let mut packet = [0u8; 2048];
+    let (initial_len, _) = client.send(&mut packet).expect("send Initial ClientHello");
+    let (initial_header, _) =
+        crate::transport::packet::parse_header(&packet[..initial_len], client.scid.as_ref().len())
+            .expect("parse Initial flight");
+    assert_eq!(initial_header.ty, crate::transport::PacketType::Initial);
+    assert!(!client.tls_handshake_complete());
+    assert_eq!(client.stats.recv, 0, "the server has not returned its first flight");
+
+    let zero_rtt_len = (0..8)
+        .find_map(|_| match client.send(&mut packet) {
+            Ok((length, _)) => {
+                let (header, _) = crate::transport::packet::parse_header(
+                    &packet[..length],
+                    client.scid.as_ref().len(),
+                )
+                .expect("parse outgoing long header");
+                (header.ty == crate::transport::PacketType::ZeroRTT).then_some(length)
+            }
+            Err(ConnectionError::Done) => None,
+            Err(error) => panic!("unexpected early send failure: {error}"),
+        })
+        .expect("emit a ZeroRTT packet");
+    assert!(!client.tls_handshake_complete());
+    assert_eq!(client.stats.recv, 0, "early data leaves before the server's first response");
+    assert_eq!(client.dgram_send_queue_len(), 1, "DATAGRAM TUN payload stays queued");
+    let zero_rtt_packet = packet[..zero_rtt_len].to_vec();
+    let first_zero_rtt_pn = *client.zero_rtt_sent_pns.iter().next().expect("first early PN");
+    client.lose_stream_transmission_packet(first_zero_rtt_pn);
+    let replay_len = (0..8)
+        .find_map(|_| match client.send(&mut packet) {
+            Ok((length, _)) => {
+                let (header, _) = crate::transport::packet::parse_header(
+                    &packet[..length],
+                    client.scid.as_ref().len(),
+                )
+                .expect("parse retransmitted early packet");
+                (header.ty == PacketType::ZeroRTT).then_some(length)
+            }
+            Err(ConnectionError::Done) => None,
+            Err(error) => panic!("unexpected early retransmission failure: {error}"),
+        })
+        .expect("retransmit the same replay-safe frame in 0-RTT");
+    let replay_packet = packet[..replay_len].to_vec();
+    let replay_zero_rtt_pn = client
+        .zero_rtt_sent_pns
+        .iter()
+        .copied()
+        .find(|pn| *pn != first_zero_rtt_pn)
+        .expect("second early PN");
+    assert_ne!(first_zero_rtt_pn, replay_zero_rtt_pn);
+    assert_eq!(client.stats.recv, 0, "both early packets leave before the first response");
+
+    let register = std::sync::Arc::new(StrikeRegister::new(AntiReplayConfig::default()));
+    let mut server_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    server_config.enable_early_data = true;
+    server_config.set_strike_register(std::sync::Arc::clone(&register));
+    let mut server =
+        Connection::new_server(server_scid, peer(), local(), server_config).expect("server");
+    server.set_destination_cid(ConnectionId::from_ref(client_scid));
+    server.pmtu = pmtu_state(false, PmtuPolicy::default());
+    {
+        let mut crypto = server.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_read_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &early_secret)
+            .expect("install matching early opener");
+    }
+    let recv_info = RecvInfo { from: local(), to: peer(), ecn: None };
+    let mut accepted_packet = zero_rtt_packet.clone();
+    server
+        .recv(&mut accepted_packet, &recv_info)
+        .expect("open early packet with anti-replay protection");
+    assert!(server.take_zero_rtt_stream(0));
+    assert!(!server.take_zero_rtt_stream(0));
+
+    let mut received = [0u8; 32];
+    let (received_len, fin) = server.stream_recv(0, &mut received).expect("safe stream data");
+    assert_eq!(&received[..received_len], b"safe control");
+    assert!(fin);
+    assert!(matches!(
+        server.stream_recv(4, &mut received),
+        Err(ConnectionError::InvalidStreamState(4))
+    ));
+    let mut replay_copy = replay_packet.clone();
+    server
+        .recv(&mut replay_copy, &recv_info)
+        .expect("reject matching early payload at a distinct packet number");
+    assert_eq!(server.pkt_spaces[2].largest_recv, Some(first_zero_rtt_pn));
+    assert!(!server.pkt_spaces[2].contains(replay_zero_rtt_pn));
+    assert!(!server.take_zero_rtt_stream(0));
+    assert_eq!(register.len(), 1);
+
+    let mut unprotected_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    unprotected_config.enable_early_data = true;
+    let mut unprotected = Connection::new_server(server_scid, peer(), local(), unprotected_config)
+        .expect("unprotected");
+    unprotected.set_destination_cid(ConnectionId::from_ref(client_scid));
+    {
+        let mut crypto = unprotected.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_read_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &early_secret)
+            .expect("install unprotected test opener");
+    }
+    let mut unprotected_packet = zero_rtt_packet.clone();
+    unprotected
+        .recv(&mut unprotected_packet, &recv_info)
+        .expect("missing replay register must drop early data");
+    assert!(unprotected.pkt_spaces[2].largest_recv.is_none());
+    assert_eq!(unprotected.zero_rtt_received_bytes, 0);
+    assert!(matches!(
+        unprotected.stream_recv(0, &mut received),
+        Err(ConnectionError::InvalidStreamState(0))
+    ));
+
+    let limited_register = std::sync::Arc::new(StrikeRegister::new(AntiReplayConfig {
+        max_early_data_size: 1,
+        ..AntiReplayConfig::default()
+    }));
+    let mut limited_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    limited_config.enable_early_data = true;
+    limited_config.set_strike_register(std::sync::Arc::clone(&limited_register));
+    let mut limited =
+        Connection::new_server(server_scid, peer(), local(), limited_config).expect("limited");
+    limited.set_destination_cid(ConnectionId::from_ref(client_scid));
+    {
+        let mut crypto = limited.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_read_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &early_secret)
+            .expect("install limited test opener");
+    }
+    let mut limited_packet = zero_rtt_packet.clone();
+    limited.recv(&mut limited_packet, &recv_info).expect("over-limit early data must be dropped");
+    assert!(limited.pkt_spaces[2].largest_recv.is_none());
+    assert_eq!(limited.zero_rtt_received_bytes, 0);
+    assert!(limited_register.is_empty());
+
+    let saturated_register = std::sync::Arc::new(StrikeRegister::new(AntiReplayConfig {
+        max_entries: 1,
+        ..AntiReplayConfig::default()
+    }));
+    let occupied = StrikeRegister::compute_fingerprint(b"occupied", b"occupied", b"occupied");
+    assert!(saturated_register.check_and_insert(&occupied, std::time::Instant::now()));
+    let mut saturated_config = Config::new_with_version(PROTOCOL_VERSION).unwrap();
+    saturated_config.enable_early_data = true;
+    saturated_config.set_strike_register(std::sync::Arc::clone(&saturated_register));
+    let mut saturated =
+        Connection::new_server(server_scid, peer(), local(), saturated_config).expect("saturated");
+    saturated.set_destination_cid(ConnectionId::from_ref(client_scid));
+    {
+        let mut crypto = saturated.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_read_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &early_secret)
+            .expect("install saturated test opener");
+    }
+    let mut saturated_packet = zero_rtt_packet.clone();
+    saturated
+        .recv(&mut saturated_packet, &recv_info)
+        .expect("saturated register must drop early data");
+    assert!(saturated.pkt_spaces[2].largest_recv.is_none());
+    assert_eq!(saturated.zero_rtt_received_bytes, 0);
+    assert_eq!(saturated_register.len(), 1);
+
+    client.finish_zero_rtt(false);
+    client.tls_provider = None;
+    let one_rtt_secret = [0xA7u8; 32];
+    client
+        .crypto
+        .write()
+        .set_write_secret(Level::OneRTT, Algorithm::AES128_GCM, &one_rtt_secret)
+        .expect("install fallback sealer");
+    client.sync_1rtt();
+    unprotected.enable_datagrams(8, 8);
+    unprotected
+        .crypto
+        .write()
+        .set_read_secret(Level::OneRTT, Algorithm::AES128_GCM, &one_rtt_secret)
+        .expect("install fallback opener");
+    unprotected.sync_1rtt();
+
+    let (fallback_len, _) = client.send(&mut packet).expect("send rejected stream as 1-RTT");
+    let (fallback_header, _) =
+        crate::transport::packet::parse_header(&packet[..fallback_len], client.scid.as_ref().len())
+            .expect("parse 1-RTT fallback");
+    assert_eq!(fallback_header.ty, PacketType::Short);
+    unprotected
+        .recv(&mut packet[..fallback_len], &recv_info)
+        .expect("open 1-RTT fallback after early-data rejection");
+    let (received_len, fin) =
+        unprotected.stream_recv(0, &mut received).expect("read retransmitted stream");
+    assert_eq!(&received[..received_len], b"safe control");
+    assert!(fin);
+    assert_eq!(unprotected.dgram_recv_queue_len(), 1);
+}
+
+#[test]
+fn rejected_zero_rtt_transmission_requeues_as_one_rtt() {
+    let mut pair = bench_paired_1rtt_connections();
+    let payload = b"fallback control stream";
+    let transmission_id = pair
+        .client
+        .stage_stream_transmission(0, 0, std::sync::Arc::from(&payload[..]), true, true)
+        .expect("stage early transmission");
+    pair.client.commit_stream_transmission(transmission_id, 17);
+    pair.client.zero_rtt_sent_pns.insert(17);
+
+    pair.client.finish_zero_rtt(false);
+    assert!(pair.client.zero_rtt_sent_pns.is_empty());
+    assert!(pair.client.stream_retransmit_queue.contains(&transmission_id));
+
+    let mut packet = [0u8; 1500];
+    let (packet_len, _) = pair.client.send(&mut packet).expect("send 1-RTT fallback");
+    let (header, _) = crate::transport::packet::parse_header(
+        &packet[..packet_len],
+        pair.client.scid.as_ref().len(),
+    )
+    .expect("parse fallback packet");
+    assert_eq!(header.ty, crate::transport::PacketType::Short);
+    pair.server.recv(&mut packet[..packet_len], &pair.recv_info).expect("open fallback packet");
+
+    let mut received = [0u8; 64];
+    let (received_len, fin) = pair.server.stream_recv(0, &mut received).expect("read fallback");
+    assert_eq!(&received[..received_len], payload);
+    assert!(fin);
+}
+
 // ---- Connection Close Frame Generation -------------------------------
 
 #[test]

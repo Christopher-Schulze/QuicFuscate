@@ -3,31 +3,22 @@
 use quicfuscate::qftls::{profile_from_fingerprint, TlsProfile};
 use quicfuscate::stealth::{BrowserProfile, FingerprintProfile, OsProfile};
 
-fn assert_no_chacha(cipher_suites: &[u16]) {
-    let banned = [0x1303u16, 0xCCA8u16, 0xCCA9u16];
-    for cs in banned {
-        assert!(!cipher_suites.contains(&cs), "cipher suite {:#x} must be filtered out", cs);
-    }
-}
-
-fn assert_sorted_by_policy(cipher_suites: &[u16]) {
-    let key = |cs: u16| match cs {
-        0x1301 | 0x1302 => 0,
-        0xC02B | 0xC02F | 0xC02C | 0xC030 => 1,
-        _ => 2,
-    };
-    for w in cipher_suites.windows(2) {
+fn assert_tls13_only(cipher_suites: &[u16]) {
+    assert!(!cipher_suites.is_empty(), "TLS 1.3 suite list must not be empty");
+    for (index, suite) in cipher_suites.iter().enumerate() {
         assert!(
-            key(w[0]) <= key(w[1]),
-            "cipher suites not ordered by policy: {:#x} before {:#x}",
-            w[0],
-            w[1]
+            matches!(*suite, 0x1301 | 0x1302 | 0x1303),
+            "non-TLS-1.3 suite {suite:#x} is not in the browser fixture"
+        );
+        assert!(
+            !cipher_suites[..index].contains(suite),
+            "cipher suite {suite:#x} must not be duplicated"
         );
     }
 }
 
 #[test]
-fn chrome_family_profiles_are_h3_and_aes_only() {
+fn chrome_family_profiles_are_h3_and_tls13_only() {
     let profiles = [
         TlsProfile::chrome_130(),
         TlsProfile::edge_130(),
@@ -38,7 +29,7 @@ fn chrome_family_profiles_are_h3_and_aes_only() {
     for p in profiles {
         assert!(!p.alpn_protocols.is_empty(), "ALPN list must not be empty");
         assert_eq!(p.alpn_protocols[0], "h3");
-        assert_no_chacha(&p.cipher_suites);
+        assert_tls13_only(&p.cipher_suites);
     }
 }
 
@@ -50,7 +41,7 @@ fn firefox_and_safari_profiles_keep_policy() {
     for p in [firefox, safari] {
         assert!(!p.alpn_protocols.is_empty(), "ALPN list must not be empty");
         assert_eq!(p.alpn_protocols[0], "h3");
-        assert_no_chacha(&p.cipher_suites);
+        assert_tls13_only(&p.cipher_suites);
     }
 }
 
@@ -62,10 +53,9 @@ fn brave_profile_disables_ech_and_grease() {
 }
 
 #[test]
-fn fingerprint_profile_enforces_cipher_policy() {
+fn fingerprint_profile_preserves_captured_cipher_order() {
     let fp = FingerprintProfile::new(BrowserProfile::Chrome, OsProfile::Windows);
     let p = profile_from_fingerprint(&fp);
     assert_eq!(p.alpn_protocols[0], "h3");
-    assert_no_chacha(&p.cipher_suites);
-    assert_sorted_by_policy(&p.cipher_suites);
+    assert_eq!(p.cipher_suites.as_slice(), &[0x1301, 0x1302, 0x1303]);
 }

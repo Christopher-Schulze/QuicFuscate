@@ -75,7 +75,7 @@ First-pass keep/replace recommendations from 2026-09-21 (not executed):
 - Selector/planner: keep.
 - First-party AEAD SIMD: same feature as the impl.
 - FEC and stealth pad/timing/persona: keep. Pipeline stays pad -> AEAD+HP -> timing -> FEC.
-- 0-RTT: stay off until TODO-1031.
+- 0-RTT: remains default-off; opt-in is rustls + strike only (TODO-1031 DONE), never private AEAD.
 - XOR: stay gone.
 
 Do not implement bakeoff-gated replacements until TODO-1044. TODO-1033 through TODO-1036 may start only when explicitly requested. They do not wait on the bakeoff.
@@ -93,7 +93,7 @@ Do not implement bakeoff-gated replacements until TODO-1044. TODO-1033 through T
 | ChaCha20-Poly1305 + TLS-Cover | live path is ring (TODO-1035). |
 | rustls crypto provider | stay ring. `rustls-aws-lc` is an explicit feature (TODO-1036). |
 | Secret-schedule compat arms | `install_0rtt_keys`, `install_*_1rtt_secret`, `key_update_1rtt_*` now call `standard_aes128_gcm`. They cannot silently install AEGIS/MORUS. Private install stays `select_private_packet_data_aead`. |
-| 0-RTT | stay off. TODO-1031 remains open. rustls + strike only, never private AEAD. |
+| 0-RTT | default-off; explicit opt-in uses rustls + strike only (TODO-1031 DONE), never private AEAD. |
 | FEC | keep. Encode runs on the sealed datagram from `conn.send` (`produce_one_queued`). FEC never sees plaintext. |
 | Stealth pad/timing/persona/probe/REALITY | keep. Padding frames are inside QUIC before AEAD. Private AEAD is not a stealth upgrade. |
 | XOR on sealed packets | stay gone. |

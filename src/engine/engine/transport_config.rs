@@ -90,7 +90,7 @@ pub(super) fn build_runtime_transport_config(config: &EngineConfig) -> Result<Co
         })
         .map_err(|error| EngineError::Config(format!("DPLPMTUD policy invalid: {error}")))?;
 
-    if config.connection.enable_0rtt {
+    if config.connection.enable_0rtt || config.transport.enable_early_data {
         transport.enable_early_data();
     }
     transport.set_disable_active_migration(!config.connection.enable_migration);

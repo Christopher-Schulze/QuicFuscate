@@ -104,6 +104,7 @@ pub(super) struct StreamTransmission {
     pub(super) offset: u64,
     pub(super) data: Arc<[u8]>,
     pub(super) fin: bool,
+    pub(super) early_data: bool,
     pub(super) queued: bool,
     pub(super) active_packet: Option<u64>,
     pub(super) lost_packets: VecDeque<u64>,

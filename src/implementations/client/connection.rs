@@ -151,7 +151,7 @@ impl ClientConnection {
                 qkey_token,
                 qkey_initial_token,
                 None,
-                // Direct dials target the dedicated endpoint itself — ECH
+                // Direct dials target the dedicated endpoint itself - ECH
                 // would conceal nothing (the IP is already unique to this
                 // customer) and is never applied here (TODO-1064).
                 None,
@@ -280,7 +280,7 @@ impl ClientConnection {
             // gaps that stall tunneled flows (TODO-895 diagnosis).
             (hop_count > 1).then_some(NESTED_CIRCUIT_PTO_BACKOFF_CAP),
             // ECH only reaches the hop whose own DNS HTTPS record advertised
-            // it — the client resolver injects `ech_config_list` solely on the
+            // it - the client resolver injects `ech_config_list` solely on the
             // shared outer hop (TODO-1064); inner hops keep `None`.
             hop.ech_config_list.as_deref(),
         )
@@ -525,8 +525,7 @@ impl ClientConnection {
             );
         }
 
-        // Enable early data if configured
-        if config.transport.enable_early_data {
+        if config.connection.enable_0rtt || config.transport.enable_early_data {
             tc.enable_early_data();
         }
 

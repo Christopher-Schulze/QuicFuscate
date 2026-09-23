@@ -1,6 +1,8 @@
 #![cfg(feature = "rust-tests")]
 
-use quicfuscate::optimize::telemetry::{ZERO_RTT_ACCEPT_TOTAL, ZERO_RTT_REPLAY_REJECT_TOTAL};
+use quicfuscate::optimize::telemetry::{
+    ZERO_RTT_ACCEPT_TOTAL, ZERO_RTT_POLICY_REJECT_TOTAL, ZERO_RTT_REPLAY_REJECT_TOTAL,
+};
 use quicfuscate::transport::anti_replay::{AntiReplayConfig, StrikeRegister};
 use std::time::{Duration, Instant};
 
@@ -57,31 +59,36 @@ fn ttl_expiry_allows_reinsert() {
 }
 
 #[test]
-fn capacity_eviction_works() {
+fn capacity_saturation_fails_closed_until_expiry() {
     let cfg = AntiReplayConfig {
-        max_ticket_age: Duration::from_secs(60),
+        max_ticket_age: Duration::from_millis(50),
         max_entries: 3,
-        cleanup_interval: Duration::from_secs(60),
+        cleanup_interval: Duration::ZERO,
         max_early_data_size: 16384,
     };
     let reg = StrikeRegister::new(cfg);
 
     let now = Instant::now();
-    // Fill to capacity
+    let mut fingerprints = Vec::new();
+    // Fill to configured capacity.
     for i in 0..3u8 {
-        let fp = StrikeRegister::compute_fingerprint(&[i], &[i], &[i]);
-        assert!(reg.check_and_insert(&fp, now + Duration::from_millis(u64::from(i))));
+        let fingerprint = StrikeRegister::compute_fingerprint(&[i], &[i], &[i]);
+        assert!(reg.check_and_insert(&fingerprint, now + Duration::from_millis(u64::from(i))));
+        fingerprints.push(fingerprint);
     }
     assert_eq!(reg.len(), 3);
 
-    // 4th insertion evicts the oldest (i=0)
-    let fp_new = StrikeRegister::compute_fingerprint(b"new", b"new", b"new");
-    assert!(reg.check_and_insert(&fp_new, now + Duration::from_millis(10)));
+    // Saturation rejects new fingerprints until the replay window expires.
+    let overflow = StrikeRegister::compute_fingerprint(b"new", b"new", b"new");
+    assert!(!reg.check_and_insert(&overflow, now + Duration::from_millis(10)));
+    assert!(!reg.check_and_insert(&fingerprints[0], now + Duration::from_millis(11)));
     assert_eq!(reg.len(), 3);
 
-    // Evicted entry (i=0) should be insertable again
-    let fp_evicted = StrikeRegister::compute_fingerprint(&[0], &[0], &[0]);
-    assert!(reg.check_and_insert(&fp_evicted, now + Duration::from_millis(11)));
+    // Expiration cleanup releases capacity without forgetting live fingerprints.
+    let expired_at = now + Duration::from_millis(60);
+    reg.cleanup(expired_at);
+    assert!(reg.is_empty());
+    assert!(reg.check_and_insert(&overflow, expired_at));
 }
 
 #[test]
@@ -155,17 +162,16 @@ fn telemetry_counters_are_accessible() {
     // These counters are incremented by connection.rs recv() path, not by StrikeRegister
     // directly. Here we just verify the counters are importable and monotonically readable.
     let accept_before = ZERO_RTT_ACCEPT_TOTAL.get();
-    let reject_before = ZERO_RTT_REPLAY_REJECT_TOTAL.get();
+    let replay_before = ZERO_RTT_REPLAY_REJECT_TOTAL.get();
+    let policy_before = ZERO_RTT_POLICY_REJECT_TOTAL.get();
 
-    // Counters should be non-negative (they are u64 atomics)
     assert!(accept_before < u64::MAX);
-    assert!(reject_before < u64::MAX);
+    assert!(replay_before < u64::MAX);
+    assert!(policy_before < u64::MAX);
 
-    // Verify monotonicity: reading again should return >= previous value
-    let accept_after = ZERO_RTT_ACCEPT_TOTAL.get();
-    let reject_after = ZERO_RTT_REPLAY_REJECT_TOTAL.get();
-    assert!(accept_after >= accept_before);
-    assert!(reject_after >= reject_before);
+    assert!(ZERO_RTT_ACCEPT_TOTAL.get() >= accept_before);
+    assert!(ZERO_RTT_REPLAY_REJECT_TOTAL.get() >= replay_before);
+    assert!(ZERO_RTT_POLICY_REJECT_TOTAL.get() >= policy_before);
 }
 
 #[test]

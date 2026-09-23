@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct AntiReplaySection {
     /// Enable 0-RTT anti-replay protection (server mode only).
     pub enabled: bool,
-    /// Maximum ticket age in seconds before 0-RTT is rejected (default: 10).
+    /// Replay-fingerprint retention window in seconds (default: 10).
+    /// Rustls validates ticket freshness.
     pub max_ticket_age_secs: u64,
     /// Maximum entries in the strike register (default: 100000,
     /// hard bound: [`crate::MAX_STRIKE_ENTRIES`]).

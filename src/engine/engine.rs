@@ -373,7 +373,7 @@ impl QuicFuscateEngine {
                             super::config::StealthMode::StealthMax
                         );
                     let http3_disable = !self.config.stealth.enable_http3_masquerading;
-                    let launch = PreparedStandaloneLaunch::new_headless_with_runtime_stealth(
+                    let mut launch = PreparedStandaloneLaunch::new_headless_with_runtime_stealth(
                         transport,
                         fec_cfg,
                         opt_params,
@@ -392,6 +392,7 @@ impl QuicFuscateEngine {
                         },
                         tun_enable,
                     );
+                    launch.set_anti_replay_section(self.config.anti_replay.clone());
                     let engine_config = self.config.clone();
                     let server_opt_params = build_server_optimize_config(&self.config)?;
                     let runtime_clock = self.clock.clone();
@@ -1470,7 +1471,7 @@ impl QuicFuscateEngine {
 /// Fail-safe direction: only positively identified reachability failures
 /// return true. A TLS alert, remote close, control-plane rejection, or a
 /// renamed diagnostic string degrades to `false` and never triggers the
-/// fallback — the asymmetry is deliberate, since a fallback after a
+/// fallback - the asymmetry is deliberate, since a fallback after a
 /// peer-visible refusal only adds a second fingerprint.
 fn dial_failure_is_reachability(error: &EngineError) -> bool {
     match error {

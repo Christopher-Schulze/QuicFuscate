@@ -117,7 +117,7 @@ Numeric message and algorithm identifiers must be centrally owned and collision-
 - Reject epoch rollback, skip beyond the allowed window, duplicate update, and conflicting direction state.
 - Connection migration retains the connection-bound advanced state only when the existing QUIC connection survives.
 - A replacement connection, reconnect, or resumed TLS connection performs a fresh authenticated private negotiation.
-- 0-RTT stays standards-only and disabled. Advanced 0-RTT is out of scope until replay-safe semantics have a separate approved task.
+- 0-RTT stays standards-only, default-off, and opt-in. Advanced 0-RTT is out of scope. TODO-1031 owns the replay-safe transport path; the product H3/MASQUE/TUN path remains post-handshake.
 
 ## Stealth Contract
 

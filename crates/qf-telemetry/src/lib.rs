@@ -57,6 +57,10 @@ pub static QUIC_HANDSHAKE_AES256_KEY_INSTALLS: Counter = Counter::new();
 pub static QUIC_ONE_RTT_AES128_KEY_INSTALLS: Counter = Counter::new();
 /// rustls 1-RTT key installs negotiated as TLS_AES_256_GCM_SHA384.
 pub static QUIC_ONE_RTT_AES256_KEY_INSTALLS: Counter = Counter::new();
+/// rustls 0-RTT key installs negotiated as TLS_AES_128_GCM_SHA256.
+pub static QUIC_ZERO_RTT_AES128_KEY_INSTALLS: Counter = Counter::new();
+/// rustls 0-RTT key installs negotiated as TLS_AES_256_GCM_SHA384.
+pub static QUIC_ZERO_RTT_AES256_KEY_INSTALLS: Counter = Counter::new();
 
 /// Total HTTP/3 frames processed.
 pub static H3_FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -247,8 +251,10 @@ pub static DATA_AEAD_BACKEND_AEGIS_L_TOTAL: Counter = Counter::new();
 
 /// Accepted 0-RTT early data attempts.
 pub static ZERO_RTT_ACCEPT_TOTAL: Counter = Counter::new();
-/// Rejected 0-RTT replays caught by the strike register.
+/// Rejected 0-RTT packets from duplicate or saturated strike-register state.
 pub static ZERO_RTT_REPLAY_REJECT_TOTAL: Counter = Counter::new();
+/// Rejected 0-RTT packets due to missing protection or a connection byte limit.
+pub static ZERO_RTT_POLICY_REJECT_TOTAL: Counter = Counter::new();
 
 /// Total compression eligibility decisions.
 pub static COMPRESS_DECISIONS_TOTAL: Counter = Counter::new();

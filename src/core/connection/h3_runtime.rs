@@ -7,7 +7,10 @@ fn masque_trace_enabled() -> bool {
 
 impl QuicFuscateConnection {
     fn ensure_http3_ready_for_poll(&mut self, context: &str) -> bool {
-        if self.h3_conn.is_none() && self.conn.is_established() {
+        if self.h3_conn.is_none()
+            && self.conn.is_established()
+            && self.conn.tls_handshake_complete()
+        {
             if let Err(e) = self.init_http3() {
                 debug!("Deferred HTTP/3 init failed during {}: {:?}", context, e);
             }
@@ -46,7 +49,7 @@ impl QuicFuscateConnection {
         headers
     }
 
-    /// Encoded byte estimate for a header list — the cover delta the wire
+    /// Encoded byte estimate for a header list - the cover delta the wire
     /// ledger is charged when persona headers ride an outer-hop request.
     pub(super) fn h3_header_list_bytes(headers: &[crate::transport::h3::Header]) -> u64 {
         headers.iter().map(|h| h.name().len() as u64 + h.value().len() as u64 + 8).sum()
@@ -110,6 +113,25 @@ impl QuicFuscateConnection {
                 Self::emit_webtransport_cover_session(h3, &mut self.conn, &self.stealth_manager);
                 match h3.poll(&mut self.conn) {
                     Ok(Some((sid, crate::transport::h3::Event::Headers { list, .. }))) => {
+                        let rejected_early_request =
+                            if self.conn.is_server() && self.conn.take_zero_rtt_stream(sid) {
+                                self.rejected_early_h3_streams.insert(sid);
+                                h3.send_response(
+                                    &mut self.conn,
+                                    sid,
+                                    &[crate::transport::h3::Header::new(b":status", b"425")],
+                                    true,
+                                )?;
+                                crate::telemetry!(
+                                    crate::optimize::telemetry::ZERO_RTT_POLICY_REJECT_TOTAL.inc()
+                                );
+                                true
+                            } else {
+                                self.rejected_early_h3_streams.contains(&sid)
+                            };
+                        if rejected_early_request {
+                            continue;
+                        }
                         let webtransport_ready = if h3.webtransport_session_pending(sid)
                             && self.conn.is_server()
                         {
@@ -246,6 +268,17 @@ impl QuicFuscateConnection {
                         on_headers(sid, &list);
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Data))) => {
+                        if self.rejected_early_h3_streams.contains(&sid) {
+                            let Some(buf) = self.h3_body_buffer.as_mut() else {
+                                return Err(crate::error::ConnectionError::InvalidState);
+                            };
+                            while let Ok(read) = h3.recv_body(&mut self.conn, sid, buf) {
+                                if read == 0 {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
                         let Some(buf) = self.h3_body_buffer.as_mut() else {
                             return Err(crate::error::ConnectionError::InvalidState);
                         };
@@ -301,6 +334,9 @@ impl QuicFuscateConnection {
                         sid,
                         crate::transport::h3::Event::MasqueCapsule { capsule_type, mut payload },
                     ))) => {
+                        if self.rejected_early_h3_streams.contains(&sid) {
+                            continue;
+                        }
                         let binding = self
                             .masque_local_flows
                             .get(&(sid / 4))
@@ -319,6 +355,7 @@ impl QuicFuscateConnection {
                         );
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Reset(err)))) => {
+                        self.rejected_early_h3_streams.remove(&sid);
                         self.h3_tunnel_rx.remove(&sid);
                         self.h3_tunnel_response_started.remove(&sid);
                         self.masque_peer_flows.retain(|_, flow| flow.stream_id != sid);
@@ -340,6 +377,7 @@ impl QuicFuscateConnection {
                         }
                     }
                     Ok(Some((sid, crate::transport::h3::Event::Finished))) => {
+                        self.rejected_early_h3_streams.remove(&sid);
                         self.h3_tunnel_rx.remove(&sid);
                         self.h3_tunnel_response_started.remove(&sid);
                         self.masque_peer_flows.retain(|_, flow| flow.stream_id != sid);
@@ -394,7 +432,7 @@ impl QuicFuscateConnection {
     /// Emits the next outer-hop cover request once the weighted scheduler
     /// says one is due. Headers come from the persona fixture via
     /// `get_http3_header_list` (one code path) and the encoded delta is paid
-    /// from the shared wire budget — a denied slot is consumed, never
+    /// from the shared wire budget - a denied slot is consumed, never
     /// replayed (TODO-1055).
     fn emit_due_cover_headers(
         h3: &mut crate::transport::h3::Connection,
@@ -423,7 +461,7 @@ impl QuicFuscateConnection {
 
     /// Opens the bounded WebTransport cover session once per connection on
     /// personas that negotiate it (StealthMax / intelligent level >= 2). The
-    /// Extended CONNECT targets a cover authority — an outer-hop request —
+    /// Extended CONNECT targets a cover authority - an outer-hop request -
     /// so its header bytes are paid from the shared wire budget (TODO-1055).
     fn emit_webtransport_cover_session(
         h3: &mut crate::transport::h3::Connection,
@@ -774,6 +812,9 @@ impl QuicFuscateConnection {
 
 impl QuicFuscateConnection {
     pub fn init_http3(&mut self) -> Result<(), crate::transport::h3::Error> {
+        if !self.conn.is_established() || !self.conn.tls_handshake_complete() {
+            return Err(crate::transport::h3::Error::Done);
+        }
         if self.h3_conn.is_none() {
             let mut h3_cfg = crate::transport::h3::Config::new()
                 .map_err(|_| crate::transport::h3::Error::InternalError)?;

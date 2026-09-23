@@ -41,7 +41,25 @@ fn private_packet_boundary_selection_is_deterministic_and_fail_closed() {
 
 #[test]
 fn authenticated_private_owner_installs_exact_material_and_preserves_standard_hp() {
+    use crate::crypto::aead::{AeadOpen, AeadSeal};
+
     let mut crypto = CryptoContext::default();
+    let early_secret = [0x34u8; 32];
+    crypto.set_zero_rtt_enabled(true);
+    crate::crypto::aead::KeyScheduleHooks::set_read_secret(
+        &mut crypto,
+        crate::crypto::aead::Level::ZeroRTT,
+        crate::crypto::aead::Algorithm::AES128_GCM,
+        &early_secret,
+    )
+    .expect("early read secret");
+    crate::crypto::aead::KeyScheduleHooks::set_write_secret(
+        &mut crypto,
+        crate::crypto::aead::Level::ZeroRTT,
+        crate::crypto::aead::Algorithm::AES128_GCM,
+        &early_secret,
+    )
+    .expect("early write secret");
     let standard_secret = [0x42u8; 32];
     crate::crypto::aead::KeyScheduleHooks::set_read_secret(
         &mut crypto,
@@ -79,6 +97,36 @@ fn authenticated_private_owner_installs_exact_material_and_preserves_standard_hp
         snapshot.one_rtt.header_protection_owner,
         crate::qftls::PacketProtectionOwner::TransportStandard
     );
+    assert_eq!(
+        snapshot.zero_rtt.packet_aead_owner,
+        crate::qftls::PacketProtectionOwner::RustlsStandard
+    );
+    assert_eq!(
+        snapshot.zero_rtt.header_protection_owner,
+        crate::qftls::PacketProtectionOwner::RustlsStandard
+    );
+    assert_eq!(
+        snapshot.zero_rtt.standard_cipher_suite,
+        Some(crate::qftls::StandardCipherSuite::Aes128GcmSha256)
+    );
+    let early_plaintext = b"zero-rtt-stays-standard";
+    let mut early_packet =
+        vec![0u8; early_plaintext.len() + crate::transport::packet::AEAD_TAG_LEN];
+    early_packet[..early_plaintext.len()].copy_from_slice(early_plaintext);
+    let early_sealed = crypto
+        .seal_0rtt
+        .as_ref()
+        .expect("standard early sealer remains installed")
+        .seal_with_u64_counter(4, b"early-aad", &mut early_packet, early_plaintext.len(), None)
+        .expect("seal with standard early key");
+    assert_eq!(early_sealed, early_packet.len());
+    let early_opened = crypto
+        .open_0rtt
+        .as_ref()
+        .expect("standard early opener remains installed")
+        .open_with_u64_counter(4, b"early-aad", &mut early_packet)
+        .expect("open with standard early key");
+    assert_eq!(&early_packet[..early_opened], early_plaintext);
     assert_eq!(crypto.private_write_boundary_1rtt, Some(10));
     assert_eq!(crypto.private_read_boundary_1rtt, Some(20));
     assert!(matches!(crypto.key_update_1rtt_write(), Err(ConnectionError::KeyUpdateError)));

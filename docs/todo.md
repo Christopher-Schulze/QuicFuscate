@@ -396,11 +396,11 @@
 - Detail: `docs/todo/todo-1029-omega-pcap-private-aead.md`
 
 ### TODO-1030 - Custom-vs-standard systems audit (crypto, stealth, FEC, 0-RTT)
-- DONE. Keep/replace record is in the detail file. Ship default is `packet_protection_mode=standard`. Opt-in post-auth owner is S-AEGIS. TODO-1031 stays open.
+- DONE. Keep/replace record is in the detail file. Ship default is `packet_protection_mode=standard`. Opt-in post-auth owner is S-AEGIS. TODO-1031 is closed with opt-in rustls-standard 0-RTT; the ship default remains off.
 - Detail: `docs/todo/todo-1030-custom-vs-standard-systems-audit.md`
 
-### TODO-1031 - Later rustls-standard 0-RTT investigation (never private AEAD)
-- OPEN. Do not implement now. rustls PacketKey + strike register only. Private-AEAD 0-RTT out of scope.
+### TODO-1031 - Rustls-standard 0-RTT transport path (never private AEAD)
+- DONE. Opt-in rustls-standard 0-RTT remains default-off and never uses private AEAD. Only complete, explicitly replay-safe client bidirectional streams are admitted; H3/MASQUE/TUN and DATAGRAM remain post-handshake/1-RTT. Shared stateful tickets and fail-closed anti-replay, packet-level fallback, and H3 425 body draining are tested; no reconnect-latency or fingerprint gain is claimed.
 - Detail: `docs/todo/todo-1031-later-rustls-0rtt-investigation.md`
 
 ### TODO-1032 - Same-API AEAD bakeoff parent program

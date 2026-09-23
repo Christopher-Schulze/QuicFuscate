@@ -6,6 +6,20 @@ fn test_connection() -> QuicFuscateConnection {
 
 fn test_connection_with(stealth: StealthConfig) -> QuicFuscateConnection {
     let pair = crate::transport::connection::bench_paired_1rtt_connections();
+    wrap_test_connection(
+        pair.client,
+        "127.0.0.1:29101".parse().unwrap(),
+        "127.0.0.1:29102".parse().unwrap(),
+        stealth,
+    )
+}
+
+fn wrap_test_connection(
+    conn: crate::transport::connection::Connection,
+    local_addr: std::net::SocketAddr,
+    peer_addr: std::net::SocketAddr,
+    stealth: StealthConfig,
+) -> QuicFuscateConnection {
     let optimization_manager = Arc::new(OptimizationManager::from_cfg(OptimizeConfig::default()));
     let stealth_manager = Arc::new(StealthManager::new(
         stealth,
@@ -14,9 +28,9 @@ fn test_connection_with(stealth: StealthConfig) -> QuicFuscateConnection {
     ));
     QuicFuscateConnection::new(ConnectionParams {
         clock: crate::time_source::ProtocolClock::default(),
-        conn: Box::new(pair.client),
-        local_addr: "127.0.0.1:29101".parse().unwrap(),
-        peer_addr: "127.0.0.1:29102".parse().unwrap(),
+        conn: Box::new(conn),
+        local_addr,
+        peer_addr,
         host_header: String::new(),
         sni_host: None,
         qkey_auth_token_hex: None,
@@ -28,6 +42,84 @@ fn test_connection_with(stealth: StealthConfig) -> QuicFuscateConnection {
         private_packet_protection_family: None,
         private_protocol_shape: crate::qftls::PrivateProtocolShape::canonical(),
     })
+}
+
+fn test_tls_connection_pair(
+    client_stealth: StealthConfig,
+    server_stealth: StealthConfig,
+) -> (QuicFuscateConnection, QuicFuscateConnection) {
+    let client_addr = "127.0.0.1:29101".parse().unwrap();
+    let server_addr = "127.0.0.1:29102".parse().unwrap();
+    let client_scid = b"core-client-scid";
+    let server_scid = b"core-server-scid";
+    let mut client_config =
+        crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+            .expect("client transport config");
+    client_config.verify_peer = false;
+    let mut server_config =
+        crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+            .expect("server transport config");
+    server_config.verify_peer = false;
+
+    let mut client_transport = crate::transport::Connection::new_client(
+        client_scid,
+        client_addr,
+        server_addr,
+        client_config,
+    )
+    .expect("client transport");
+    client_transport.set_initial_dcid(crate::transport::ConnectionId::from_ref(server_scid));
+    let mut server_transport = crate::transport::packet::accept(
+        server_scid,
+        Some(server_scid),
+        server_addr,
+        client_addr,
+        &mut server_config,
+    )
+    .expect("accept server transport");
+    server_transport.set_destination_cid(crate::transport::ConnectionId::from_ref(client_scid));
+
+    let mut client =
+        wrap_test_connection(client_transport, client_addr, server_addr, client_stealth);
+    let mut server =
+        wrap_test_connection(server_transport, server_addr, client_addr, server_stealth);
+    let client_to_server =
+        crate::transport::RecvInfo { from: client_addr, to: server_addr, ecn: None };
+    let server_to_client =
+        crate::transport::RecvInfo { from: server_addr, to: client_addr, ecn: None };
+    let mut packet = [0u8; 2048];
+    for _ in 0..64 {
+        let mut progressed = false;
+        match client.conn.send(&mut packet) {
+            Ok((length, _)) => {
+                server
+                    .conn
+                    .recv(&mut packet[..length], &client_to_server)
+                    .expect("deliver client TLS flight");
+                progressed = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {}
+            Err(error) => panic!("client TLS transport send failed: {error}"),
+        }
+        match server.conn.send(&mut packet) {
+            Ok((length, _)) => {
+                client
+                    .conn
+                    .recv(&mut packet[..length], &server_to_client)
+                    .expect("deliver server TLS flight");
+                progressed = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {}
+            Err(error) => panic!("server TLS transport send failed: {error}"),
+        }
+        if client.conn.tls_handshake_complete() && server.conn.tls_handshake_complete() {
+            return (client, server);
+        }
+        if !progressed {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    panic!("real QUIC/TLS handshake did not complete within the bounded packet pump");
 }
 
 fn framed_tunnel_packet(packet: &[u8]) -> Vec<u8> {
@@ -81,6 +173,104 @@ fn connection_stats_default_zeroed() {
 }
 
 #[test]
+fn http3_waits_for_tls_completion_before_opening_control_streams() {
+    let mut connection = test_connection();
+    connection.conn.enable_tls("early-data-gate").expect("enable real TLS provider");
+
+    assert!(!connection.conn.tls_handshake_complete());
+    assert!(matches!(connection.init_http3(), Err(crate::transport::h3::Error::Done)));
+    assert!(connection.h3_conn.is_none());
+}
+
+#[test]
+fn early_h3_request_gets_425_before_masque_side_effects() {
+    let (mut client, mut server) =
+        test_tls_connection_pair(StealthConfig::performance(), StealthConfig::performance());
+    let client_addr = "127.0.0.1:29101".parse().unwrap();
+    let server_addr = "127.0.0.1:29102".parse().unwrap();
+    client.init_http3().expect("client H3");
+    server.init_http3().expect("server H3");
+    let client_to_server =
+        crate::transport::RecvInfo { from: client_addr, to: server_addr, ecn: None };
+    let server_to_client =
+        crate::transport::RecvInfo { from: server_addr, to: client_addr, ecn: None };
+    let mut packet = [0u8; 2048];
+    for _ in 0..8 {
+        match server.conn.send(&mut packet) {
+            Ok((length, _)) => {
+                client
+                    .conn
+                    .recv(&mut packet[..length], &server_to_client)
+                    .expect("deliver server settings");
+            }
+            Err(crate::error::ConnectionError::Done) => break,
+            Err(error) => panic!("server settings send failed: {error}"),
+        }
+    }
+    client.poll_http3().expect("consume server settings");
+
+    client.host_header = "proxy.example.com".to_string();
+    let stream_id = client.begin_masque_control_tunnel().expect("open CONNECT-IP request");
+    client
+        .http3_send_body_chunk(stream_id, b"replayable tunnel payload", true)
+        .expect("queue request body");
+    for _ in 0..16 {
+        match client.conn.send(&mut packet) {
+            Ok((length, _)) => {
+                server
+                    .conn
+                    .recv(&mut packet[..length], &client_to_server)
+                    .expect("deliver request stream");
+            }
+            Err(crate::error::ConnectionError::Done) => break,
+            Err(error) => panic!("client transport send failed: {error}"),
+        }
+    }
+
+    server.conn.record_zero_rtt_stream(stream_id);
+    let mut early_body_delivered = false;
+    server
+        .poll_http3_with_headers(|_sid, _headers| {}, |_sid, _body| early_body_delivered = true)
+        .expect("reject early H3 request");
+    assert!(!early_body_delivered);
+    assert!(server.masque_peer_flows.is_empty());
+    assert!(!server.h3_tunnel_rx.contains_key(&stream_id));
+
+    let mut response_packets = 0usize;
+    for _ in 0..16 {
+        match server.conn.send(&mut packet) {
+            Ok((length, _)) => {
+                client
+                    .conn
+                    .recv(&mut packet[..length], &server_to_client)
+                    .expect("deliver early-data rejection");
+                response_packets += 1;
+            }
+            Err(crate::error::ConnectionError::Done) => break,
+            Err(error) => panic!("server transport send failed: {error}"),
+        }
+    }
+    assert!(response_packets > 0);
+
+    let mut status = None;
+    client
+        .poll_http3_with_headers(
+            |sid, headers| {
+                if sid == stream_id {
+                    status = headers
+                        .iter()
+                        .find(|header| header.name() == b":status")
+                        .and_then(|header| std::str::from_utf8(header.value()).ok())
+                        .and_then(|value| value.parse::<u16>().ok());
+                }
+            },
+            |_sid, _body| {},
+        )
+        .expect("poll rejection response");
+    assert_eq!(status, Some(425));
+}
+
+#[test]
 fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
     use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
 
@@ -118,21 +308,13 @@ fn asymmetric_stealth_server_emits_no_raw_h3_cover_stream() {
     server_config.enable_traffic_padding = false;
     let mut server = wrap(server, recv_info.to, recv_info.from, server_config);
     let mut client = wrap(client, recv_info.from, recv_info.to, StealthConfig::performance());
-    server.init_http3().expect("server H3 initialization");
-    client.init_http3().expect("client H3 initialization");
-
-    let mut packet = [0u8; 2048];
-    let (len, send_info) = server.send_with_info(&mut packet).expect("server cover PING send");
-    client
-        .recv_on_path(&packet[..len], send_info.from, send_info.to)
-        .expect("client receives server cover PING");
-
-    assert_eq!(
-        client.conn.stream_readable_next(),
-        None,
-        "QUIC cover PING must not create an unframed H3 stream"
-    );
-    client.poll_http3().expect("asymmetric H3 poll must remain valid");
+    assert!(!server.conn.tls_handshake_complete());
+    assert!(!client.conn.tls_handshake_complete());
+    assert!(matches!(server.init_http3(), Err(crate::transport::h3::Error::Done)));
+    assert!(matches!(client.init_http3(), Err(crate::transport::h3::Error::Done)));
+    assert!(server.h3_conn.is_none());
+    assert!(client.h3_conn.is_none());
+    assert_eq!(client.conn.stream_readable_next(), None);
 }
 
 #[test]
@@ -155,7 +337,7 @@ fn masque_request_headers_bind_auth_and_connection_generation() {
 
 #[test]
 fn inner_tunnel_request_headers_carry_no_persona() {
-    // TODO-1055: inner /tun streams never carry browser masquerade headers —
+    // TODO-1055: inner /tun streams never carry browser masquerade headers -
     // only pseudo and functional x-qf-* headers.
     let connection = test_connection_with(StealthConfig::stealth());
     assert!(
@@ -240,7 +422,7 @@ fn begin_disguise_migration_changes_local_port_and_keeps_persona() {
     let persona_before = connection.stealth_manager().current_persona_name();
     let old_local = connection.local_addr;
 
-    // Migration onto a fresh local port starts path validation — the persona
+    // Migration onto a fresh local port starts path validation - the persona
     // and TLS state stay frozen (no new handshake, TODO-1056).
     let new_local: SocketAddr = "127.0.0.1:29299".parse().unwrap();
     assert_ne!(new_local, old_local);
@@ -1995,7 +2177,7 @@ fn maybenot_send_and_emit_events_reach_runtime() {
     assert!(written > 0, "stream data must produce a datagram");
 
     // NormalSent reached the machine: the zero-timeout pad action is now
-    // armed — the runtime reports a deadline.
+    // armed - the runtime reports a deadline.
     assert!(
         connection.maybenot.as_ref().expect("runtime").next_deadline().is_some()
             || connection

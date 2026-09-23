@@ -626,8 +626,12 @@ fn frame_type_allowed(ty: u64, pkt: PacketType) -> bool {
     match pkt {
         PT::Initial | PT::Handshake => matches!(ty, 0x00 | 0x01 | 0x02 | 0x03 | 0x06 | 0x1c),
         PT::ZeroRTT => {
-            stream_frame_type(ty)
-                || matches!(ty, 0x00 | 0x01 | 0x04 | 0x05 | 0x10..=0x17 | 0x1c | 0x1d | 0x30 | 0x31)
+            // RFC 9001 Table 3 permits DATAGRAM (0x30/0x31) and the
+            // application close (0x1d) in 0-RTT but not the transport close
+            // (0x1c). Project policy denies DATAGRAM frames in early data
+            // because VPN tunnel payload is not replay-safe. The client
+            // sender separately requires explicit replay-safe stream admission.
+            stream_frame_type(ty) || matches!(ty, 0x00 | 0x01 | 0x04 | 0x05 | 0x10..=0x17 | 0x1d)
         }
         PT::Short => matches!(ty, 0x00..=0x05 | 0x07..=0x1e | 0x30 | 0x31),
         PT::Retry | PT::VersionNegotiation => false,
@@ -1163,6 +1167,20 @@ mod tests {
         assert!(from_bytes(&application_close, PacketType::ZeroRTT).is_ok());
         assert!(matches!(
             from_bytes(&application_close, PacketType::Initial),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        // RFC-illegal and policy-denied frames in 0-RTT. The project also
+        // denies DATAGRAM so tunnel payload cannot use the early-data path.
+        assert!(matches!(
+            from_bytes(&[0x1C, 0x00, 0x00], PacketType::ZeroRTT),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&[0x30, 0x00], PacketType::ZeroRTT),
+            Err(ConnectionError::InvalidFrame)
+        ));
+        assert!(matches!(
+            from_bytes(&[0x31, 0x00, 0x00], PacketType::ZeroRTT),
             Err(ConnectionError::InvalidFrame)
         ));
         let handshake_done = [0x1E];

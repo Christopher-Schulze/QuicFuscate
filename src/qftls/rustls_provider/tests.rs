@@ -205,6 +205,7 @@ fn apply_profile_rebuilds_transport_params_from_persona_fixture() {
         1350,
         &scid,
         None,
+        false,
     )
     .expect("client provider");
 

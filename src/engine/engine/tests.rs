@@ -370,6 +370,21 @@ fn test_runtime_transport_config_respects_enable_migration() {
 }
 
 #[test]
+fn runtime_transport_config_combines_early_data_flags() {
+    let mut connection_flag = EngineConfig::default();
+    connection_flag.connection.enable_0rtt = true;
+    assert!(build_runtime_transport_config(&connection_flag)
+        .expect("connection early-data flag")
+        .is_early_data_enabled());
+
+    let mut transport_flag = EngineConfig::default();
+    transport_flag.transport.enable_early_data = true;
+    assert!(build_runtime_transport_config(&transport_flag)
+        .expect("transport early-data flag")
+        .is_early_data_enabled());
+}
+
+#[test]
 fn test_runtime_transport_config_carries_migration_policy() {
     let mut config = EngineConfig::default();
     config.connection.migration_cwnd_reduction_factor = 0.25;
@@ -764,7 +779,7 @@ fn dial_failure_classification_is_fail_safe() {
     )));
 
     // TLS alert / remote close / control-plane rejection: the path works,
-    // the peer refused — no fallback.
+    // the peer refused - no fallback.
     for error in [
         EngineError::Connection("client closed before receiving server assignment".to_string()),
         EngineError::Connection("client assignment control plane rejected: bad token".to_string()),
@@ -789,7 +804,7 @@ fn dial_failure_classification_is_fail_safe() {
 #[test]
 fn outer_hop_fallback_carries_ech_config_list_to_entry_hop() {
     // TODO-1064: the DoH-resolved ECHConfigList lives on the configured relay
-    // hop and must reach the synthesized circuit's entry hop — and only that
+    // hop and must reach the synthesized circuit's entry hop - and only that
     // hop. The exit hop (dedicated listener) never carries ECH state.
     let mut config = outer_hop_test_config(qf_engine_types::StealthMode::Stealth);
     let ech_bytes = vec![0xfe, 0x0d, 0x00, 0x20];

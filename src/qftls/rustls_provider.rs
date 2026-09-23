@@ -73,8 +73,7 @@ pub(super) fn validate_server_identity_pem(
         })
 }
 
-/// rustls QUIC TLS provider with standard TLS ticket resumption and packet-key installation.
-/// 0-RTT remains deliberately disabled until packet-level early-data keys exist.
+/// rustls QUIC TLS provider with standard TLS resumption and packet-key installation.
 /// Build the shared rustls provider with the project's real-TLS ChaCha policy.
 ///
 /// This provider is used on both client and server connections. TLS Cover's
@@ -145,10 +144,7 @@ fn crypto_provider_for_profile(
         .groups
         .iter()
         .filter_map(|requested| {
-            mintable
-                .iter()
-                .copied()
-                .find(|group| u16::from(rustls::NamedGroup::from(group.name())) == *requested)
+            mintable.iter().copied().find(|group| u16::from(group.name()) == *requested)
         })
         .collect();
     if !projected_groups.is_empty() {
@@ -160,7 +156,7 @@ fn crypto_provider_for_profile(
 /// Build the ECH mode for a connection carrying a DNS-sourced ECHConfigList
 /// (TODO-1064). Only a shared outer hop supplies `ech_config_list`; every
 /// other path passes `None` and gets a plain TLS 1.3 builder. An advertised
-/// list that rustls rejects is a dial error — never silently downgraded.
+/// list that rustls rejects is a dial error - never silently downgraded.
 pub(super) fn ech_mode_for_config_list(
     ech_config_list: Option<&[u8]>,
 ) -> Result<Option<rustls::client::EchMode>, ConnectionError> {
@@ -194,6 +190,8 @@ impl rustls::client::ResolvesClientCert for NoClientCertificate {
 
 static STANDARD_SESSION_STORE: OnceLock<Arc<rustls::client::ClientSessionMemoryCache>> =
     OnceLock::new();
+static EARLY_SERVER_SESSION_STORE: OnceLock<Arc<dyn rustls::server::StoresServerSessions>> =
+    OnceLock::new();
 static NO_CLIENT_CERTIFICATE: OnceLock<Arc<NoClientCertificate>> = OnceLock::new();
 static STANDARD_SERVER_TICKETER: OnceLock<
     Result<Arc<dyn rustls::server::ProducesTickets>, String>,
@@ -213,6 +211,14 @@ fn standard_session_resumption() -> rustls::client::Resumption {
     rustls::client::Resumption::store(store)
 }
 
+fn early_server_session_storage() -> Arc<dyn rustls::server::StoresServerSessions> {
+    EARLY_SERVER_SESSION_STORE
+        .get_or_init(|| {
+            rustls::server::ServerSessionMemoryCache::new(SERVER_EARLY_SESSION_CACHE_ENTRIES)
+        })
+        .clone()
+}
+
 fn standard_server_ticketer() -> Result<Arc<dyn rustls::server::ProducesTickets>, ConnectionError> {
     STANDARD_SERVER_TICKETER
         .get_or_init(|| {
@@ -222,6 +228,30 @@ fn standard_server_ticketer() -> Result<Arc<dyn rustls::server::ProducesTickets>
         })
         .clone()
         .map_err(ConnectionError::TlsError)
+}
+
+/// Stateless-ticket stand-in that never produces tickets.
+///
+/// rustls only accepts TLS 1.3 early data when resumption is stateful -
+/// `decide_if_early_data_allowed` requires `!config.ticketer.enabled()`.
+/// `rustls::server::NeverProducesTickets` is crate-private, so the disabled
+/// ticketer is spelled out locally.
+#[derive(Debug)]
+struct DisabledTicketer;
+
+impl rustls::server::ProducesTickets for DisabledTicketer {
+    fn enabled(&self) -> bool {
+        false
+    }
+    fn lifetime(&self) -> u32 {
+        0
+    }
+    fn encrypt(&self, _bytes: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    fn decrypt(&self, _bytes: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 fn standard_verified_verifier(
@@ -273,7 +303,7 @@ pub struct RustlsProviderImpl {
     /// Client-scoped CA bundle path copied from the owning transport config.
     pub client_ca_path: Option<String>,
     /// DNS-sourced ECHConfigList for this client connection (shared outer hop
-    /// only). `None` on every other connection — the ClientHello then carries
+    /// only). `None` on every other connection - the ClientHello then carries
     /// no ECH extension at all.
     pub ech_config_list: Option<Vec<u8>>,
     /// Whether the TLS handshake has completed.
@@ -286,6 +316,12 @@ pub struct RustlsProviderImpl {
     pub peer_cert: Option<Vec<u8>>,
     /// Whether 0-RTT early data is enabled.
     pub zero_rtt_enabled: bool,
+    /// Early data was requested at construction (`enable_early_data` was set
+    /// inside the rustls config before the connection object existed).
+    pub(crate) zero_rtt_requested: bool,
+    /// rustls `zero_rtt_keys()` already produced a bundle that was handed to
+    /// the transport installer; polled once, never re-installed.
+    pub(crate) zero_rtt_keys_installed: bool,
     /// QUIC transport parameters to send to the peer.
     pub transport_params: Vec<u8>,
     /// Real local source connection ID copied into initial_source_connection_id.
@@ -323,6 +359,11 @@ pub struct RustlsProviderImpl {
 }
 
 pub(super) const DEFAULT_MAX_UDP_PAYLOAD_SIZE: usize = 1472;
+
+/// Stateful session-cache bound used while early data is enabled. Resumed
+/// server sessions live server-side (stateless tickets are disabled then),
+/// so the cache must cover the expected reconnect population.
+const SERVER_EARLY_SESSION_CACHE_ENTRIES: usize = 4096;
 
 /// Insecure verifier used only when explicitly requested via env.
 /// Only available in debug builds to prevent accidental production use.
@@ -444,6 +485,7 @@ impl RustlsProviderImpl {
             DEFAULT_MAX_UDP_PAYLOAD_SIZE,
             &[],
             None,
+            false,
         )
     }
 
@@ -459,6 +501,7 @@ impl RustlsProviderImpl {
         max_udp_payload_size: usize,
         local_scid: &[u8],
         ech_config_list: Option<&[u8]>,
+        early_data: bool,
     ) -> Result<Self, ConnectionError> {
         let quic_version = Self::map_quic_version(version)?;
         // The fixture block is built for the baseline (Chromium) engine at
@@ -472,7 +515,7 @@ impl RustlsProviderImpl {
         )?;
         let client_ca_path = client_ca_path.map(str::to_owned);
         let connection = if is_server {
-            Self::create_server_connection(quic_version, transport_params.clone())?
+            Self::create_server_connection(quic_version, transport_params.clone(), early_data)?
         } else {
             Self::create_client_connection(
                 verify_peer,
@@ -481,6 +524,7 @@ impl RustlsProviderImpl {
                 client_ca_path.as_deref(),
                 environment,
                 ech_config_list,
+                early_data,
             )?
         };
         let this = Self {
@@ -502,7 +546,9 @@ impl RustlsProviderImpl {
             write_level: super::Level::Initial,
             alpn: None,
             peer_cert: None,
-            zero_rtt_enabled: false,
+            zero_rtt_enabled: early_data,
+            zero_rtt_requested: early_data,
+            zero_rtt_keys_installed: false,
             transport_params,
             local_scid: local_scid.to_vec(),
             version_information: version_information_parameter.to_vec(),
@@ -665,6 +711,36 @@ impl RustlsProviderImpl {
         }
     }
 
+    /// Wrap rustls `zero_rtt_keys()` output into the installer bundle. The
+    /// single `DirectionalKeys` is unidirectional: a client owns the seal
+    /// side (its early-traffic secret protects client-to-server packets), a
+    /// server owns the open side of the same secret.
+    fn zero_rtt_key_bundle(
+        keys: rustls::quic::DirectionalKeys,
+        is_server: bool,
+        standard_cipher_suite: StandardCipherSuite,
+    ) -> QuicTlsZeroRttKeys {
+        let pkt: std::sync::Arc<dyn rustls::quic::PacketKey> = keys.packet.into();
+        let hp: std::sync::Arc<dyn rustls::quic::HeaderProtectionKey> = keys.header.into();
+        if is_server {
+            QuicTlsZeroRttKeys {
+                seal: None,
+                open: Some(Box::new(RustlsPacketOpen { key: pkt })),
+                hp_seal: None,
+                hp_open: Some(Box::new(RustlsHp { key: hp })),
+                standard_cipher_suite,
+            }
+        } else {
+            QuicTlsZeroRttKeys {
+                seal: Some(Box::new(RustlsPacketSeal { key: pkt })),
+                open: None,
+                hp_seal: Some(Box::new(RustlsHp { key: hp })),
+                hp_open: None,
+                standard_cipher_suite,
+            }
+        }
+    }
+
     /// Build the client root certificate store: native/webpki roots plus any CA
     /// supplied by the owning transport configuration.
     fn build_client_root_store(ca_path: Option<&str>) -> Result<RootCertStore, ConnectionError> {
@@ -720,6 +796,7 @@ impl RustlsProviderImpl {
         ca_path: Option<&str>,
         environment: &crate::env_utils::EnvSnapshot,
         ech_config_list: Option<&[u8]>,
+        early_data: bool,
     ) -> Result<rustls::quic::Connection, ConnectionError> {
         #[cfg(not(debug_assertions))]
         let _ = verify_peer;
@@ -771,8 +848,9 @@ impl RustlsProviderImpl {
             config.key_log = Arc::new(rustls::KeyLogFile::new());
         }
         config.resumption = standard_session_resumption();
-        // Enable QUIC
-        config.enable_early_data = false;
+        // Enable QUIC early data only when the caller requested it before the
+        // connection object exists; rustls cannot opt in afterwards.
+        config.enable_early_data = early_data;
         config.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec()];
         // Performance settings
         config.max_fragment_size = Some(16384);
@@ -795,6 +873,7 @@ impl RustlsProviderImpl {
     fn create_server_connection(
         quic_version: rustls::quic::Version,
         transport_params: Vec<u8>,
+        early_data: bool,
     ) -> Result<rustls::quic::Connection, ConnectionError> {
         let certs_res = Self::load_certs_from_file();
         let key_res = Self::load_private_key();
@@ -826,8 +905,14 @@ impl RustlsProviderImpl {
             config.key_log = Arc::new(rustls::KeyLogFile::new());
         }
         config.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec()];
-        config.max_early_data_size = MAX_EARLY_DATA_SIZE.load(Ordering::Relaxed);
-        config.ticketer = standard_server_ticketer()?;
+        if early_data {
+            config.max_early_data_size = u32::MAX;
+            config.session_storage = early_server_session_storage();
+            config.ticketer = Arc::new(DisabledTicketer);
+        } else {
+            config.max_early_data_size = 0;
+            config.ticketer = standard_server_ticketer()?;
+        }
         config.send_tls13_tickets = 2;
 
         Ok(rustls::quic::Connection::Server(
@@ -853,7 +938,7 @@ impl RustlsProviderImpl {
         Self::generate_ephemeral_self_signed()
     }
 
-    /// Without the rcgen backend there is no ephemeral-cert path — report the
+    /// Without the rcgen backend there is no ephemeral-cert path - report the
     /// missing material instead of silently running without identity.
     #[cfg(not(any(feature = "server", feature = "dev-certs")))]
     fn cert_fallback(
@@ -1000,6 +1085,11 @@ impl RustlsProviderImpl {
     }
 
     fn apply_profile_to_config(&mut self, profile: &TlsProfile) -> Result<(), ConnectionError> {
+        if profile.enable_0rtt && !self.zero_rtt_requested {
+            return Err(ConnectionError::TlsError(
+                "0-RTT must be enabled when constructing the rustls provider".to_string(),
+            ));
+        }
         // Store profile and schedule cosmetic timing without blocking the
         // caller. The synchronous provider API cannot await, so the
         // handshake I/O flush observes this deadline instead.
@@ -1042,7 +1132,7 @@ impl RustlsProviderImpl {
             }
         } else {
             // A persona that never sends ECH (e.g. Brave) must not advertise it
-            // even when the hop's DNS record offers a config — the ClientHello
+            // even when the hop's DNS record offers a config - the ClientHello
             // shape stays faithful to the captured fingerprint.
             builder.with_protocol_versions(&[&rustls::version::TLS13])
         };
@@ -1085,12 +1175,7 @@ impl RustlsProviderImpl {
         cfg.resumption = standard_session_resumption();
         // Apply ALPN
         cfg.alpn_protocols = profile.alpn_protocols.iter().map(|s| s.as_bytes().to_vec()).collect();
-        if profile.enable_0rtt {
-            return Err(ConnectionError::TlsError(
-                "0-RTT is disabled until packet-level early-data keys are implemented".to_string(),
-            ));
-        }
-        cfg.enable_early_data = false;
+        cfg.enable_early_data = self.zero_rtt_requested;
         cfg.enable_sni = true;
         // Create client connection with SNI
         let server_name_str = profile.sni.as_deref().unwrap_or(DEFAULT_TLS_SNI_HOST);
@@ -1335,6 +1420,33 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
         if self.reset_packet_keys {
             installer.clear_handshake_and_one_rtt_keys();
             self.reset_packet_keys = false;
+            self.zero_rtt_keys_installed = false;
+        }
+        // rustls exposes early-traffic packet keys via zero_rtt_keys(): on the
+        // client right after construction when a usable resumption ticket was
+        // found, on the server once it decided to accept the client's early
+        // data. The bundle is installed exactly once; a later transcript
+        // rebuild re-arms the poll via the reset branch above.
+        if self.zero_rtt_enabled && !self.zero_rtt_keys_installed {
+            if let Some(keys) = self.connection.zero_rtt_keys() {
+                let suite = self
+                    .connection
+                    .negotiated_cipher_suite()
+                    .ok_or_else(|| {
+                        ConnectionError::TlsError(
+                            "rustls emitted QUIC 0-RTT keys before the negotiated cipher suite"
+                                .to_string(),
+                        )
+                    })
+                    .and_then(|suite| standard_cipher_suite(suite.suite()))?;
+                installer.install_zero_rtt_keys(Self::zero_rtt_key_bundle(
+                    keys,
+                    self.is_server,
+                    suite,
+                ))?;
+                self.zero_rtt_keys_installed = true;
+                super::trace_key_change(self.is_server, "ZeroRtt");
+            }
         }
         while let Some(change) = self.pending_key_changes.pop_front() {
             match change {
@@ -1387,6 +1499,17 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
         self.handshake_complete
             && self.connection.handshake_kind() == Some(rustls::HandshakeKind::Resumed)
     }
+    fn early_data_accepted(&self) -> Option<bool> {
+        if !self.handshake_complete || !self.zero_rtt_requested {
+            return None;
+        }
+        match &self.connection {
+            rustls::quic::Connection::Client(connection) => {
+                Some(connection.is_early_data_accepted())
+            }
+            rustls::quic::Connection::Server(_) => None,
+        }
+    }
     fn alpn(&self) -> Option<&str> {
         self.alpn.as_deref()
     }
@@ -1404,10 +1527,36 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
         None
     }
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError> {
-        self.zero_rtt_enabled = false;
-        Err(ConnectionError::TlsError(
-            "0-RTT is disabled until packet-level early-data keys are implemented".to_string(),
-        ))
+        if !self.zero_rtt_requested {
+            return Err(ConnectionError::TlsError(
+                "0-RTT requires the early-data flag at provider construction; \
+                 a connection built without it cannot opt in"
+                    .to_string(),
+            ));
+        }
+        self.zero_rtt_enabled = true;
+        Ok(())
+    }
+    fn reject_early_data(&mut self) -> Result<(), ConnectionError> {
+        match &mut self.connection {
+            rustls::quic::Connection::Server(connection) if connection.is_handshaking() => {
+                if self.zero_rtt_keys_installed {
+                    return Err(ConnectionError::TlsError(
+                        "early data cannot be rejected after rustls installs 0-RTT keys"
+                            .to_string(),
+                    ));
+                }
+                connection.reject_early_data();
+                self.zero_rtt_enabled = false;
+                Ok(())
+            }
+            rustls::quic::Connection::Server(_) => Err(ConnectionError::TlsError(
+                "early data can only be rejected during the TLS handshake".to_string(),
+            )),
+            rustls::quic::Connection::Client(_) => Err(ConnectionError::TlsError(
+                "only a QUIC server can reject client early data".to_string(),
+            )),
+        }
     }
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         None
@@ -1486,6 +1635,7 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
     max_udp_payload_size: usize,
     local_scid: &[u8],
     ech_config_list: Option<&[u8]>,
+    early_data: bool,
 ) -> Result<RustlsProviderImpl, ConnectionError> {
     RustlsProviderImpl::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
@@ -1498,5 +1648,6 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         max_udp_payload_size,
         local_scid,
         ech_config_list,
+        early_data,
     )
 }

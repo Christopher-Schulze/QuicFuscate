@@ -148,25 +148,42 @@ impl CryptoContext {
         self.crypto_initial.has_pending_send() || self.crypto_handshake.has_pending_send()
     }
 
-    /// Installs 0-RTT read and write keys from the given TLS secrets.
-    pub fn install_0rtt_keys(
+    /// Installs one directional 0-RTT key pair from rustls.
+    pub fn install_0rtt_key_objects(
         &mut self,
-        read_secret: &[u8],
-        write_secret: &[u8],
+        seal: Option<crate::crypto::PacketAeadSeal>,
+        open: Option<crate::crypto::PacketAeadOpen>,
+        hp_seal: Option<Box<dyn crate::crypto::aead::PacketHeaderProtector + Send + Sync>>,
+        hp_open: Option<Box<dyn crate::crypto::aead::PacketHeaderProtector + Send + Sync>>,
+        standard_cipher_suite: crate::qftls::StandardCipherSuite,
     ) -> Result<(), ConnectionError> {
-        let (read_key, read_iv) = derive_key_iv(read_secret)?;
-        let (write_key, write_iv) = derive_key_iv(write_secret)?;
-        let write_hp = derive_hp_key(write_secret)?;
-        let read_hp = derive_hp_key(read_secret)?;
-        let (_, open) = standard_aes128_gcm(&read_key, &read_iv)?;
-        let (seal, _) = standard_aes128_gcm(&write_key, &write_iv)?;
+        let client_direction =
+            seal.is_some() && open.is_none() && hp_seal.is_some() && hp_open.is_none();
+        let server_direction =
+            seal.is_none() && open.is_some() && hp_seal.is_none() && hp_open.is_some();
+        if client_direction == server_direction {
+            return Err(ConnectionError::TlsError(
+                "invalid directional rustls 0-RTT key bundle".into(),
+            ));
+        }
+
+        self.clear_zero_rtt_keys();
+        self.seal_0rtt = seal;
+        self.open_0rtt = open;
+        self.hp_0rtt = hp_seal;
+        self.hp_0rtt_open = hp_open;
         self.zero_rtt_enabled = true;
-        self.open_0rtt = Some(open);
-        self.seal_0rtt = Some(seal);
-        self.hp_0rtt = Some(Box::new(crate::crypto::RingAesHp::from_key(&write_hp)?));
-        self.hp_0rtt_open = Some(Box::new(crate::crypto::RingAesHp::from_key(&read_hp)?));
-        self.refresh_compatibility_zero_rtt_snapshot();
+        self.refresh_compatibility_zero_rtt_snapshot(standard_cipher_suite);
         Ok(())
+    }
+
+    pub(crate) fn clear_zero_rtt_keys(&mut self) {
+        self.zero_rtt_enabled = false;
+        self.open_0rtt = None;
+        self.seal_0rtt = None;
+        self.hp_0rtt = None;
+        self.hp_0rtt_open = None;
+        self.packet_protection.zero_rtt = crate::qftls::PacketProtectionLevelSnapshot::disabled();
     }
 }
 
@@ -175,14 +192,14 @@ impl CryptoContext {
     pub fn set_zero_rtt_enabled(&mut self, enabled: bool) {
         self.zero_rtt_enabled = enabled;
         if enabled {
-            self.refresh_compatibility_zero_rtt_snapshot();
+            let suite = self
+                .packet_protection
+                .zero_rtt
+                .standard_cipher_suite
+                .unwrap_or(crate::qftls::StandardCipherSuite::Aes128GcmSha256);
+            self.refresh_compatibility_zero_rtt_snapshot(suite);
         } else {
-            self.open_0rtt = None;
-            self.seal_0rtt = None;
-            self.hp_0rtt = None;
-            self.hp_0rtt_open = None;
-            self.packet_protection.zero_rtt =
-                crate::qftls::PacketProtectionLevelSnapshot::disabled();
+            self.clear_zero_rtt_keys();
         }
     }
 
@@ -312,20 +329,24 @@ impl CryptoContext {
         Ok(())
     }
 
-    fn refresh_compatibility_zero_rtt_snapshot(&mut self) {
-        let owner = if self.open_0rtt.is_some()
-            && self.seal_0rtt.is_some()
-            && self.hp_0rtt.is_some()
-            && self.hp_0rtt_open.is_some()
+    fn refresh_compatibility_zero_rtt_snapshot(
+        &mut self,
+        standard_cipher_suite: crate::qftls::StandardCipherSuite,
+    ) {
+        // 0-RTT is unidirectional: a complete state is either the client
+        // write direction (seal + hp_seal) or the server read direction
+        // (open + hp_open). Keys always come from rustls zero_rtt_keys().
+        let owner = if (self.seal_0rtt.is_some() && self.hp_0rtt.is_some())
+            || (self.open_0rtt.is_some() && self.hp_0rtt_open.is_some())
         {
-            crate::qftls::PacketProtectionOwner::TransportStandard
+            crate::qftls::PacketProtectionOwner::RustlsStandard
         } else {
             crate::qftls::PacketProtectionOwner::Transitioning
         };
         self.packet_protection.zero_rtt = crate::qftls::PacketProtectionLevelSnapshot {
             packet_aead_owner: owner,
             header_protection_owner: owner,
-            standard_cipher_suite: Some(crate::qftls::StandardCipherSuite::Aes128GcmSha256),
+            standard_cipher_suite: Some(standard_cipher_suite),
         };
     }
 
@@ -576,6 +597,7 @@ impl crate::qftls::QuicTlsKeyInstaller for parking_lot::RwLock<CryptoContext> {
         crypto.open_1rtt = None;
         crypto.hp_1rtt = None;
         crypto.hp_1rtt_open = None;
+        crypto.clear_zero_rtt_keys();
         crypto.clear_private_1rtt();
         crypto.read_secret_1rtt = None;
         crypto.write_secret_1rtt = None;
@@ -609,6 +631,30 @@ impl crate::qftls::QuicTlsKeyInstaller for parking_lot::RwLock<CryptoContext> {
             standard_cipher_suite: Some(keys.standard_cipher_suite),
         };
         crypto.packet_protection.negotiated_tls_cipher_suite = Some(keys.standard_cipher_suite);
+    }
+
+    fn install_zero_rtt_keys(
+        &self,
+        keys: crate::qftls::QuicTlsZeroRttKeys,
+    ) -> Result<(), ConnectionError> {
+        let mut crypto = self.write();
+        let suite = keys.standard_cipher_suite;
+        crypto.install_0rtt_key_objects(
+            keys.seal.map(crate::crypto::PacketAeadSeal::dynamic),
+            keys.open.map(crate::crypto::PacketAeadOpen::dynamic),
+            keys.hp_seal,
+            keys.hp_open,
+            suite,
+        )?;
+        match suite {
+            crate::qftls::StandardCipherSuite::Aes128GcmSha256 => {
+                qf_telemetry::QUIC_ZERO_RTT_AES128_KEY_INSTALLS.inc();
+            }
+            crate::qftls::StandardCipherSuite::Aes256GcmSha384 => {
+                qf_telemetry::QUIC_ZERO_RTT_AES256_KEY_INSTALLS.inc();
+            }
+        }
+        Ok(())
     }
 
     fn install_one_rtt_keys(&self, keys: crate::qftls::QuicTlsOneRttKeys) {
@@ -712,7 +758,9 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                     let hp_key = derive_hp_key(secret)?;
                     self.hp_0rtt_open =
                         Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
-                    self.refresh_compatibility_zero_rtt_snapshot();
+                    self.refresh_compatibility_zero_rtt_snapshot(
+                        crate::qftls::StandardCipherSuite::Aes128GcmSha256,
+                    );
                 }
             }
             crate::crypto::aead::Level::OneRTT => {
@@ -763,7 +811,9 @@ impl crate::crypto::aead::KeyScheduleHooks for CryptoContext {
                     self.seal_0rtt = Some(seal);
                     let hp_key = derive_hp_key(secret)?;
                     self.hp_0rtt = Some(Box::new(crate::crypto::RingAesHp::from_key(&hp_key)?));
-                    self.refresh_compatibility_zero_rtt_snapshot();
+                    self.refresh_compatibility_zero_rtt_snapshot(
+                        crate::qftls::StandardCipherSuite::Aes128GcmSha256,
+                    );
                 }
             }
             crate::crypto::aead::Level::OneRTT => {

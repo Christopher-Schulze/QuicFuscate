@@ -27,8 +27,8 @@ remote = "0.0.0.0:4433"        # Server listen address
 # key_file = ""                # Path to TLS private key (required for server)
 # alpn = ["h3", "quicfuscate"]
 # idle_timeout_ms = 30000      # Connection idle timeout (0 = no timeout)
-# enable_0rtt is NOT SUPPORTED: setting it to true is rejected by config validation
-#                              because packet-level 0-RTT key installation is not wired.
+# enable_0rtt = false        # default-off Rustls 0-RTT; server requires [anti_replay].enabled = true
+#                            # H3/MASQUE/TUN and DATAGRAM payload remain 1-RTT.
 # max_streams_bidi = 100
 # max_streams_uni = 100
 # enable_migration = true   # candidate paths must validate before activation
@@ -57,13 +57,12 @@ enabled = false
 # ==============================================================================
 
 [anti_replay]
-# Enable anti-replay protection for 0-RTT early data (server mode only).
-# Guards the 0-RTT replay window once connection.enable_0rtt becomes supported
-# (RFC 8446 Section 8, RFC 9001 Section 9.2).
+# Server replay protection for opt-in Rustls-standard 0-RTT.
+# Rustls validates ticket freshness and consumes stateful tickets once.
 enabled = true
-# max_ticket_age_secs = 10     # Reject 0-RTT tickets older than this
-# max_entries = 100000         # Strike register capacity (~5 MB at 100k entries)
-# max_early_data_size = 16384  # Max 0-RTT bytes per connection (16 KB)
+# max_ticket_age_secs = 10     # Replay-fingerprint retention window
+# max_entries = 100000         # Strike register capacity; saturation fails closed
+# max_early_data_size = 16384  # Accepted 0-RTT plaintext bytes per connection
 
 # ==============================================================================
 # CRYPTO
@@ -92,7 +91,7 @@ mode = "performance"
 #                 image by default (persona-trace padding, in-QUIC FEC, cover
 #                 headers), or the thin image via dynamic_wire_image =
 #                 "performance". Escalation only moves the repair ratio inside
-#                 the byte cap and the Reality/MASQUE armed bit — never the
+#                 the byte cap and the Reality/MASQUE armed bit - never the
 #                 packet shape. Payload stays AES-128-GCM.
 # - manual:       operator picks each flag and the payload cipher.
 # dynamic_wire_image = "stealth"   # "stealth" (default) or "performance"; only for mode = "dynamic"

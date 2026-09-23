@@ -60,11 +60,9 @@ sni = ""
 # Connection idle timeout (milliseconds, 0 = no timeout)
 idle_timeout_ms = 30000
 
-# Enable 0-RTT early data - ENGINE LEVEL (server + client).
-# NOT SUPPORTED: setting this to true is rejected by config validation. Packet-level 0-RTT key
-# installation is not wired, so early data would neither be sent nor accepted. The setting is
-# rejected instead of silently ignored so a deployment cannot believe it has 0-RTT when it does
-# not. The same applies to [transport].enable_early_data.
+# Opt in to Rustls-standard 0-RTT early data (server + client), default off.
+# Clients may send only explicitly marked replay-safe one-shot streams. H3/MASQUE/TUN remains 1-RTT.
+# Server mode requires [anti_replay].enabled = true. [transport].enable_early_data is an alias.
 enable_0rtt = false
 
 # Maximum bidirectional streams
@@ -121,12 +119,12 @@ outer_hop = "none"
 # ECH (Encrypted Client Hello): before the engine dials, the client resolves
 # the relay's DNS HTTPS record over DoH (stealth.doh_provider) and enables ECH
 # on this hop only when the record advertises an "ech" parameter. Nothing is
-# invented or greased when the record lacks ECH — the hop then sends a normal
+# invented or greased when the record lacks ECH - the hop then sends a normal
 # ClientHello. ECH applies exclusively to this shared outer hop: the direct
 # UDP dial and the dedicated inner listener never carry ECH state, because a
 # dedicated IP cannot be concealed by an encrypted SNI anyway. ECH HPKE
 # suites come from qf-hpke, a pure-Rust provider over hpke-rs (rustcrypto
-# backend) — always compiled in, no C toolchain. An ECHConfigList offering
+# backend) - always compiled in, no C toolchain. An ECHConfigList offering
 # only P-521 suites is rejected (the backend has no P-521); every other
 # unsupported or corrupt list fails closed the same way.
 
@@ -161,13 +159,13 @@ max_candidates = 8
 # ==============================================================================
 
 [anti_replay]
-# Enable anti-replay protection for 0-RTT early data (server mode only).
-# A strike register tracks seen 0-RTT packets and rejects replays.
-# Per RFC 8446 Section 8 and RFC 9001 Section 9.2.
+# Enable server anti-replay protection for 0-RTT early data.
+# Stateful Rustls tickets are single-use; the strike register also rejects duplicate packets.
+# Required whenever server early data is requested.
 enabled = true
 
-# Maximum ticket age in seconds before 0-RTT is rejected.
-# RFC 8446 recommends a small window. Default: 10 seconds.
+# How long replay fingerprints are retained. Rustls separately validates ticket freshness.
+# Default: 10 seconds.
 max_ticket_age_secs = 10
 
 # Maximum entries in the strike register.
@@ -210,24 +208,24 @@ force_aead = ""
 #                 persona-trace padding, in-QUIC FEC and persona cover headers
 #                 are on from the first 1-RTT packet. Escalation may only move
 #                 the repair ratio inside the byte cap and the Reality/MASQUE
-#                 armed bit — never padding set, timing, cover schedule,
+#                 armed bit - never padding set, timing, cover schedule,
 #                 framing or AEAD. Payload stays AES-128-GCM.
 # - manual:       Operator picks each stealth flag and the payload cipher.
 mode = "dynamic"
 
 # Wire image frozen by mode = "dynamic" (TODO-1059):
-# - "stealth"     (default): full stealth shape from connect — persona-trace
+# - "stealth"     (default): full stealth shape from connect - persona-trace
 #                 padding schedule, in-QUIC FEC, persona cover headers.
-# - "performance": thin image — no stealth padding or cover schedule; the
+# - "performance": thin image - no stealth padding or cover schedule; the
 #                 in-QUIC FEC wrapper stays allowed. Still AES-128-GCM: the
 #                 AEGIS payload pin belongs to mode = "performance" only.
 #                 Choose mode = "performance" instead if you want the speed
-#                 profile with its AEGIS pin — the thin dynamic image is not
+#                 profile with its AEGIS pin - the thin dynamic image is not
 #                 the same thing.
 # The individual shape keys below (enable_traffic_padding,
 # enable_timing_obfuscation, enable_protocol_mimicry, padding_strategy,
 # max_padding_size, enable_http3_masquerading, use_tls_cover,
-# use_qpack_headers) are inert under mode = "dynamic" — the image preset
+# use_qpack_headers) are inert under mode = "dynamic" - the image preset
 # owns the whole wire shape. They still apply to the explicit modes.
 # dynamic_wire_image = "stealth"
 
@@ -429,8 +427,8 @@ initial_max_streams_bidi = 100
 # Initial maximum streams (unidirectional)
 initial_max_streams_uni = 100
 
-# Enable 0-RTT early data - CLIENT CONNECTION LEVEL.
-# NOT SUPPORTED: see [connection].enable_0rtt. Setting this to true is rejected by validation.
+# Alternate transport-level opt-in for Rustls-standard 0-RTT. Default off.
+# The explicit replay-safe stream API is required; H3/MASQUE/TUN remains 1-RTT.
 enable_early_data = false
 
 # QUIC DATAGRAM queue lengths (0 disables datagrams)

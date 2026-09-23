@@ -1134,12 +1134,24 @@ fn timeout_increments_lost_stats() {
 // ---- 0-RTT Early Data Paths ------------------------------------------
 
 #[test]
-fn is_in_early_data_when_configured() {
+fn is_in_early_data_requires_active_directional_keys() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+
     let mut cfg = Config::new_with_version(PROTOCOL_VERSION).unwrap();
     cfg.enable_early_data = true;
-    let c = Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false)
-        .expect("valid test connection configuration");
-    assert!(c.is_in_early_data(), "connection with enable_early_data must report is_in_early_data");
+    let mut connection =
+        Connection::new_with_role(b"test_scid_0123456789", local(), peer(), cfg, false)
+            .expect("valid test connection configuration");
+    connection.enable_tls("zero-rtt-active-test").expect("enable TLS provider");
+    assert!(!connection.is_in_early_data(), "a config flag without a ticket is inactive");
+    {
+        let mut crypto = connection.crypto.write();
+        crypto.set_zero_rtt_enabled(true);
+        crypto
+            .set_write_secret(Level::ZeroRTT, Algorithm::AES128_GCM, &[0x31; 32])
+            .expect("install client early sealer");
+    }
+    assert!(connection.is_in_early_data(), "installed client keys activate early data");
 }
 
 #[test]

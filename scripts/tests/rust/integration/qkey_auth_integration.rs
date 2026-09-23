@@ -163,15 +163,16 @@ fn simulate_qkey_http3_auth(
     // Tests run in-memory without real pacing. Use a large CWND to avoid artificial stalls.
     client_transport.set_initial_congestion_window_packets(10_000);
 
-    // Exercise the product-default H3 masquerade and QPACK header path. A reduced
-    // non-masquerading configuration cannot prove the real CLI authentication path.
-    let stealth_config = StealthConfig::default();
+    // The QKey assertion exercises the real H3 authentication headers. Performance
+    // selects outer FEC framing so this wire parser can verify source and repair packets;
+    // Stealth mode intentionally carries FEC inside QUIC frames instead.
+    let stealth_config = StealthConfig::performance();
     let mut fec_config = FecConfig::product_default();
     // This auth integration also owns one explicit FEC-envelope proof. Product
-    // Auto correctly starts in Zero, so select Normal deliberately and shorten
-    // its initial block to emit authenticated source plus repair envelopes.
+    // Auto starts in Zero, so force Normal's 64-source window to produce a full
+    // repair block alongside the authenticated H3 source packets.
     fec_config.initial_mode = FecMode::Normal;
-    fec_config.window_sizes.insert(FecMode::Normal, 16);
+    fec_config.force_on = true;
     let opt_config = OptimizeConfig::default();
 
     let sni = if qkey_cfg.sni.trim().is_empty() {
@@ -201,12 +202,15 @@ fn simulate_qkey_http3_auth(
     let mut out_client = vec![0u8; 262_144];
     let mut out_server = vec![0u8; 262_144];
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut http3_sent = false;
+    let mut fec_probe_stream_id = None;
     let authed = Cell::new(false);
     let mut c2s_sent = 0u64;
     let mut s2c_sent = 0u64;
     let mut fec_probe_queued = 0u64;
+    let mut fec_ready_send_attempts = 0u64;
+    let mut fec_bulk_only_packets = 0u64;
     let mut fec_systematic_seen = 0u64;
     let mut fec_repair_seen = 0u64;
     let mut fec_profile_seen = None;
@@ -223,14 +227,18 @@ fn simulate_qkey_http3_auth(
             let cli_writable = client.conn.writable().count();
             let cli_readable = client.conn.readable().count();
             let srv_readable = server.as_ref().map(|s| s.conn.readable().count()).unwrap_or(0);
+            let client_fec = client.fec_telemetry_snapshot();
+            let client_fec_wire_ready = client.conn.post_handshake_datagram_ready().ok();
             let cli_tls = client.conn.tls_handshake_complete();
             let srv_tls = server.as_ref().map(|s| s.conn.tls_handshake_complete()).unwrap_or(false);
             return Err(format!(
-                "timeout (server_created={}, c2s_sent={}, s2c_sent={}, fec_probe_queued={}, fec_systematic_seen={}, fec_repair_seen={}, fec_profile_seen={:?}, fec_parse_error={:?}, fec_source_sequences={:?}, http3_sent={}, authed={}, client_established={}, server_established={}, client_tls={}, server_tls={}, client_closed={}, server_closed={}, cli_writable={}, cli_readable={}, srv_readable={}, last_h3_err={})",
+                "timeout (server_created={}, c2s_sent={}, s2c_sent={}, fec_probe_queued={}, fec_ready_send_attempts={}, fec_bulk_only_packets={}, fec_systematic_seen={}, fec_repair_seen={}, fec_profile_seen={:?}, fec_parse_error={:?}, fec_source_sequences={:?}, http3_sent={}, authed={}, client_established={}, server_established={}, client_tls={}, server_tls={}, client_closed={}, server_closed={}, cli_writable={}, cli_readable={}, srv_readable={}, fec_state={:?}, fec_wire_ready={:?}, last_h3_err={})",
                 server.is_some(),
                 c2s_sent,
                 s2c_sent,
                 fec_probe_queued,
+                fec_ready_send_attempts,
+                fec_bulk_only_packets,
                 fec_systematic_seen,
                 fec_repair_seen,
                 fec_profile_seen,
@@ -247,15 +255,10 @@ fn simulate_qkey_http3_auth(
                 cli_writable,
                 cli_readable,
                 srv_readable,
+                client_fec,
+                client_fec_wire_ready,
                 last_h3_err.as_deref().unwrap_or("<none>")
             ));
-        }
-
-        if client.conn.is_established() && fec_probe_queued < 80 {
-            let probe = [fec_probe_queued as u8; 900];
-            if client.conn.dgram_send(&probe).is_ok() {
-                fec_probe_queued = fec_probe_queued.saturating_add(1);
-            }
         }
 
         // Create server upon first client packet.
@@ -305,8 +308,12 @@ fn simulate_qkey_http3_auth(
 
         // Drive client -> server
         for _ in 0..16 {
-            let len = match client.send(&mut out_client) {
-                Ok(v) => v,
+            let fec_ready_before_send = client
+                .conn
+                .post_handshake_datagram_ready()
+                .map_err(|error| format!("pre-send FEC readiness failed: {error}"))?;
+            let (len, send_info) = match client.send_with_info(&mut out_client) {
+                Ok(value) => value,
                 Err(ConnectionError::Done) => break,
                 Err(e) => return Err(format!("client send failed: {e:?}")),
             };
@@ -318,6 +325,12 @@ fn simulate_qkey_http3_auth(
                     "client datagram exceeded path MTU: {len} > {}",
                     client.conn.max_send_udp_payload_size()
                 ));
+            }
+            if fec_ready_before_send {
+                fec_ready_send_attempts = fec_ready_send_attempts.saturating_add(1);
+            }
+            if send_info.bulk_only {
+                fec_bulk_only_packets = fec_bulk_only_packets.saturating_add(1);
             }
             if let Some(ref mut srv) = server {
                 c2s_sent = c2s_sent.saturating_add(1);
@@ -375,7 +388,7 @@ fn simulate_qkey_http3_auth(
         if let Some(ref mut srv) = server {
             for _ in 0..16 {
                 let len = match client.send(&mut out_client) {
-                    Ok(v) => v,
+                    Ok(value) => value,
                     Err(ConnectionError::Done) => break,
                     Err(e) => return Err(format!("client send failed: {e:?}")),
                 };
@@ -424,14 +437,33 @@ fn simulate_qkey_http3_auth(
 
         if server.is_some() && !http3_sent && client.conn.is_established() {
             match client.send_http3_request("/auth-check") {
-                Ok(_) => match client.open_http3_stream_post("/tun") {
-                    Ok(_) => {
+                Ok(_) => match client.open_http3_stream_post("/fec-proof") {
+                    Ok(stream_id) => {
                         let _ = client.poll_http3();
+                        fec_probe_stream_id = Some(stream_id);
                         http3_sent = true;
                     }
-                    Err(error) => last_h3_err = Some(format!("tun_stream_open_failed: {error:?}")),
+                    Err(error) => last_h3_err = Some(format!("fec_stream_open_failed: {error:?}")),
                 },
                 Err(e) => last_h3_err = Some(format!("{e:?}")),
+            }
+        }
+
+        if let Some(stream_id) = fec_probe_stream_id {
+            let fec_ready = client
+                .conn
+                .post_handshake_datagram_ready()
+                .map_err(|error| format!("post-handshake FEC gate failed: {error}"))?;
+            if fec_ready {
+                for _ in 0..80 {
+                    let probe = [fec_probe_queued as u8; 900];
+                    let fin = fec_probe_queued == 79;
+                    if let Err(error) = client.http3_send_body_chunk(stream_id, &probe, fin) {
+                        return Err(format!("FEC proof body queue failed: {error}"));
+                    }
+                    fec_probe_queued = fec_probe_queued.saturating_add(1);
+                }
+                fec_probe_stream_id = None;
             }
         }
 

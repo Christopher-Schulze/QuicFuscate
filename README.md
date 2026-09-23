@@ -121,16 +121,16 @@ Rule of thumb:
 - **Curated Browser Fingerprints**: Curated browser/OS persona metadata (Chrome, Firefox, Safari, Edge) drives the real rustls ClientHello; deterministic in-memory metadata remains available for compatibility and audit inspection without an on-disk profile requirement<br>
 - **Native TLS handshake profile selection + TLS Cover**: Applies native fingerprint-aligned TLS profiles and can emit a lightweight synthetic TLS Cover exchange for stealth traffic shaping<br>
 - **Reality Cover Targets**: Probe traffic without a valid tunnel secret is relayed byte-transparent to configured cover hosts whose certificate the hop legitimately presents or relays
-  - The client SNI always equals the certificate name of the hop — the removed domain-fronting path decoupled them and is gone (TODO-1048)<br>
+  - The client SNI always equals the certificate name of the hop - the removed domain-fronting path decoupled them and is gone (TODO-1048)<br>
   - Risk/Tradeoff: a target the hop cannot serve or relay produces relay failures, not a certificate mismatch<br>
 - **HTTP/3 Masquerading**: Disguises traffic as standard HTTP/3 web traffic
   - Aligns ALPN, header sets, and framing to common web patterns<br>
 - **MASQUE Tunneling**: Core HTTP/3 CONNECT-UDP/capsule carrier for authenticated TUN traffic
   - Selected by an active TUN bridge or `dynamic` escalation; the retired standalone manager is not part of the runtime<br>
-- **Outer-Hop Fallback**: When the direct UDP dial is unreachable, stealth-family modes retry the connection exactly once through a configured MASQUE relay hop — never a per-packet transport flap<br>
+- **Outer-Hop Fallback**: When the direct UDP dial is unreachable, stealth-family modes retry the connection exactly once through a configured MASQUE relay hop - never a per-packet transport flap<br>
 - **TLS Profile Metadata**: Deterministic compatibility ClientHello metadata remains available in memory for audit and compatibility inspection; rustls owns the wire handshake<br>
 - **DNS-over-HTTPS (DoH)**: Resolves DNS via HTTPS to hide queries from on-path resolvers<br>
-- **Encrypted Client Hello (ECH)**: On the shared outer hop, the client reads the ECHConfigList from the hop's DNS HTTPS record over the same DoH path and lets rustls encrypt the inner ClientHello; absent a record, nothing is emitted (HPKE via `qf-hpke`, pure-Rust `hpke-rs` backend — no C toolchain)<br>
+- **Encrypted Client Hello (ECH)**: On the shared outer hop, the client reads the ECHConfigList from the hop's DNS HTTPS record over the same DoH path and lets rustls encrypt the inner ClientHello; absent a record, nothing is emitted (HPKE via `qf-hpke`, pure-Rust `hpke-rs` backend - no C toolchain)<br>
 - **QPACK Header Shaping**: Encodes realistic HTTP/3 headers with QPACK for indistinguishable request patterns<br>
 - **Active Probe Detection + Reality Fallback**: Detects probe-like traffic patterns and relays suspicious flows through a legitimate upstream path to preserve realistic network behavior under active scanning<br>
 - **Server Push Cover Traffic**: Emits realistic HTTP/3 PUSH_PROMISE/DATA cover bursts with configurable intensity, base path, and burst interval for traffic-shaping realism<br>
@@ -182,7 +182,7 @@ AEGIS is not a QUIC or TLS cipher suite. The shipped config is `mode = "dynamic"
 - **UDP Fast Path**: Portable batching (sendmmsg/recvmmsg), GSO/GRO (Linux), and optional io_uring path for reduced syscall overhead<br>
 - **Tunable Memory Pool**: Pre-allocated buffers for zero-copy I/O; adjust capacity/block size per workload<br>
 - **Connection Multiplexing**: Multiple streams over a single connection<br>
-- **0-RTT**: Not available. Asking for early data fails configuration validation because packet-protection keys for 0-RTT are not installed<br>
+- **0-RTT**: Opt-in and default-off. Rustls standard keys protect only explicitly marked replay-safe one-shot messages; H3/MASQUE/TUN remains post-handshake<br>
 - **Telemetry Hooks**: Throughput, latency, and repair-efficiency counters expose operational tuning signals
 - **Pluggable Congestion Control**: BBR3 (default), BBR2 (IETF draft-ietf-ccwg-bbr), and Reno with zero-vtable enum dispatch via `cc_dispatch!` macro. StealthShaper wraps any CC algorithm at runtime to apply browser-realistic gain patterns and pacing jitter during stealth mode
 

@@ -106,13 +106,16 @@ impl Connection {
     pub(in crate::transport::connection) fn poll_tls_and_validate_versions(
         &mut self,
     ) -> Result<(), crate::error::ConnectionError> {
-        let peer_parameters = {
+        let (peer_parameters, early_data_accepted) = {
             let Some(provider) = &mut self.tls_provider else {
                 return Ok(());
             };
             provider.poll_secrets_and_install(&*self.crypto)?;
-            provider.peer_quic_transport_params()
+            (provider.peer_quic_transport_params(), provider.early_data_accepted())
         };
+        if let Some(accepted) = early_data_accepted {
+            self.finish_zero_rtt(accepted);
+        }
         if let Some(parameters) = peer_parameters.as_deref() {
             self.apply_peer_transport_limits(parameters)?;
         }
@@ -383,8 +386,13 @@ impl Connection {
         self.stream_transmission_by_pn.clear();
         self.lost_stream_transmission_by_pn.clear();
         self.stream_retransmit_queue.clear();
+        self.zero_rtt_streams.clear();
+        self.zero_rtt_received_streams.clear();
+        self.zero_rtt_sent_pns.clear();
+        self.zero_rtt_received_bytes = 0;
         for (transmission_id, transmission) in &mut self.stream_transmissions {
             transmission.queued = true;
+            transmission.early_data = false;
             transmission.active_packet = None;
             transmission.lost_packets.clear();
             self.stream_retransmit_queue.push_back(*transmission_id);

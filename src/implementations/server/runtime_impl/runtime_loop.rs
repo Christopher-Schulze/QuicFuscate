@@ -89,22 +89,19 @@ impl ServerRuntime {
                     max_early_data_size: ar_section.max_early_data_size,
                     ..AntiReplayConfig::default()
                 };
-                // Set configurable max_early_data_size for new TLS server connections.
-                crate::qftls::set_max_early_data_size(ar_config.max_early_data_size);
                 let register = Arc::new(StrikeRegister::new(ar_config));
                 runtime_config.transport.set_strike_register(register.clone());
                 runtime_config.strike_register = Some(register);
                 log::info!(
                     "[server] 0-RTT anti-replay strike register created \
-                     (max_entries={}, max_age={}s, max_early_data={}B)",
+                     (max_entries={}, replay_window={}s, max_early_data={}B)",
                     ar_section.max_entries,
                     ar_section.max_ticket_age_secs,
                     ar_section.max_early_data_size,
                 );
             } else {
                 log::warn!(
-                    "[server] 0-RTT anti-replay protection disabled by config \
-                     (anti_replay.enabled=false) - replay attacks are possible"
+                    "[server] early data remains disabled because anti_replay.enabled=false"
                 );
             }
         }

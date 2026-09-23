@@ -219,22 +219,14 @@ impl EngineConfig {
         self.stealth
             .to_runtime_config(&self.fingerprint_rotation)
             .map_err(|error| ConfigError::Validation(format!("stealth: {error}")))?;
-        // Fail closed rather than advertise a capability that does nothing. The TLS and transport
-        // layers set early-data flags, but `get_0rtt_keys()` returns `None` and
-        // `CryptoContext::install_0rtt_keys()` has no production caller, so packet-level 0-RTT
-        // protection is never installed. Accepting either setting would leave a deployment
-        // believing it has 0-RTT, and believing its replay posture matters, while neither is true.
-        // TODO-720 owns the wiring; until it lands, asking for 0-RTT is an error, not a no-op.
-        for (key, requested) in [
-            ("connection.enable_0rtt", self.connection.enable_0rtt),
-            ("transport.enable_early_data", self.transport.enable_early_data),
-        ] {
-            if requested {
-                return Err(ConfigError::Validation(format!(
-                    "{key} is not supported: packet-level 0-RTT key installation is not wired, so \
-                     enabling it would neither send nor accept early data. Set {key} = false."
-                )));
-            }
+        let early_data_requested = self.connection.enable_0rtt || self.transport.enable_early_data;
+        if early_data_requested
+            && self.engine.mode == EngineMode::Server
+            && !self.anti_replay.enabled
+        {
+            return Err(ConfigError::Validation(
+                "server 0-RTT requires anti_replay.enabled = true".to_string(),
+            ));
         }
         Ok(())
     }
@@ -284,11 +276,11 @@ pub struct StealthSection {
     /// The wire image `dynamic` freezes at connect (TODO-1059): `stealth`
     /// (default) keeps persona-trace padding, in-QUIC FEC and cover headers;
     /// `performance` selects the thin image. Shape keys below are inert under
-    /// `mode = "dynamic"` — the image preset owns the whole wire shape.
+    /// `mode = "dynamic"` - the image preset owns the whole wire shape.
     #[serde(default)]
     pub dynamic_wire_image: qf_stealth::DynamicWireImage,
     /// Optional serialized `maybenot` machine for the wire-defense adapter
-    /// (TODO-1061). `None` by default — no machine loads unless an operator
+    /// (TODO-1061). `None` by default - no machine loads unless an operator
     /// pins one after simulator evidence. Not a shape key: stays effective
     /// under `mode = "dynamic"`.
     #[serde(default)]
@@ -437,7 +429,7 @@ impl StealthSection {
         let dynamic = runtime_mode == qf_stealth::StealthMode::Dynamic;
         let mut runtime = if dynamic {
             // TODO-1059: the image preset owns the whole wire shape for
-            // `dynamic` — padding set, timing, cover schedule and framing are
+            // `dynamic` - padding set, timing, cover schedule and framing are
             // frozen at connect, so the per-key shape overrides below stay
             // inert on this mode (non-Option keys cannot distinguish
             // "operator set false" from the section default).
@@ -1187,30 +1179,30 @@ mode = "roaming"
     }
 
     #[test]
-    fn zero_rtt_requests_are_rejected_until_packet_keys_are_wired() {
-        // 0-RTT is advertised at the TLS and transport layers but no packet-protection keys are
-        // ever installed, so accepting either key would hand a deployment a capability that
-        // silently does nothing. Both must fail closed, and both must be off by default.
+    fn zero_rtt_stays_off_by_default_and_server_requires_anti_replay() {
         let defaults = EngineConfig::default();
-        assert!(!defaults.connection.enable_0rtt, "0-RTT must be off by default");
-        assert!(!defaults.transport.enable_early_data, "early data must be off by default");
+        assert!(!defaults.connection.enable_0rtt);
+        assert!(!defaults.transport.enable_early_data);
         defaults.validate().expect("defaults validate");
 
-        for mutate in [
-            (|c: &mut EngineConfig| c.connection.enable_0rtt = true) as fn(&mut EngineConfig),
-            |c: &mut EngineConfig| c.transport.enable_early_data = true,
-        ] {
-            let mut config = EngineConfig::default();
-            mutate(&mut config);
-            let message = match config.validate() {
-                Err(ConfigError::Validation(message)) => message,
-                other => panic!("0-RTT request must be rejected, got {other:?}"),
-            };
-            assert!(
-                message.contains("not wired"),
-                "rejection must name the missing wiring, got {message}"
-            );
-        }
+        let mut client = EngineConfig::default();
+        client.engine.mode = EngineMode::Client;
+        client.connection.enable_0rtt = true;
+        client.anti_replay.enabled = false;
+        client.validate().expect("client early data does not host the replay register");
+
+        let mut server = EngineConfig::default();
+        server.engine.mode = EngineMode::Server;
+        server.transport.enable_early_data = true;
+        server.anti_replay.enabled = false;
+        let message = match server.validate() {
+            Err(ConfigError::Validation(message)) => message,
+            other => panic!("server 0-RTT without replay protection must fail: {other:?}"),
+        };
+        assert!(message.contains("server 0-RTT requires anti_replay.enabled = true"));
+
+        server.anti_replay = AntiReplaySection::default();
+        server.validate().expect("server early data with anti-replay validates");
     }
 
     #[test]
@@ -1317,7 +1309,7 @@ mode = "roaming"
         }
 
         let mut config = EngineConfig::default();
-        // `padding_strategy` is inert under `dynamic` (TODO-1059) — validate
+        // `padding_strategy` is inert under `dynamic` (TODO-1059) - validate
         // the legacy spelling on an explicit stealth mode.
         config.stealth.mode = StealthMode::Stealth;
         config.stealth.padding_strategy = "invalid".to_string();

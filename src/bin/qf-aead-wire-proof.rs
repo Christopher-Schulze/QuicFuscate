@@ -240,6 +240,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packet_number_reconstruction_does_not_wrap_at_u64_boundary() {
+        assert_eq!(reconstruct_pn(u64::MAX, u32::MAX as u64, 32), u64::MAX);
+    }
+
+    #[test]
     fn parses_ethernet_ipv4_udp_frame() {
         let payload = vec![0u8; 32];
         let udp_len = 8 + payload.len() as u16;
@@ -284,7 +289,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
@@ -608,7 +613,6 @@ fn analyze_datagram(datagram: &Datagram, state: &mut State, report: &mut Report)
                 analyze_long(
                     &buf[off..end],
                     pn_offset - off,
-                    dcid,
                     version,
                     if is_initial { 0 } else { 1 },
                     c2s,
@@ -670,9 +674,14 @@ fn reconstruct_pn(expected: u64, truncated: u64, bits: u32) -> u64 {
     let half = window >> 1;
     let mask = window - 1;
     let candidate = (expected & !mask) | truncated;
-    if candidate + half <= expected && candidate + window <= u64::MAX {
-        candidate + window
-    } else if candidate > expected + half && candidate >= window {
+    if let (Some(half_limit), Some(next_candidate)) =
+        (candidate.checked_add(half), candidate.checked_add(window))
+    {
+        if half_limit <= expected {
+            return next_candidate;
+        }
+    }
+    if candidate > expected.saturating_add(half) && candidate >= window {
         candidate - window
     } else {
         candidate
@@ -686,14 +695,12 @@ fn truncated_to_u64(pn_bytes: &[u8; 4], pn_len: usize) -> u64 {
 fn analyze_long(
     packet: &[u8],
     pn_offset: usize,
-    dcid: &[u8],
     version: u32,
     space: u8,
     c2s: bool,
     state: &mut State,
     report: &mut Report,
 ) {
-    let _ = dcid;
     let label = if space == 0 { "initial" } else { "handshake" };
     let keys = if space == 0 {
         let Some(initial_dcid) = &state.initial_dcid else {

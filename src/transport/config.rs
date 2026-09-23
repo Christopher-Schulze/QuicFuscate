@@ -544,19 +544,10 @@ impl Config {
         self.pto_backoff_cap = cap.clamp(1, recovery::K_PTO_BACKOFF_CAP_DEFAULT);
     }
 
-    /// Enables 0-RTT early data.
-    ///
-    /// For production use, attach a strike register via `set_strike_register()`
-    /// to protect against replay attacks (RFC 8446 Section 8, RFC 9001 Section 9.2).
+    /// Requests 0-RTT early data. Server-side TLS construction remains disabled
+    /// unless a shared anti-replay strike register is attached; clients do not
+    /// own the server replay register.
     pub fn enable_early_data(&mut self) {
-        if self.strike_register.is_none() {
-            log::warn!(
-                "[transport] 0-RTT early data enabled without anti-replay strike register. \
-                 Attach one via set_strike_register() for production use."
-            );
-        } else {
-            log::info!("[transport] 0-RTT early data enabled with anti-replay protection.");
-        }
         self.enable_early_data = true;
     }
 

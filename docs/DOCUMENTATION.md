@@ -432,7 +432,7 @@ This document provides comprehensive technical documentation for the system arch
   - `src/transport.rs`: Transport module root with focused submodules in `src/transport/` (packet, version, recovery, frames, h3, xdp, udpfast, connection)
   - HTTP/3 streams: `fin_received` flag tracks stream completion for deterministic GC in `poll()`
   - UDP fast paths: runtime-owned GSO/GRO, `UdpFastPath`, sendmmsg/recvmmsg, and sendmsg_x batching in `crates/qf-transport-udp/src/lib.rs` + `fastpath.rs`; `src/optimize/udp.rs` and `src/transport/udpfast.rs` retain root compatibility projections
-- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` — each per-packet counter and every histogram bin is `crossbeam_utils::CachePadded`, so dataplane writes and housekeeping drains no longer share cachelines (TODO-997) — sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, and transition-reason helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
+- `src/brain.rs`: StealthBrain adaptive policy engine (ACK/FEC hints plus Core H3/MASQUE hint channel), lock-free packet-observer telemetry accumulators drained by `apply_policy` - each per-packet counter and every histogram bin is `crossbeam_utils::CachePadded`, so dataplane writes and housekeeping drains no longer share cachelines (TODO-997) - sensor-fusion logic, and Intelligent-mode runtime-policy delta emitter. `src/brain/state.rs` owns policy state, actuator snapshots, and transition-reason helpers; `src/brain/orchestrator.rs` owns the feature-gated deep-integration orchestrator.
 
 - `src/engine/`: Embedded control plane (`QuicFuscateEngine`, `EngineConfig`, `EngineCommand`, `EngineEvent`, `EngineStats`) for programmatic runtime orchestration
 - `src/compress.rs`: Compression manager (zstd-only) with adaptive policy, telemetry-backed decisions, and optional dictionaries
@@ -536,19 +536,19 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 
 #### Stealth Padding & Timing Obfuscation
 - Padding is applied just before AEAD sealing in `transport::Connection::send()` to ensure full authentication and confidentiality.
-- One shared wire byte budget (TODO-1052): each stealth-enabled connection owns a `qf_stealth::BudgetLedger` built from `StealthConfig` (`wire_cap_bytes_per_sec`, `wire_cap_bytes_per_burst`, `wire_shape`). The ledger pays for FEC repairs, trace-shaped padding, and cover/chaff traffic out of the same counters — repairs first, then padding, then cover PINGs. A denied spend is skipped or dropped (telemetry: `FEC_REPAIRS_BUDGET_DROPPED`, `COVER_PING_BUDGET_SKIPPED`); nothing is ever sent over the cap, and the per-second window refills without borrowing.
+- One shared wire byte budget (TODO-1052): each stealth-enabled connection owns a `qf_stealth::BudgetLedger` built from `StealthConfig` (`wire_cap_bytes_per_sec`, `wire_cap_bytes_per_burst`, `wire_shape`). The ledger pays for FEC repairs, trace-shaped padding, and cover/chaff traffic out of the same counters - repairs first, then padding, then cover PINGs. A denied spend is skipped or dropped (telemetry: `FEC_REPAIRS_BUDGET_DROPPED`, `COVER_PING_BUDGET_SKIPPED`); nothing is ever sent over the cap, and the per-second window refills without borrowing.
 - Wire shapes (configurable via `stealth.padding_strategy`, mapped onto `StealthConfig.wire_shape`):
-  - `persona-trace` (Stealth/Stealth MAX/dynamic default): the padder asks the ledger for a target length out of the persona's captured length classes (`fixtures/persona_trace.toml` — wire-captured Chromium, source-derived Firefox, unverified Safari). No local RNG range.
+  - `persona-trace` (Stealth/Stealth MAX/dynamic default): the padder asks the ledger for a target length out of the persona's captured length classes (`fixtures/persona_trace.toml` - wire-captured Chromium, source-derived Firefox, unverified Safari). No local RNG range.
   - `fixed-cell` (`manual` option): pads each 1-RTT packet up to `normalize_target_size` where the budget allows.
   - Legacy strategy spellings (`random`, `fixed`, `adaptive`, `browser_mimic`, `normalize`, `packet_normalize`) still parse and collapse onto these two shapes; `random` is gone.
   - `stealth.normalize_target_size` is required by, and only valid with, `padding_strategy = "fixed-cell"` (legacy `normalize`/`packet_normalize` spellings map to the same shape). It must lie in `1200..=65527`: below the QUIC minimum datagram the target could not carry a conformant packet. Setting it alongside the trace shape is rejected as a contradiction rather than ignored, because a silently unused target is how a configuration comes to claim normalization it does not perform. The value flows `StealthSection` -> `StealthConfig` -> `BudgetLedger`, which pads each 1-RTT packet up to the target where the remaining budget allows.
 - Mode defaults:
   - `stealth` and `stealth_max`: `persona-trace` with the shared default cap (65536 B/s, 16384 B burst).
-  - `off` and `performance`: no ledger, zero stealth bytes — padding, cover, and chaff gates are pass-through and never emit.
-  - `dynamic`: owns a ledger from connect — the default `stealth` image installs the persona-trace shape; `dynamic_wire_image = "performance"` keeps the thin image with no ledger, mirroring `off`/`performance` byte behavior while escalation stays limited to repair ratio and the Reality armed bit (TODO-1059).
+  - `off` and `performance`: no ledger, zero stealth bytes - padding, cover, and chaff gates are pass-through and never emit.
+  - `dynamic`: owns a ledger from connect - the default `stealth` image installs the persona-trace shape; `dynamic_wire_image = "performance"` keeps the thin image with no ledger, mirroring `off`/`performance` byte behavior while escalation stays limited to repair ratio and the Reality armed bit (TODO-1059).
 - Timing obfuscation (Stealth MAX default): per-packet random jitter (us) gated in `transport::Config.set_stealth_timing`; enforced as a send gate in `Connection::send()`.
-- Hot-path randomness: the ledgerless legacy path's padding-rate rolls and jitter samples use `transport::rand::fast_rand_u64_uniform`, a secure-seeded non-cryptographic per-thread SplitMix64 helper. Under an installed wire ledger there are no RNG rolls — the persona trace and the cap decide. Randomness stays limited to cover heuristics; connection IDs, path challenges, keys, nonces, tokens, and authentication material stay on secure RNG APIs.
-- Maybenot wire defense (TODO-1061): `stealth.maybenot_machine = "<serialized machine>"` pins one `maybenot` 2.2.2 machine per connection (`src/core/connection/maybenot.rs`, `MaybenotRuntime`). The adapter reports direction-only wire events (`NormalSent`/`TunnelSent`/`TunnelRecv`/`NormalRecv`/`PaddingSent`) — the upstream `TriggerEvent` enum carries no length field, so per-datagram events are the honest fulfillment of "lengths and direction only". `SendPadding` matures into a QUIC `PADDING` frame of `effective_path_mtu - 48` charged to the shared wire budget (dropped with `MAYBENOT_PADDING_BUDGET_DROPPED` at the cap, never a private channel); `BlockOutgoing` opens a send block clamped to `pto / 4` that never holds pure ACK output, with non-bypassable pads held until `BlockingEnd`. The key is ignored on `off`/`performance`, invalid strings fail closed, and no preset ships a machine — `stealth`/`Stealth MAX` stay on the persona trace until a simulator run (`scripts/benchmarks/maybenot_sim.rs`) produces overhead and classifier numbers.
+- Hot-path randomness: the ledgerless legacy path's padding-rate rolls and jitter samples use `transport::rand::fast_rand_u64_uniform`, a secure-seeded non-cryptographic per-thread SplitMix64 helper. Under an installed wire ledger there are no RNG rolls - the persona trace and the cap decide. Randomness stays limited to cover heuristics; connection IDs, path challenges, keys, nonces, tokens, and authentication material stay on secure RNG APIs.
+- Maybenot wire defense (TODO-1061): `stealth.maybenot_machine = "<serialized machine>"` pins one `maybenot` 2.2.2 machine per connection (`src/core/connection/maybenot.rs`, `MaybenotRuntime`). The adapter reports direction-only wire events (`NormalSent`/`TunnelSent`/`TunnelRecv`/`NormalRecv`/`PaddingSent`) - the upstream `TriggerEvent` enum carries no length field, so per-datagram events are the honest fulfillment of "lengths and direction only". `SendPadding` matures into a QUIC `PADDING` frame of `effective_path_mtu - 48` charged to the shared wire budget (dropped with `MAYBENOT_PADDING_BUDGET_DROPPED` at the cap, never a private channel); `BlockOutgoing` opens a send block clamped to `pto / 4` that never holds pure ACK output, with non-bypassable pads held until `BlockingEnd`. The key is ignored on `off`/`performance`, invalid strings fail closed, and no preset ships a machine - `stealth`/`Stealth MAX` stay on the persona trace until a simulator run (`scripts/benchmarks/maybenot_sim.rs`) produces overhead and classifier numbers.
 
 #### HTTP/3 Client Hints & sec-fetch
 - `stealth::Http3Masquerade` emits `sec-ch-ua`, `sec-ch-ua-platform`, and `sec-ch-ua-mobile` only for Chromium personas (Chrome/Edge).
@@ -565,17 +565,33 @@ The intended result is a homogeneous, believable fingerprint: normal QUIC crypto
 - Fork boundary: rustls/TLS Cover governs the TLS-visible handshake story only. The custom 1-RTT data-plane AEAD posture in `src/crypto/` and `src/transport/*` is a separate fork-specific transport decision, valid only under the explicit full-fork assumption, and must not be interpreted as a TLS cipher-suite or upstream interoperability claim.
 - Risk/Tradeoff: enabling TLS Cover increases cover-byte volume and per-packet processing work.
 - Certificate tooling: development certificates enabled by feature `dev-certs` (rcgen); production uses PEM chain via `--cert/--key` (server) and CA bundle via `--ca-file` (client).
-- Session management: rustls owns an internal bounded TLS 1.3 client session store and the server uses a shared stateless ticket key for standard resumption. Resumption is reported from the real `HandshakeKind`; ticket bytes are never synthesized or exposed. 0-RTT remains disabled.
+- Session management: rustls owns a bounded shared TLS 1.3 client session store. Standard resumption uses the shared stateless ticket key. When server early data is enabled, server connections instead share a bounded stateful session store and disable the stateless ticketer; rustls consumes each stateful TLS 1.3 ticket once. Resumption is reported from the real `HandshakeKind`; ticket bytes are never synthesized or exposed. 0-RTT remains default-off.
 
-**0-RTT is not supported and is rejected by configuration.** `connection.enable_0rtt` and
-`transport.enable_early_data` both fail `EngineConfig::validate()` with a message naming the missing
-wiring. The TLS and transport layers set early-data flags, but the provider's `get_0rtt_keys()`
-returns `None` and `CryptoContext::install_0rtt_keys()` has no production caller, so packet
-protection for early data is never installed. Enabling the keys would therefore neither send nor
-accept early data while leaving a deployment believing it had 0-RTT and that its replay posture
-mattered. The settings fail closed rather than being silently ignored. The anti-replay strike
-register described below stays in place for the point where the wiring lands.
-  - Anti-replay: 0-RTT data is protected by a SHA-256 strike register (`src/transport/anti_replay.rs`) per RFC 8446 Section 8 and RFC 9001 Section 9.2. The register uses a Bloom fast-negative in front of the full-fingerprint index and a FIFO ring for O(1) capacity eviction. `max_entries` is bounded by `MAX_STRIKE_ENTRIES` (2^24): section validation rejects larger values at startup and the internal capacity clamp keeps the Bloom bitset sizing arithmetic from wrapping for programmatic configurations. Replayed 0-RTT packets are silently discarded; clients fall back to 1-RTT automatically. Configurable via `[anti_replay]` TOML section.
+**0-RTT is opt-in and rustls-standard only.** `connection.enable_0rtt` and
+`transport.enable_early_data` are false by default. Client early-data support is configured before
+rustls connection construction. The provider obtains ready-made directional packet and header keys
+from `ConnectionCommon::zero_rtt_keys()` and installs them through `QuicTlsKeyInstaller`; the bundle
+fields are crate-scoped so external callers cannot substitute a private AEAD owner. There is no
+transport-side 0-RTT KDF or private AEAD path.
+
+A server accepts early data only when its shared anti-replay register is attached. TLS uses the
+shared stateful session cache and rustls ticket freshness/single-use checks. After decryption and
+frame preflight, `StrikeRegister` checks a domain-separated, length-delimited SHA-256 fingerprint
+before packet-number or ACK state is committed. Duplicate fingerprints and a saturated register
+are rejected. `[anti_replay].max_ticket_age_secs` controls fingerprint retention; rustls validates
+TLS ticket freshness separately. The receive path enforces `[anti_replay].max_early_data_size` per
+connection. `max_entries` is bounded by `MAX_STRIKE_ENTRIES` (2^24); oversized values fail validation.
+
+The client transport sends early data only through `stream_send_replay_safe_0rtt()`, which admits a
+complete client-initiated bidirectional stream with FIN after the caller marks the whole message
+replay-safe. Unmarked streams and DATAGRAM frames stay out of 0-RTT. The receive path rejects
+unidirectional and server-initiated streams. H3 initialization waits for TLS completion because it
+emits control-stream SETTINGS. The client never sends H3, CONNECT, MASQUE, tunnel fallback, or TUN
+payload in early data. If a server receives an early H3 request, it answers with 425 before request
+callbacks, MASQUE flow registration, or tunnel-body dispatch, then drains the rejected body. A
+no-ticket or rejected attempt falls back to 1-RTT through retained stream data and ordinary
+recovery. This transport capability is not a claim of VPN reconnect-latency or browser-fingerprint
+improvement.
 
 #### Fingerprint Source Model
 - Primary runtime path: `TlsProfile` selection and rustls `ClientConfig` construction from the active `BrowserProfile` and `OsProfile` persona.
@@ -698,23 +714,23 @@ Current Obfuscation-Modes - Matrix & Tuning (on = enabled, off = disabled, value
 | Reality Cover Targets | off | explicit only | on with explicit targets or built-in CDN list | off at Level 0; explicit/escalated only |
 | HTTP/3 Masquerading | on | on | on | on |
 | QPACK Headers | on | on | on | on |
-| Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | frozen image: on (stealth image) / off (performance image) — never level-keyed (TODO-1059) |
-| Timing Obfuscation | off | 750 us default | 3000 us default | frozen image — never level-keyed (TODO-1059) |
+| Traffic Padding | off | Adaptive (max 86) | BrowserMimic (max 256) | frozen image: on (stealth image) / off (performance image) - never level-keyed (TODO-1059) |
+| Timing Obfuscation | off | 750 us default | 3000 us default | frozen image - never level-keyed (TODO-1059) |
 | Flow Shaper and Dummy Retransmits | off | off | on | frozen image |
 | Active Fingerprint Rotation | off | off | off (next-session only) | off (next-session only) |
-| Server Push Cover | off | off | off | off — generation removed in TODO-1055; outer-hop persona requests only |
+| Server Push Cover | off | off | off | off - generation removed in TODO-1055; outer-hop persona requests only |
 | Real-time Choke | off | off | off (compat/manual only) | off |
 | DNS-over-HTTPS | on | on | on | on |
 | TLS Cover provider | on* | on* | on* | on* |
-| WebTransport Cover | off | off | escalated/anti-DPI cover only | stealth image only — never level-keyed |
+| WebTransport Cover | off | off | escalated/anti-DPI cover only | stealth image only - never level-keyed |
 | Core H3/MASQUE TUN | only if TUN requires it | only if TUN requires it | only if TUN requires it | TUN or escalation |
-| Core H3/MASQUE Preference | off | off | off | armed bit — may flip with probe pressure (allowed actuator, TODO-1059) |
-| Cover Traffic Interval | off | 5 s | 5 s | 5 s — fixed, never re-keyed by escalation |
+| Core H3/MASQUE Preference | off | off | off | armed bit - may flip with probe pressure (allowed actuator, TODO-1059) |
+| Cover Traffic Interval | off | 5 s | 5 s | 5 s - fixed, never re-keyed by escalation |
 
 Notes:
-- Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. `dynamic` freezes one wire image at connect (TODO-1059): the stealth image by default, or the thin performance image via `stealth.dynamic_wire_image = "performance"`. Probe escalation may only move the repair-ratio hint and the Reality/MASQUE armed bit — never the packet shape.
+- Active probing detection is enabled in Stealth, Anti-DPI, and Intelligent; Performance keeps overhead minimal with the detector disabled and no H3 cover-request scheduler. `dynamic` freezes one wire image at connect (TODO-1059): the stealth image by default, or the thin performance image via `stealth.dynamic_wire_image = "performance"`. Probe escalation may only move the repair-ratio hint and the Reality/MASQUE armed bit - never the packet shape.
 - `sec-ch-ua*` hints are emitted only for Chromium family (Chrome/Edge); Firefox and Safari typically omit them.
-- `qf-stealth` owns the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthManager` owns preset baselines and preserves the historical root adapter. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline. Under `dynamic` every packet-shape permission is denied (`BrainRuntimePermissions::deny_all`), so the delta cannot mutate the frozen wire image — the Brain still steers the repair-ratio hint and the MASQUE armed bit.
+- `qf-stealth` owns the concrete Intelligent-mode runtime policy derivation for pacing, timing, padding, mimic bias, granularity, and CC profile. `StealthManager` owns preset baselines and preserves the historical root adapter. `StealthBrain` adapts transport ACK policy per connection, and its Intelligent-mode stealth steering flows through a narrow runtime-policy delta instead of embedding raw per-actuator mapping logic inline. Under `dynamic` every packet-shape permission is denied (`BrainRuntimePermissions::deny_all`), so the delta cannot mutate the frozen wire image - the Brain still steers the repair-ratio hint and the MASQUE armed bit.
 - * TLS Cover provider is enabled by default across modes and can be disabled with `QUICFUSCATE_TLS_COVER=0`. Runtime cover performance mode is now driven by the active stealth mode profile rather than relying on ENV-only shadow state. `StealthConfig.use_tls_cover` (TOML alias: `use_tls_cover_extras`) only controls TLS Cover extras (ticket manager and cert emulator).
 - Risk/Tradeoff: cover targets must be hosts the hop can legitimately serve or relay to; a target the hop does not control produces relay failures, not a certificate mismatch. Relayed probe bytes are forwarded unchanged and consume upstream bandwidth.
 - Core H3/MASQUE is the production VPN/TUN carrier and the only active MASQUE implementation. Its H3 capsule parser buffers split DATA frames, rejects malformed/truncated FIN tails, and stages decoded events until the enclosing batch is valid.
@@ -788,7 +804,7 @@ Final stealth stack:
 - Performance: uTLS/persona on; DoH on; cover targets off; HTTP/3 masquerading on; no padding; no timing obfuscation; QPACK headers on; active persona rotation off.
 - Stealth: uTLS/persona on; DoH on; cover targets only when `reality_cover_targets` is explicitly configured; HTTP/3 masquerading on (outer hops only); QPACK headers on; adaptive padding (max 86); timing obfuscation on (default 750 us); active persona rotation off.
 - Anti-DPI: uTLS/persona on; DoH on; cover targets from the explicit list or the built-in CDN set; HTTP/3 masquerading on (outer hops only); QPACK headers on; BrowserMimic padding (max 256); timing obfuscation on (default 3000 us); flow shaper enabled; active persona rotation is still deferred to next session; WebTransport cover enabled as a one-shot H3 application-cover session; real-time choke off by default.
-- Intelligent (`dynamic`): freezes one wire image at connect — the stealth image by default (persona-trace padding, timing, in-QUIC FEC and persona cover headers on from the first 1-RTT packet) or the thin performance image via `stealth.dynamic_wire_image = "performance"` (no stealth padding, no cover schedule, in-QUIC FEC wrapper allowed). Escalation on probe/brain pressure moves only the repair ratio inside the byte cap and the Reality/MASQUE armed bit; padding set, timing, cover schedule, framing and AEAD never change mid-connection (TODO-1059).
+- Intelligent (`dynamic`): freezes one wire image at connect - the stealth image by default (persona-trace padding, timing, in-QUIC FEC and persona cover headers on from the first 1-RTT packet) or the thin performance image via `stealth.dynamic_wire_image = "performance"` (no stealth padding, no cover schedule, in-QUIC FEC wrapper allowed). Escalation on probe/brain pressure moves only the repair ratio inside the byte cap and the Reality/MASQUE armed bit; padding set, timing, cover schedule, framing and AEAD never change mid-connection (TODO-1059).
 - Manual: all knobs as configured in TOML or env; no automatic escalation.
 
 #### Real-Time Rate Choke
@@ -799,7 +815,7 @@ Final stealth stack:
 #### Probe Escalation (runtime)
 - Escalation triggers on active probe detection only when `dynamic_enabled` is true (`dynamic`). `performance` and `stealth` do not auto-escalate on probe.
 - The probe level feeds `IntelligentLevelHints.probe_level` → the Brain's repair-ratio hint (`fec_hint_ppm`) and the Reality/MASQUE armed bit. Both are the only actuators escalation may move (TODO-1059); the armed window expires after 20 minutes.
-- Cover cadence, padding set, timing amplitude, framing, the traffic-analysis policy and the payload AEAD are frozen at connect — escalation never re-keys them.
+- Cover cadence, padding set, timing amplitude, framing, the traffic-analysis policy and the payload AEAD are frozen at connect - escalation never re-keys them.
 
 ### StealthBrain Runtime Control
 
@@ -808,23 +824,23 @@ The StealthBrain module (`src/brain.rs`) implements sophisticated ACK policy opt
 Runtime wiring is cohesive rather than feature-isolated:
 
 - `StealthManager` enforces mode/profile policy on stealth actuators, remains authoritative for non-Intelligent preset baselines, and delegates concrete Intelligent-mode runtime policy targets to the root-independent `qf-stealth` owner.
-- `StealthBrain` is attached via `CombinedObserver` and continuously translates one connection's transport signals into three — and only three — actuators (TODO-1060): the repair-ratio hint, the Reality/MASQUE armed bit, and the congestion-driven ACK threshold.
+- `StealthBrain` is attached via `CombinedObserver` and continuously translates one connection's transport signals into three - and only three - actuators (TODO-1060): the repair-ratio hint, the Reality/MASQUE armed bit, and the congestion-driven ACK threshold.
 - `DeepIntegrationOrchestrator` (feature `orchestrator`) contributes cross-signal heuristics for escalation and cover-traffic coordination.
 
 #### StealthBrain Core Components
-- **`StealthBrain`**: Sensor-fusion engine; the bandit/pattern generator that picked padding, jitter and CC profiles was removed (TODO-1060 — a converging bandit is a stable pattern, and a stable pattern is a fingerprint).
+- **`StealthBrain`**: Sensor-fusion engine; the bandit/pattern generator that picked padding, jitter and CC profiles was removed (TODO-1060 - a converging bandit is a stable pattern, and a stable pattern is a fingerprint).
 - **`CombinedObserver`**: Multi-observer pattern allowing attachment of multiple `TransportObserver` instances.
 - **`StealthBrainConfig`**: Configuration with ACK bounds, histogram geometry, probe budget and cooldown parameters.
-- **`derive_intelligent_actuators`** (`qf-stealth::intelligent_policy`): shape-free policy — consumes the sensor snapshot and emits `IntelligentActuatorHints { repair_ratio_ppm, repair_interval_pkts, reality_armed }`. There is deliberately no field that could carry a packet shape.
+- **`derive_intelligent_actuators`** (`qf-stealth::intelligent_policy`): shape-free policy - consumes the sensor snapshot and emits `IntelligentActuatorHints { repair_ratio_ppm, repair_interval_pkts, reality_armed }`. There is deliberately no field that could carry a packet shape.
 
 #### Operational Parameters
 - Inputs (sensors only): ACK delay (short/long EWMA), inter-arrival (IAT) histograms, size histograms, ECN (ECT0/ECT1/CE with Kalman smoothing), RTT spike weight, reorder ratio, anomaly counters (RST/ToS/other), and the manager's probe-escalation level.
-- **Repair-ratio hint** (allowed actuator): `repair_ratio_ppm` is EMA-smoothed (30% blend per tick), bounded to `80_000..=320_000` ppm; `repair_interval_pkts` walks at most one packet per tick inside `2..=20`. Probe escalation may raise the hint (+8% per probe level) — it stays inside the TODO-1052 shared byte cap.
+- **Repair-ratio hint** (allowed actuator): `repair_ratio_ppm` is EMA-smoothed (30% blend per tick), bounded to `80_000..=320_000` ppm; `repair_interval_pkts` walks at most one packet per tick inside `2..=20`. Probe escalation may raise the hint (+8% per probe level) - it stays inside the TODO-1052 shared byte cap.
 - **Reality/MASQUE armed bit** (allowed actuator): flips on CE pressure, RTT spikes, reordering, histogram divergence, anomaly signals, or any probe-escalation level; rate-limited to one toggle per 800 ms.
-- **ACK-eliciting threshold** (allowed actuator): pure congestion feature — tighter under CE pressure and slow ACK cadence, looser on clean paths. It changes *when* ACKs are emitted, never the packet length set or framing, so it stays (recorded decision, TODO-1060). Step limiting moves by at most +/-1 per change, clamped to `[ack_min, ack_max]`; an explicit operator `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` override locks it out via `BrainRuntimePermissions`.
+- **ACK-eliciting threshold** (allowed actuator): pure congestion feature - tighter under CE pressure and slow ACK cadence, looser on clean paths. It changes *when* ACKs are emitted, never the packet length set or framing, so it stays (recorded decision, TODO-1060). Step limiting moves by at most +/-1 per change, clamped to `[ack_min, ack_max]`; an explicit operator `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` override locks it out via `BrainRuntimePermissions`.
 - **Removed** (TODO-1060): epsilon-greedy bandit, bandit-chosen jitter amplitude, Tamaraw direction table, mimic-bias/granularity/CC-profile steering, `StealthRuntimePolicy`/`StealthRuntimeDelta`, the `intelligent_stealth_runtime` gate, the Tamaraw stats snapshot, `explore_prob`/`pad_max_*` config knobs, `TransportPolicyError`. The wire shape comes from the frozen image (TODO-1059); anything beyond belongs to the Maybenot machine (TODO-1061).
 - Gradual escalation (TODO-416): Probe detection uses `EscalationState` with a sliding-window probe counter. Escalation 0->1 requires >=3 probes in 60s; 1->2 requires >=8 probes in 120s. A single probe does NOT trigger escalation. The state stores timestamp buckets at millisecond resolution, aggregates probes sharing a millisecond, keeps at most 120,001 buckets for the 120-second window, and maintains independent 60-/120-second counters. De-escalation drops at most one level per configurable quiet period (default: 300s), measured from the latest probe or level change. Config knobs: `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L1` (default 3), `QUICFUSCATE_STEALTH_ESCALATION_PROBE_THRESHOLD_L2` (default 8), `QUICFUSCATE_STEALTH_DEESCALATION_QUIET_PERIOD_SEC` (default 300).
-- `TransportPolicyTarget` (root-independent contract): only `brain_runtime_permissions()` and `set_ack_eliciting_threshold()` remain — no shape API is exposed to the Brain.
+- `TransportPolicyTarget` (root-independent contract): only `brain_runtime_permissions()` and `set_ack_eliciting_threshold()` remain - no shape API is exposed to the Brain.
 - FEC hints: updates the connection-local `BrainFecHints` state consumed by that connection's `FecTransportObserver`; no FEC policy crosses connection boundaries.
 - ACK batches: `on_ack` aggregates a coherent sum/count batch under a short mutex and applies the batch mean to both ACK-delay EWMAs, so callbacks between policy ticks are not dropped.
 - Reorder pressure: lifetime counters remain telemetry, while policy uses exponentially decayed recent counters with a 30-second half-life.
@@ -932,7 +948,7 @@ The shared DoH primitives and client runtime owner are implemented in `src/dns/m
 - `DnsProxyConfig` owns the configured endpoint list, pre-pins endpoint addresses before resolver mutation, and caches one `reqwest::Client` for connection reuse.
 - `ClientDnsRuntime` binds the configured client listener on localhost UDP/53, applies one shared `DnsAdmission` across its IPv4 and IPv6 listeners, calls `process_dns_query_with_admission()` with the peer source address, and restores the prior platform resolver before TUN or connection teardown. Localhost UDP exposes source-IP identity only, so all processes using one address share that bucket. Excess work is dropped before forwarding without a synthetic response; `ClientDnsRuntime::admission_snapshot()` exposes accepted, in-flight, rate, and bounded-identity counters. The embedded Engine and standalone TUN client use this owner when `enable_doh` is enabled.
 - Endpoint resolution occurs before kill-switch connecting policy and before the local resolver changes. Invalid HTTPS endpoints, unsupported credentials/fragments, missing hosts, non-53 listener ports, and non-DoH client configs fail closed.
-- Cleartext policy and TLS persona (TODO-1058): `DnsProxyConfig.allow_udp_fallback` forbids any UDP/53 upstream exchange when `false`; `process_dns_query` returns SERVFAIL without touching the upstream path in that case, so a stealth client can never emit a cleartext DNS query — a DoH failure is an error, not a fallback. `off` and `performance` clients and the server-side TUN forwarder keep `true`. `DnsProxyConfig.doh_persona_ciphers` carries the frozen tunnel persona's `TlsProfile::cipher_suites` into a preconfigured rustls `ClientConfig` for the DoH connection (persona order preserved; TLS 1.2 suites keep rustls provider defaults because the fixture claims none; ALPN stays `h2` — the persona's `h3` is a QUIC advertisement no honest TCP client sends). `ClientDnsRuntime::prepare` derives both from `EngineConfig.stealth`; the standalone client derives them from the resolved `stealth_config`. DoH hides the destination name — it does not beat an IP block against the DoH host itself; stealth modes accept that fail-closed trade-off by design.
+- Cleartext policy and TLS persona (TODO-1058): `DnsProxyConfig.allow_udp_fallback` forbids any UDP/53 upstream exchange when `false`; `process_dns_query` returns SERVFAIL without touching the upstream path in that case, so a stealth client can never emit a cleartext DNS query - a DoH failure is an error, not a fallback. `off` and `performance` clients and the server-side TUN forwarder keep `true`. `DnsProxyConfig.doh_persona_ciphers` carries the frozen tunnel persona's `TlsProfile::cipher_suites` into a preconfigured rustls `ClientConfig` for the DoH connection (persona order preserved; TLS 1.2 suites keep rustls provider defaults because the fixture claims none; ALPN stays `h2` - the persona's `h3` is a QUIC advertisement no honest TCP client sends). `ClientDnsRuntime::prepare` derives both from `EngineConfig.stealth`; the standalone client derives them from the resolved `stealth_config`. DoH hides the destination name - it does not beat an IP block against the DoH host itself; stealth modes accept that fail-closed trade-off by design.
 - The live server TUN path forwards intercepted DNS with plain UDP `forward_dns_query()` rather than this DoH helper. That server ownership model is intentional; `resolve_via_dns_upstreams()` shares the SERVFAIL-versus-upstream-response contract with the client proxy. One `DnsAdmission` now applies 128 concurrent blocking exchanges, a 2,000 PPS aggregate cap with a 4,000-query burst, and a 100 PPS per-identity cap with a 200-query burst. Authenticated MASQUE/TUN callbacks use `DnsAdmissionIdentity::Session`; helper boundaries without a session use `Source(IpAddr)`. Session and source state is removed on close, rebind, and expiry, while idle pruning and a hard 1,024-identity cap bound churn. `ServerConfig.dns_admission` validates optional `QUICFUSCATE_DNS_MAX_IN_FLIGHT`, `QUICFUSCATE_DNS_GLOBAL_PPS`, `QUICFUSCATE_DNS_GLOBAL_BURST`, `QUICFUSCATE_DNS_PER_CLIENT_PPS`, `QUICFUSCATE_DNS_PER_CLIENT_BURST`, `QUICFUSCATE_DNS_MAX_IDENTITIES`, and `QUICFUSCATE_DNS_BUCKET_IDLE_SECS` overrides. The aggregate budget is shared across sequential upstream resolvers; there is no per-resolver multiplication. Admission outcomes are exported through `quicfuscate_dns_intercept_admission_events_total`, while `quicfuscate_dns_intercept_dropped_total` remains the aggregate drop counter. Accepted `spawn_blocking` workers still have no runtime owner or terminal-outcome barrier; TODO-650 owns that lifecycle gap. TODO-669 supplies the shared 4,096-byte DNS message contract, 5-second aggregate DoH/UDP fallback deadline, bounded streamed DoH body, typed public input rejection, UDP oversize sentinel rejection, and non-blocking async plain-DNS boundary. DoH responses now require a response QR bit, standard opcode, exactly one bounded question, matching case-insensitive QNAME, raw QTYPE/QCLASS, and transaction ID; answer, authority, and EDNS sections remain opaque so valid compression and additional records pass through unchanged. The shared query gate now also requires a supported query flag set, exactly one question, bounded RFC name/pointer encodings, and preserves the exact question bytes plus raw QTYPE/QCLASS for synthetic responses. Server IPv4/IPv6 UDP/53 admission enforces exact packet lengths, rejects IPv4 fragments, validates IPv4 header and applicable UDP checksums, and requires the IPv6 UDP checksum. Plain UDP responses are now bound to their outstanding query by the same transport-neutral matcher used for DoH (`match_response_to_query()`): response QR bit, standard opcode, exactly one bounded question, matching transaction ID, case-insensitive QNAME, and raw QTYPE/QCLASS. Source-address equality alone is not transaction authentication, because a stale, misdirected, or forged datagram can arrive from the configured resolver's own address. An unmatched response consumes the same bounded spoof-rejection budget and the loop keeps waiting under the existing deadline, so a legitimate answer still in flight is not lost; exhausting the budget fails with `InvalidData`. The 4,096-byte size limit is unchanged and answer, authority, and EDNS sections stay opaque. Native Linux/TUN, Omega, and live publication proof remain separate gates.
 - Forwarding uses the shared `DNS_MESSAGE_MAX_SIZE` limit of 4,096 bytes. DoH validates query size before request-body allocation, rejects an oversized `Content-Length`, and accumulates chunked bodies only while the same cap holds. Endpoint fallback shares one monotonic 5-second deadline. Plain UDP uses a 4,097-byte receive sentinel so any datagram above the 4,096-byte contract is rejected instead of returned truncated; resolver fallback uses the same aggregate deadline. The public async plain-DNS branch runs synchronous socket work in an owned `spawn_blocking` task under that deadline, so it does not block a Tokio worker. `benches/dns_forwarding.rs` records separate allocation counts and Criterion latency for client request/response buffers, server UDP receive allocation, and synthetic SERVFAIL construction. These transport guarantees do not include TODO-721 UDP transaction/question matching or native Linux/TUN, Omega, and live publication proof.
 - Standalone client mode without TUN does not install an OS resolver owner. macOS uses the existing network-service backend; Linux and Windows receive the active TUN interface name through the platform DNS hook.
@@ -964,7 +980,7 @@ The stealth timing system has been fully refactored to eliminate blocking `std::
 - `QuicFuscateConnection::next_send_deadline()` merges the traffic-analysis deadline with outer pacing, stealth release, and QUIC recovery so live loops cannot oversleep the timer.
 - An enabled policy logs its estimated maximum pre-IP/UDP wire cost. Packet size and cadence are bounded by the validated transport policy and current path UDP payload.
 
-The active baseline comes from `[transport.traffic_analysis]`. `[transport.qkey_traffic_analysis_ceiling]` is an independent operator ceiling for per-QKey requests and remains inert until encrypted bearer authentication succeeds. `[transport.intelligent_traffic_analysis_ceiling]` remains a validated operator ceiling surface for the Intelligent level-2 escalation path; since TODO-1059 froze the dynamic wire image, no production caller drives a mid-connection level flip — the ceiling API and its enforcement tests are retained for the Maybenot work (TODO-1061). Failed or incomplete QKey authentication cannot activate either upgrade.
+The active baseline comes from `[transport.traffic_analysis]`. `[transport.qkey_traffic_analysis_ceiling]` is an independent operator ceiling for per-QKey requests and remains inert until encrypted bearer authentication succeeds. `[transport.intelligent_traffic_analysis_ceiling]` remains a validated operator ceiling surface for the Intelligent level-2 escalation path; since TODO-1059 froze the dynamic wire image, no production caller drives a mid-connection level flip - the ceiling API and its enforcement tests are retained for the Maybenot work (TODO-1061). Failed or incomplete QKey authentication cannot activate either upgrade.
 
 ### Compression Module
 
@@ -1471,7 +1487,7 @@ pub struct MacTun {
 #### AEAD Policy and Implementation Status
 - The live private payload owner is libaegis (`aegis` 0.9.18), not a first-party AEGIS or MORUS implementation.
 - `off` and `performance` pin AEGIS-128L for the authenticated payload. `stealth`, `Stealth MAX`, and `dynamic` stay on AES-128-GCM. `manual` uses AEGIS only when `packet_protection_mode = "auto"` and `aead_preference = "aegis"`. The shipped config is `mode = "dynamic"`, so the default stays AES-GCM.
-- Packet hot path: Initial, Handshake, pre-auth 1-RTT, and header protection use the rustls/ring AES-128-GCM owners. After authenticated private control completes, `off` and `performance` install `aegis` for the payload and leave header protection on AES. 0-RTT is disabled.
+- Packet hot path: Initial, Handshake, pre-auth 1-RTT, and header protection use the rustls/ring AES-GCM owners. After authenticated private control completes, `off` and `performance` install `aegis` for the 1-RTT payload and leave header protection on AES. Opt-in 0-RTT always uses rustls standard packet and header keys, remains default-off, and is independent of the private 1-RTT owner.
 - Private transition wiring: `src/qftls/private_protocol.rs` defines the bounded `0x41` MASQUE control-capsule payload, strict proposal/selection/confirmation parsing, exporter-root HMAC, canonical role-ordered context binding, exact directional key/IV derivation, downgrade checks, and terminal fail-closed state transitions. `src/core/connection/private_packet_protection.rs` bridges accepted H3/MASQUE flows and authenticated QKey transcript state to the transport installer. The server primes that owner after authenticated peer-flow acceptance, and the client primes it after assignment/QKey binding for the direct connection and every active circuit hop, before a subsequent H3 poll can consume the first proposal. The owner activates only after TLS, QKey, flow, schedule, and boundary checks pass; `advanced-required` remains rejected until TODO-883, TODO-884, and TODO-681 promotion gates are complete.
 - Deployment-seeded wire-image diversity (TODO-1014, UPGen adaptation): `PrivateProtocolShape` expands a per-installation 32-byte seed (HKDF, domain `qf private protocol shape v1`) into a Fisher-Yates permutation of eight wire blocks (both nonces, both hashes, ALPN, both DCIDs, a pad block), a 0/16/32/64-byte pad granule with seed-derived content, and an inter-capsule pacing hint. A non-canonical shape emits wire version 2 (`PRIVATE_PACKET_PROTECTION_VERSION_SHAPED`); the fixed scalar header and the trailing authenticator never move, and the authenticator binds the exact encoded byte image, so a seed mismatch fails closed at authentication or earlier at the version gate. The seed is provisioned via `[crypto] private_shape_seed` (64 hex chars) and never negotiated on the wire; absent seed emits byte-identical v1. It must be generated per installation - reuse across deployments silently re-collapses diversity.
 - Performance evidence for the pinned owner is `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`, which measures `aegis`.
@@ -1843,7 +1859,7 @@ Transport submodules (`src/transport/`):
 - `src/transport/recovery.rs` - loss detection/recovery controller.
 - `crates/qf-transport-batch/src/lib.rs` - explicit rust parity/test-only batched IO surface; `src/transport/batch.rs` only projects the historical root path and neither path is part of the normal runtime transport path.
 - `src/transport/udpfast.rs` - root compatibility projection for `crates/qf-transport-udp/src/fastpath.rs`; internal buffer/counter machinery is not part of the public runtime contract.
-- `src/transport/anti_replay.rs` - 0-RTT strike register (SHA-256 fingerprint dedup, Bloom fast-negative, FIFO ring eviction).
+- `src/transport/anti_replay.rs` - 0-RTT strike register (domain-separated SHA-256 fingerprints, Bloom fast-negative, TTL cleanup, bounded capacity that fails closed without evicting live fingerprints).
 - `src/transport/cc/mod.rs` - pluggable CongestionController trait and CcImpl dispatch.
 - `src/transport/cc/reno.rs` - RFC 6582 NewReno implementation.
 - `src/transport/cc/bbr2.rs` - BBR v2 standalone implementation (IETF draft-ietf-ccwg-bbr). Four-state machine (Startup/Drain/ProbeBW/ProbeRTT), windowed max-bandwidth filter, loss tracking via EWMA. No external crate dependency.
@@ -2076,10 +2092,10 @@ pub trait TransportObserver: Send + Sync {
 **Brain actuators (TODO-1060 - the bandit is gone):**
 - The epsilon-greedy bandit, the arms table, the reward bookkeeping and the timestamp-roll exploration were removed. A converging bandit converges to a stable pattern, and a stable pattern is a fingerprint; there was no evaluation against DF/Tik-Tok/Var-CNN to justify keeping it.
 - What remains: `derive_intelligent_actuators` in `qf-stealth` turns the sensor snapshot into `IntelligentActuatorHints { repair_ratio_ppm, repair_interval_pkts, reality_armed }`. The repair ratio is EMA-smoothed and bounded to 80_000-320_000 ppm; the interval walks one packet per tick inside 2-20; probe escalation may raise the hint within the TODO-1052 byte cap.
-- The ACK-eliciting threshold stays as a pure congestion feature: CE pressure and slow ACK cadence tighten it, clean paths loosen it. It changes *when* ACKs are emitted, never the packet length set — recorded decision, TODO-1060. Step limiting (+/-1 per change) and the `BrainRuntimePermissions.ack_threshold` lock survive; operator `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` overrides win.
+- The ACK-eliciting threshold stays as a pure congestion feature: CE pressure and slow ACK cadence tighten it, clean paths loosen it. It changes *when* ACKs are emitted, never the packet length set - recorded decision, TODO-1060. Step limiting (+/-1 per change) and the `BrainRuntimePermissions.ack_threshold` lock survive; operator `QUICFUSCATE_ACK_THRESHOLD`/`QUICFUSCATE_ACK_MAX_DELAY_MS` overrides win.
 
 **Kalman and histogram:**
-- `src/brain.rs` imports `qf_fec::{BrainFecHints, KalmanFilter}`. The real histogram is via `pending_size_bins`/`pending_iat_bins` atomics drained into `Hist`; Jensen-Shannon divergence feeds the Reality/MASQUE armed bit and the repair hint — it never selects a padding strategy.
+- `src/brain.rs` imports `qf_fec::{BrainFecHints, KalmanFilter}`. The real histogram is via `pending_size_bins`/`pending_iat_bins` atomics drained into `Hist`; Jensen-Shannon divergence feeds the Reality/MASQUE armed bit and the repair hint - it never selects a padding strategy.
 
 **FEC coupling:**
 - `FecTransportObserver` samples ACK/ECN and syncs only FEC-owned deltas via `take_fec_control_delta()`; `core.rs` pulls the observer's FEC cadence/redundancy view into `AdaptiveFec`, and no generic transport actuators are written by the observer.
@@ -2097,9 +2113,12 @@ pub trait QuicTlsProvider: Send + Sync {
     fn next_crypto_frame(&mut self, level: Level, max_len: usize) -> Result<Option<(u64, Vec<u8>)>, ConnectionError>;
     fn poll_secrets_and_install(&mut self, crypto: &Arc<RwLock<CryptoContext>>) -> Result<(), ConnectionError>;
     fn handshake_complete(&self) -> bool;
+    fn handshake_resumed(&self) -> bool;
+    fn early_data_accepted(&self) -> Option<bool>;
     fn alpn(&self) -> Option<&str>;
     fn peer_cert(&self) -> Option<Vec<u8>>;
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError>;
+    fn reject_early_data(&mut self) -> Result<(), ConnectionError>;
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)>;
     fn export_keying_material(&self, label: &[u8], context: &[u8], length: usize) -> Result<Vec<u8>, ConnectionError>;
     fn get_quic_transport_params(&self) -> Vec<u8>;
@@ -2109,6 +2128,9 @@ pub trait QuicTlsProvider: Send + Sync {
     fn supports_ch_override(&self) -> bool;
     fn apply_ch_override(&mut self, template: &[u8]) -> Result<(), ConnectionError>;
 }
+```
+
+`get_0rtt_keys()` remains `None` by design. Ready-made rustls packet and header keys flow through `QuicTlsKeyInstaller::install_zero_rtt_keys()`.
 
 #### Packet and CRYPTO Boundary
 
@@ -2254,7 +2276,7 @@ if compress.should_compress(payload.len(), rtt_ms, loss, bw_bps) {
 }
 ```
 
-Pool-backed compression and decompression return a `PooledBlock` RAII owner. Dropping it returns the checked-out allocation through `MemoryPool::free()`, including malformed-input, compressor/decompressor, caller-error, and unwind paths. TUN reads use the same owner, and frame batching no longer allocates an unused intermediate pool block. FEC pooled-buffer ownership is closed by TODO-832; zero-copy DATAGRAM ownership is closed by TODO-833; exact decompression-length semantics remain TODO-603. Every repair encoder accumulates directly into the pooled wire block — the GF lanes via chunked row accumulation and the Fountain path via `LTEncoder::generate_symbol_into` (TODO-1000) — so no scratch-to-block copy exists on the repair path.
+Pool-backed compression and decompression return a `PooledBlock` RAII owner. Dropping it returns the checked-out allocation through `MemoryPool::free()`, including malformed-input, compressor/decompressor, caller-error, and unwind paths. TUN reads use the same owner, and frame batching no longer allocates an unused intermediate pool block. FEC pooled-buffer ownership is closed by TODO-832; zero-copy DATAGRAM ownership is closed by TODO-833; exact decompression-length semantics remain TODO-603. Every repair encoder accumulates directly into the pooled wire block - the GF lanes via chunked row accumulation and the Fountain path via `LTEncoder::generate_symbol_into` (TODO-1000) - so no scratch-to-block copy exists on the repair path.
 
 #### Unified TLS Provider Usage
 ```rust
@@ -3044,7 +3066,7 @@ The headless `qf-e2e-client --migration-local` proof keeps the migration and thr
 
 ### Outer-hop fallback (UDP blocked)
 
-`connection.outer_hop` arms a single transport fallback for the client dial (TODO-1063). The direct QUIC/UDP dial always runs first; only a hard reachability failure — a socket-level UDP unreachable fault or a dial timeout — retries the attempt exactly once through the configured outer hop. TLS alerts, control-plane rejections, and client-closed outcomes never trigger the switch, and the transport never flaps per packet.
+`connection.outer_hop` arms a single transport fallback for the client dial (TODO-1063). The direct QUIC/UDP dial always runs first; only a hard reachability failure - a socket-level UDP unreachable fault or a dial timeout - retries the attempt exactly once through the configured outer hop. TLS alerts, control-plane rejections, and client-closed outcomes never trigger the switch, and the transport never flaps per packet.
 
 - `outer_hop = "none"` (default): direct UDP only.
 - `outer_hop = "masque"`: retry through the MASQUE CONNECT-UDP relay in `[connection.outer_hop_relay]` (`role = "relay"`). Requires `connection.qkey_token` so the synthesized exit hop can authenticate. Cannot be combined with an explicit `[[circuit.hops]]` topology.
@@ -3052,18 +3074,18 @@ The headless `qf-e2e-client --migration-local` proof keeps the migration and thr
 
 Eligibility is mode-gated: `stealth`, `Stealth MAX`, and `dynamic` may arm the fallback; `off`, `performance`, and `manual` always stay on direct UDP. `Engine::connect` synthesizes the fallback plan before the first dial (a mid-flight configuration change cannot arm a second retry), re-pins the kill switch to the relay endpoint, and then keeps the chosen transport for the connection's lifetime. `run_client` delegates to the engine path automatically whenever `outer_hop != "none"`.
 
-An outer hop does **not** hide a dedicated IP — it only helps when the relay address is shared with real traffic. Also note the wire budget: the outer `max_udp_payload` must exceed 1,200 bytes plus the MASQUE Flow-ID prefix for full-size inner Initials to fit (the nested-hop budget already subtracts 87 bytes per relay layer).
+An outer hop does **not** hide a dedicated IP - it only helps when the relay address is shared with real traffic. Also note the wire budget: the outer `max_udp_payload` must exceed 1,200 bytes plus the MASQUE Flow-ID prefix for full-size inner Initials to fit (the nested-hop budget already subtracts 87 bytes per relay layer).
 
 #### Encrypted Client Hello on the outer hop (TODO-1064)
 
-When `outer_hop = "masque"` (or a configured `[[circuit.hops]]` topology is used), the client resolves the entry hop's DNS `HTTPS` record over the TODO-1058 DoH path — same `stealth.doh_provider` endpoint, same TLS persona — before the engine dials. If the answer carries an `ech` SvcParam, the raw ECHConfigList bytes are attached to that hop (`HopConfig::ech_config_list`, `#[serde(skip)]`, runtime-injected) and rustls configures `EchMode::Enable` via `rustls::client::EchConfig` + `ConfigBuilder::with_ech`. If the record has no `ech`, the hop sends a normal ClientHello — nothing is invented or greased.
+When `outer_hop = "masque"` (or a configured `[[circuit.hops]]` topology is used), the client resolves the entry hop's DNS `HTTPS` record over the TODO-1058 DoH path - same `stealth.doh_provider` endpoint, same TLS persona - before the engine dials. If the answer carries an `ech` SvcParam, the raw ECHConfigList bytes are attached to that hop (`HopConfig::ech_config_list`, `#[serde(skip)]`, runtime-injected) and rustls configures `EchMode::Enable` via `rustls::client::EchConfig` + `ConfigBuilder::with_ech`. If the record has no `ech`, the hop sends a normal ClientHello - nothing is invented or greased.
 
 Boundaries, deliberately:
 
-- ECH applies **only** to the shared outer hop / circuit entry hop — the one TLS handshake an observer on the client uplink can see. The direct UDP dial and the dedicated inner listener always carry no ECH state: an encrypted SNI cannot conceal an IP that is already unique to the customer.
-- ECH uses the HPKE suites from `qf_hpke::ALL_SUPPORTED_SUITES` (`crates/qf-hpke`), a pure-Rust `rustls::crypto::hpke::Hpke` provider built on `hpke-rs` with the `rustcrypto` backend (RustCrypto primitives; the ring provider ships no HPKE). It is always compiled in — no aws-lc-sys C toolchain is needed. Coverage: X25519, P-256, and P-384 KEMs times AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305; an ECHConfigList offering only P-521 suites fails closed at `EchConfig::new` like any other unsupported list. `rustls-aws-lc` remains declared as an opt-in feature for bakeoff comparisons only.
+- ECH applies **only** to the shared outer hop / circuit entry hop - the one TLS handshake an observer on the client uplink can see. The direct UDP dial and the dedicated inner listener always carry no ECH state: an encrypted SNI cannot conceal an IP that is already unique to the customer.
+- ECH uses the HPKE suites from `qf_hpke::ALL_SUPPORTED_SUITES` (`crates/qf-hpke`), a pure-Rust `rustls::crypto::hpke::Hpke` provider built on `hpke-rs` with the `rustcrypto` backend (RustCrypto primitives; the ring provider ships no HPKE). It is always compiled in - no aws-lc-sys C toolchain is needed. Coverage: X25519, P-256, and P-384 KEMs times AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305; an ECHConfigList offering only P-521 suites fails closed at `EchConfig::new` like any other unsupported list. `rustls-aws-lc` remains declared as an opt-in feature for bakeoff comparisons only.
 - A persona whose captured fingerprint never sends ECH (e.g. Brave) stays faithful: the persona `enable_ech` gate suppresses the extension even when a record exists.
-- `EchConfig::new` validates the list; a corrupt or invented configuration is a dial error, never a silent downgrade. Server-side ECH is not implemented (rustls lacks it) — the listener does not pretend to speak ECH.
+- `EchConfig::new` validates the list; a corrupt or invented configuration is a dial error, never a silent downgrade. Server-side ECH is not implemented (rustls lacks it) - the listener does not pretend to speak ECH.
 - Activation is automatic at the right moment: resolution runs before the engine dials, its result lives on `HopConfig`, and every engine-internal reconnect, standby promotion, or outer-hop fallback retry reuses it. A transient DoH failure at startup is retried up to 3 times at 250 ms spacing (still fail-soft); stale server keys are refreshed by rustls' in-band ECH retry-config mechanism. Wire output is verified end-to-end: a test decrypts the emitted ECH payload with the fixture's private key under the draft-17 construction and recovers the real inner ClientHello SNI.
 
 ---
@@ -3511,7 +3533,7 @@ Environment parsing has a deterministic helper contract but is not a universal l
 #### Environment Parsing and Runtime Snapshot Contract
 
 - `EnvSnapshot::capture()` copies the Unicode process environment once. A runtime owner must pass that immutable snapshot through all dependent construction paths; it must not read the process environment again for the same runtime generation.
-- `StealthManager` owns the primary connection-generation snapshot. `QuicFuscateConnection` reuses it for FEC observer and adaptive-FEC policy, Brain, Reality, stealth overrides, TLS ClientHello overrides, and the intelligent orchestrator. `transport::Connection` receives the same snapshot before its first TLS enable and retains it for TLS provider rebuilds, recovery selection, and BBR2/BBR3 minimum-RTT configuration. **TODO-894/TODO-1060:** the Brain reads no environment at policy time at all — `StealthBrainConfig` is validated once at construction, and the actuator derivation consumes only sensor inputs (the last env-dependent policy knob, `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1`, was removed with the shape actuators).
+- `StealthManager` owns the primary connection-generation snapshot. `QuicFuscateConnection` reuses it for FEC observer and adaptive-FEC policy, Brain, Reality, stealth overrides, TLS ClientHello overrides, and the intelligent orchestrator. `transport::Connection` receives the same snapshot before its first TLS enable and retains it for TLS provider rebuilds, recovery selection, and BBR2/BBR3 minimum-RTT configuration. **TODO-894/TODO-1060:** the Brain reads no environment at policy time at all - `StealthBrainConfig` is validated once at construction, and the actuator derivation consumes only sensor inputs (the last env-dependent policy knob, `QUICFUSCATE_STEALTH_PADDING_RATE_LEVEL1`, was removed with the shape actuators).
 - Standalone constructors that are not attached to a parent runtime capture their own snapshot at construction. Environment mutation after construction is unsupported; reconstruct or restart the owning runtime to apply changed values.
 - Boolean helpers trim whitespace and accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`. A present but invalid boolean warns and retains the configured default. Numeric helpers trim input, warn and ignore invalid values, reject non-finite floats, and reject non-positive values for positive-only controls. Range-constrained consumers warn and clamp or ignore values according to their existing safety contract.
 - Ordered alias helpers ignore empty and invalid canonical values before trying legacy aliases. Unset values and invalid values therefore remain distinguishable at the helper boundary even when the consumer intentionally preserves its default.
@@ -3787,12 +3809,12 @@ the authenticated Core H3 connection.
 - 1-2 NewSessionTicket records
 - PSK with realistic ages
 - Timer jitter for authenticity
-- Standard TLS 1.3 session-ticket plumbing with bounded client storage and shared server ticket protection. 0-RTT itself is not supported: see the 0-RTT capability note below.
+- Standard TLS 1.3 session-ticket plumbing with bounded shared client storage and server ticket protection. Opt-in 0-RTT is standards-only and default-off; see the 0-RTT capability note above.
 
 #### ECH GREASE (removed, TODO-1062)
 - The synthetic-cover ECH-GREASE block (64-byte dummy `0xfe0d`) was deleted together with the
   stamped cover ClientHello; cover plaintext is now random. Real ECH on the shared outer hop
-  follows the DNS record — see the TODO-1064 section under `[connection]` outer hop.
+  follows the DNS record - see the TODO-1064 section under `[connection]` outer hop.
 
 ### Fingerprint Rotation
 
@@ -3802,7 +3824,7 @@ persona mid-session. Rotation selects the next persona only for a new connection
 
 #### Disguise Migration (TODO-1056)
 
-While a connection lives, the disguise event is a QUIC port migration — never a
+While a connection lives, the disguise event is a QUIC port migration - never a
 new handshake. `stealth`, `stealth_max`, and `dynamic` draw a uniform 120-600 s
 interval per connection and per event; on the draw the client runtime binds a
 fresh UDP socket on an ephemeral port and issues `PATH_CHALLENGE` validation
@@ -3810,7 +3832,7 @@ through the path API. The old socket stays as standby until the path validates:
 on `FailedValidation` the runtime rolls back to the standby socket and the old
 path survives (`quicfuscate_disguise_migration_failures_total`). `off` and
 `performance` never migrate for disguise. The destination connection ID is
-stable across the port change — the wire signature matches a real NAT rebind.
+stable across the port change - the wire signature matches a real NAT rebind.
 
 #### Outer IP/UDP Header Shaping (TODO-1057)
 
@@ -3819,7 +3841,7 @@ cheaper tells than the ClientHello. `src/stealth/outer_header.rs` maps the
 frozen persona OS to socket options applied on the client UDP socket at
 connect time and after every disguise migration rebinds a socket (a fresh
 socket forgets them). The persona OS comes from `stealth_config.initial_os`
-at bind and from `StealthManager::persona_os()` — the live frozen fingerprint —
+at bind and from `StealthManager::persona_os()` - the live frozen fingerprint -
 on the migration path.
 
 | Persona OS | IPv4 TTL | IPv6 hop limit | IPv4 DF |
@@ -3834,22 +3856,22 @@ TTL values follow the long-standing p0f OS defaults (Windows 128, all others
 64). DF follows QUIC-client reality rather than the generic OS default:
 Chromium-family QUIC stacks run PMTUD and emit DF=1 on IPv4, while the Apple
 iOS stack does not set DF on UDP datagrams and iOS browsers run no native
-QUIC client — the iOS persona therefore clears DF explicitly. IPv6 carries
+QUIC client - the iOS persona therefore clears DF explicitly. IPv6 carries
 no DF flag and no ID field; only the hop limit is shaped there.
 
 **Documented gaps (no capture invented):** the per-packet IPv4 ID increment
-policy is not socket-controllable on Linux/macOS — with DF=1 the kernels
+policy is not socket-controllable on Linux/macOS - with DF=1 the kernels
 emit ID=0 anyway, which matches QUIC captures. Windows' globally
 incrementing ID cannot be shaped without raw sockets and stays a non-goal.
 No independent packet capture backs this table; the values rest on the
 cited p0f defaults and documented QUIC stack behavior.
 
-Socket options are the mechanism — never manual IP-header rewriting after
+Socket options are the mechanism - never manual IP-header rewriting after
 kernel checksum computation, and no raw-socket requirement. Unsupported
 platforms keep OS defaults, emit one process-wide `warn!` via
 `apply_outer_header_logged`, and continue: header shaping can never fail a
 connection. The server-side `PacketNormalizer` on decoded tunnel ingress
-(inner TCP/ICMP) is unchanged, and ICMP suppression stays an exit policy —
+(inner TCP/ICMP) is unchanged, and ICMP suppression stays an exit policy -
 this shapes only what the censor sees on the client link.
 
 #### Fingerprint Rotation Configuration
@@ -3889,7 +3911,7 @@ Available combinations:
 
 ### Reality Cover Targets
 
-Curated cover sets are defined in `CdnProvider` and `CoverTargetRotator` in `qf-stealth` (`cover_targets.rs`). Every entry must be a host whose certificate the hop legitimately presents or relays — the removed domain-fronting path (TODO-1048) decoupled the visible SNI from the certificate name and is gone from the wire path. Production policy is explicit-only outside Anti-DPI:
+Curated cover sets are defined in `CdnProvider` and `CoverTargetRotator` in `qf-stealth` (`cover_targets.rs`). Every entry must be a host whose certificate the hop legitimately presents or relays - the removed domain-fronting path (TODO-1048) decoupled the visible SNI from the certificate name and is gone from the wire path. Production policy is explicit-only outside Anti-DPI:
 
 - Performance, Intelligent level 0, and Stealth do not configure cover targets by default.
 - Cover targets activate outside Anti-DPI only when explicit `reality_cover_targets` are configured and runtime policy has not disabled them (`disable_cover` / `--disable-cover`).
@@ -3990,9 +4012,9 @@ TLS Cover is optional and does not replace native TLS security semantics.
 
 **Post-handshake cover mechanisms (three layers):**
 
-1. **Cover PINGs** (`StealthConfig.enable_cover_ping`): ack-eliciting QUIC `PING` frames emitted only when the persona trace would send (TODO-1054). The wire ledger replays `PersonaTrace.client_schedule()` — when the connection has been quiet for the next captured delta, the PING datagram is padded to the captured wire length via `set_short_header_pad_target` and paid from the shared budget; a denied slot is consumed, never replayed as a burst. The fixed 15 s/30 s interval grid is gone (`cover_ping_interval_ms` still parses but is ignored). A quiet browser is quiet: after the trace ends, the schedule ends. Wired in `core.rs` via `Connection::cover_ping_due()` -> `queue_cover_ping()`. Separately, `idle_keepalive_due()` emits one budgeted PING past `max_idle_timeout/2` of peer silence so a trace quieter than the idle horizon cannot kill the connection — counted via `COVER_PING_IDLE_KEEPALIVE` as a keepalive, not mimicry.
+1. **Cover PINGs** (`StealthConfig.enable_cover_ping`): ack-eliciting QUIC `PING` frames emitted only when the persona trace would send (TODO-1054). The wire ledger replays `PersonaTrace.client_schedule()` - when the connection has been quiet for the next captured delta, the PING datagram is padded to the captured wire length via `set_short_header_pad_target` and paid from the shared budget; a denied slot is consumed, never replayed as a burst. The fixed 15 s/30 s interval grid is gone (`cover_ping_interval_ms` still parses but is ignored). A quiet browser is quiet: after the trace ends, the schedule ends. Wired in `core.rs` via `Connection::cover_ping_due()` -> `queue_cover_ping()`. Separately, `idle_keepalive_due()` emits one budgeted PING past `max_idle_timeout/2` of peer silence so a trace quieter than the idle horizon cannot kill the connection - counted via `COVER_PING_IDLE_KEEPALIVE` as a keepalive, not mimicry.
 
-2. **Fixed-cell padding** (`WireShape::FixedCell`, legacy `packet_normalize`/`normalize` spellings): all 1-RTT packets are padded to `normalize_target_size` bytes so wire-visible packet sizes are uniform — paid from the shared wire budget like every other stealth byte. Prevents length-based traffic analysis.
+2. **Fixed-cell padding** (`WireShape::FixedCell`, legacy `packet_normalize`/`normalize` spellings): all 1-RTT packets are padded to `normalize_target_size` bytes so wire-visible packet sizes are uniform - paid from the shared wire budget like every other stealth byte. Prevents length-based traffic analysis.
 
 3. **Native H3 cover**: `CoverTrafficScheduler` emits persona-shaped H3 request headers. Server Push uses standard H3 `PUSH_PROMISE`, push-stream, `HEADERS`, and `DATA` framing. Escalated WebTransport cover uses the `webtransport-h3` Extended CONNECT shape, remains pending until a 2xx response, and then emits bounded unidirectional and bidirectional streams. Unidirectional streams carry type `0x54` plus the session ID; bidirectional streams carry signal `0x41` plus the session ID. Remaining bytes are opaque application cover rather than nested H3 frames. Fragmented prefixes are retained, unknown or unnegotiated sessions fail closed, and no fixed stream is reserved.
 
@@ -4006,7 +4028,7 @@ use_tls_cover = true
 ### Outer-Hop HTTP/3 Masquerade (TODO-1055)
 
 Browser-persona headers, the QPACK dynamic table, and persona user-agent strings apply
-**only** to outer-hop requests — real H3/MASQUE requests a passive observer can actually
+**only** to outer-hop requests - real H3/MASQUE requests a passive observer can actually
 read. Inner `/tun` tunnel streams carry AEAD-protected traffic an observer cannot read
 anyway, so they never emit browser headers, QPACK persona behavior, or push traffic.
 
@@ -4757,7 +4779,7 @@ These checks are deterministic, offline, and fast, designed to integrate into an
 
 ## Global Atomic State Audit
 
-The codebase uses 117 scalar global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64`/`AtomicU8` instances across modules, plus 270 `SafeGauge(AtomicI64)` and `Counter(AtomicU64)` newtype-wrapped statics in `crates/qf-telemetry/src/lib.rs` (387 total global atomic-backed state surfaces). The wrapped counters are the preferred pattern for new metrics: they encapsulate the atomic and provide a type-safe `inc()`/`read()` interface. This section documents the rationale, ownership, and future direction of the raw atomics; the wrapped counters are all read-only metrics and are covered by the same coupling analysis.
+The codebase uses 116 scalar global `AtomicU64`/`AtomicU32`/`AtomicBool`/`AtomicUsize`/`AtomicI64`/`AtomicU8` instances across modules, plus 273 `SafeGauge(AtomicI64)` and `Counter(AtomicU64)` newtype-wrapped statics in `crates/qf-telemetry/src/lib.rs` (389 total global atomic-backed state surfaces). The wrapped counters are the preferred pattern for new metrics: they encapsulate the atomic and provide a type-safe `inc()`/`read()` interface. This section documents the rationale, ownership, and future direction of the raw atomics; the wrapped counters are all read-only metrics and are covered by the same coupling analysis.
 
 ### Why Global Atomics
 
@@ -4767,18 +4789,18 @@ Global atomics provide lock-free, zero-overhead cross-module coordination for a 
 
 | Module | Count | Category | Purpose |
 |---|---|---|---|
-| `crates/qf-telemetry/src/lib.rs` | 101 | Metrics/Counters + Runtime config | 95 telemetry counters (H3, stealth, FEC, SIMD, memory pool, io_uring, CPU features, I/O driver) + 6 runtime config gates (`COLLECT_PACKET_STATS`, `COLLECT_STREAM_STATS`, `COLLECT_CONGESTION_STATS`, `COLLECT_FEC_STATS`, `COLLECT_STEALTH_STATS`, `TELEMETRY_ENABLED`). Read-only observation surface for dashboards and diagnostics, plus collection on/off gates. |
+| `crates/qf-telemetry/src/lib.rs` | 104 | Metrics/Counters + Runtime config | 98 telemetry counters (H3, stealth, FEC, SIMD, memory pool, io_uring, CPU features, I/O driver, and QUIC 0-RTT) + 6 runtime config gates (`COLLECT_PACKET_STATS`, `COLLECT_STREAM_STATS`, `COLLECT_CONGESTION_STATS`, `COLLECT_FEC_STATS`, `COLLECT_STEALTH_STATS`, `TELEMETRY_ENABLED`). Read-only observation surface for dashboards and diagnostics, plus collection on/off gates. |
 | `src/brain.rs` | 0 | Connection-local hints | `BrainFecHints` and `IntelligentLevelHints` are owned by one connection and passed explicitly to its FEC observer and stealth manager. They are not process-global atomic statics. |
 | `src/optimize/` | 5 | Runtime config | `RR_NODE` (NUMA round-robin), `NUMA_NODES` (node count), `PROFILE_OVERRIDE` (profile override), `TLS_LIMIT_RUNTIME` (TLS limit), `LOCK_BLOCKS` (mlock gate for MemoryPool blocks, TODO-516). Hardware-adaptive runtime state. |
 | `crates/qf-transport-batch/src/lib.rs` | 3 | Metrics | Batch send/recv/packet counters for the explicit rust parity/test-only transport surface. |
 | `src/crypto/` | 2 | Runtime config | `DATA_AEAD_OVERRIDE_MODE` (AEAD selection), `ARM_AES_OK` (ARM AES capability cache). |
 | `src/fec/` | 1 | Sequencing | `REPAIR_ID_COUNTER` - monotonic repair packet ID generator. |
 | `src/stealth/parts/runtime.rs` | 1 | Runtime generation | `NEXT_STEALTH_RUNTIME_GENERATION` - monotonic runtime-owner generation identity. |
-| `src/qftls.rs` | 2 | Runtime gate | `TLS_OVERRIDE_REQUIRED` (TLS cover override flag), `MAX_EARLY_DATA_SIZE` (0-RTT data limit). |
+| `src/qftls.rs` | 1 | Runtime gate | `TLS_OVERRIDE_REQUIRED` (TLS cover override flag). Per-connection 0-RTT byte limits are owned by `StrikeRegister`; no process-global size gate remains. |
 | `src/rng.rs` | 1 | Test gate | `TEST_FORCE_SECURE_ENTROPY_FAILURE` - test-only entropy failure injection. |
 | `src/main.rs` | 1 | Sequencing | `NEXT_ID` - connection ID generator. |
 
-**Total: 117 scalar atomic statics** (recounted 2026-08-02 after TODO-584 and TODO-597). The previous 120-count included three process-global brain hint channels that are now connection-local. The retired stealth-local DoH rotation counter was removed and the runtime-owner generation counter is listed explicitly. The telemetry array `FEC_ACTIVE_CONNECTIONS_BY_MODE` remains an atomic-backed static but is not included in the scalar declaration count.
+**Total: 116 scalar atomic statics** (updated 2026-09-23: one process-global early-data limit atomic was removed and three 0-RTT telemetry counters were added). The previous 120-count included three process-global brain hint channels that are now connection-local. The retired stealth-local DoH rotation counter was removed and the runtime-owner generation counter is listed explicitly. The telemetry array `FEC_ACTIVE_CONNECTIONS_BY_MODE` remains an atomic-backed static but is not included in the scalar declaration count.
 
 ### Trade-offs
 
@@ -6233,7 +6255,7 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Transport Anti-Replay Workspace Leaf (2026-08-09, TODO-562)
 
-- `crates/qf-transport-anti-replay/` now owns the former `src/transport/anti_replay.rs` implementation: RFC 8446/RFC 9001 0-RTT strike-register configuration, SHA-256 packet fingerprints, Bloom-filter negative checks, bounded FIFO eviction, TTL cleanup, and explicit `qf-common::time_source::ProtocolClock` ownership. The root `quicfuscate::transport::anti_replay` module remains a compatibility re-export, so server bootstrap, transport configuration, receive handling, and registered anti-replay tests retain their public paths.
+- `crates/qf-transport-anti-replay/` now owns the former `src/transport/anti_replay.rs` implementation: RFC 8446/RFC 9001 0-RTT strike-register configuration, SHA-256 packet fingerprints, Bloom-filter negative checks, capacity-bounded storage that fails closed without evicting live fingerprints, TTL cleanup, and explicit `qf-common::time_source::ProtocolClock` ownership. The root `quicfuscate::transport::anti_replay` module remains a compatibility re-export, so server bootstrap, transport configuration, receive handling, and registered anti-replay tests retain their public paths.
 - `crates/qf-transport-anti-replay/src/config.rs` is also the canonical owner of the operator-facing `AntiReplaySection` serde/default/validation contract. `src/engine/config.rs` re-exports the child type through `quicfuscate::engine::AntiReplaySection` and maps child validation messages into the existing `ConfigError::Validation` surface.
 - The child boundary is `qf-common`, `parking_lot`, `serde`, and `sha2`; no frontend or Tauri path is involved, and no frontend field or API projection is required. The strike-register baseline passed `11/11`; after the configuration leaf, the child passes `14/14` with strict all-target/all-feature Clippy and root compatibility checks still green. Historical workspace and release evidence remains below, while current seam and target state is recorded in the following bullet.
 - The child now additionally depends on serde for the moved configuration contract. Its all-target/all-feature tests pass `14/14`; root EngineConfig tests pass `39/39` and AppConfig projection tests pass `2/2`. Fresh seam evidence is `scripts/out/audits/workspace-seams-20260809T-anti-replay-config/workspace-seams.json`: `35` packages, `307` Rust files, `205,427` source lines, `129` module edges, `94` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`; target usage is `8,739,040 KiB` with `9,848,312 KiB` free. No frontend/Tauri path changed.
@@ -6457,7 +6479,7 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Stealth Persona Enum Contracts
 
-- `crates/qf-stealth/src/config.rs` is the canonical owner for the root-independent `WireShape` (replacing `PaddingStrategy` — legacy strategy spellings map onto `persona-trace`/`fixed-cell`), `StealthMode`, and `RotationMode` enums, including serde aliases and existing configuration spellings. `src/stealth/parts/config.rs` removes the duplicate definitions, while `src/stealth/mod.rs` preserves the historical root re-export paths.
+- `crates/qf-stealth/src/config.rs` is the canonical owner for the root-independent `WireShape` (replacing `PaddingStrategy` - legacy strategy spellings map onto `persona-trace`/`fixed-cell`), `StealthMode`, and `RotationMode` enums, including serde aliases and existing configuration spellings. `src/stealth/parts/config.rs` removes the duplicate definitions, while `src/stealth/mod.rs` preserves the historical root re-export paths.
 - The child has no transport, connection, FEC, engine, implementation, frontend, or Tauri dependency. `FecMode` remains root-local because its adaptive FEC behavior is coupled to the root FEC controller.
 - qf-stealth all-target/all-feature checking, strict Clippy, and tests pass `22/22`; root all-target `rust-tests` checking, strict `rust-tests` Clippy, and the root Stealth test filter pass `230/230`. Seam evidence is `scripts/out/audits/workspace-seams-20260809T-stealth-enums/workspace-seams.json`: `35` packages, `306` Rust files, `205,385` source lines, `129` module edges, `94` workspace dependency edges, unchanged 9-module product SCC, and `protected_changes=[]`. Target usage is `7,538,108 KiB` with `11,221,844 KiB` free, below the cleanup threshold. Frontend/Tauri paths remain untouched and UI projection is deferred.
 
@@ -6848,7 +6870,7 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Intelligent Stealth Policy Workspace Ownership (2026-08-10, TODO-562)
 
-- `crates/qf-stealth/src/intelligent_policy.rs` canonically owns `IntelligentStealthInputs` and the shape-free mapping from one Brain signal snapshot to `IntelligentActuatorHints`: the EMA-smoothed repair-ratio hint, the repair interval, and the Reality/MASQUE armed bit (TODO-1060). It consumes no `EnvSnapshot` — the former `StealthRuntimePolicy` output with pacing/jitter/padding/bias/granularity/CC-profile fields was deleted with the bandit generator.
+- `crates/qf-stealth/src/intelligent_policy.rs` canonically owns `IntelligentStealthInputs` and the shape-free mapping from one Brain signal snapshot to `IntelligentActuatorHints`: the EMA-smoothed repair-ratio hint, the repair interval, and the Reality/MASQUE armed bit (TODO-1060). It consumes no `EnvSnapshot` - the former `StealthRuntimePolicy` output with pacing/jitter/padding/bias/granularity/CC-profile fields was deleted with the bandit generator.
 - The historical root `StealthManager::derive_intelligent_runtime_policy` adapter is removed; `src/brain.rs` calls `qf_stealth::derive_intelligent_actuators` directly inside `apply_policy`. Brain hysteresis, live connection mutation, preset baselines, runtime escalation, transport state, frontend, and Tauri behavior remain outside the child.
 - Verification passes qf-stealth `124/124`, root all-feature checking and library tests `1,697/1,697`, strict workspace library/binary/example Clippy, qf-stealth all-target strict Clippy, formatting, and diff hygiene. Protected frontend/Tauri paths remain untouched and no frontend field/API projection is required.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-intelligent-stealth-policy-postpush/workspace-seams.json` at source revision `cfa3ee80529fd9c716b23e075a8436d3567021d0`: `36` workspace packages, `333` Rust files, `207,092` source lines, `123` module edges, `115` Cargo workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`.
@@ -6886,7 +6908,7 @@ Historical snapshot from 2026-08-03. First-party `AesHp` and `ChaCha20Poly1305` 
 
 ## Brain Intelligent-Policy Dependency (2026-08-10, TODO-562)
 
-- `src/brain.rs` now invokes the canonical `qf_stealth::derive_intelligent_actuators` contract directly with the complete sensor snapshot (TODO-1060). It no longer routes any mapping through the concrete root `StealthManager` compatibility adapter — that adapter is deleted.
+- `src/brain.rs` now invokes the canonical `qf_stealth::derive_intelligent_actuators` contract directly with the complete sensor snapshot (TODO-1060). It no longer routes any mapping through the concrete root `StealthManager` compatibility adapter - that adapter is deleted.
 - The legacy manager helper and its `IntelligentStealthInputs` compatibility import are gone with the shape actuators. Brain hysteresis, telemetry, transport mutation and probe escalation remain; the policy output is narrowed to repair-ratio + Reality armed bit + congestion-driven ACK threshold.
 - Post-push seam evidence is `scripts/out/audits/workspace-seams-20260810T-brain-intelligent-policy-postpush/workspace-seams.json` at source revision `570223f68b3ef369ded291779355bc689b2fa765`: `36` packages, `334` Rust files, `207,083` source lines, `118` module edges, `115` workspace dependency edges, the unchanged 9-module product SCC, and `protected_changes=[]`. The direct `brain -> stealth` edge is removed; Brain retains only its concrete transport edge inside the SCC.
 

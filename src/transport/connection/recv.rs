@@ -2,6 +2,14 @@ use super::state::AdmittedShortHeader;
 use super::*;
 use crate::transport::DatagramClass;
 
+struct StagedStreamTransmission {
+    stream_id: u64,
+    offset: u64,
+    data: Arc<[u8]>,
+    fin: bool,
+    early_data: bool,
+}
+
 impl Connection {
     pub(super) fn enqueue_peer_stream_reset(
         &mut self,
@@ -32,7 +40,14 @@ impl Connection {
         let mut off = 0usize;
         while off < payload.len() {
             prefetch_frame_parse_window(payload, off);
-            let (_, used) = frames::from_bytes(&payload[off..], pkt_ty)?;
+            let (frame, used) = frames::from_bytes(&payload[off..], pkt_ty)?;
+            if pkt_ty == PacketType::ZeroRTT {
+                if let Frame::Stream { stream_id, .. } = &frame {
+                    if *stream_id & 0x3 != 0 {
+                        return Err(crate::error::ConnectionError::InvalidFrame);
+                    }
+                }
+            }
             if used == 0 {
                 return Err(crate::error::ConnectionError::InvalidFrame);
             }
@@ -294,6 +309,40 @@ impl Connection {
             return Ok(len);
         }
 
+        let zero_rtt_plaintext_bytes = if pkt_ty == PacketType::ZeroRTT {
+            let Some(strike_register) = self.strike_register.as_ref().filter(|_| self.is_server)
+            else {
+                crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_POLICY_REJECT_TOTAL.inc());
+                self.stats.recv += 1;
+                self.stats.recv_bytes += end as u64;
+                return Ok(end);
+            };
+            let plaintext_bytes = u64::try_from(pt_len).unwrap_or(u64::MAX);
+            if self.zero_rtt_received_bytes.saturating_add(plaintext_bytes)
+                > u64::from(strike_register.max_early_data_size())
+            {
+                crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_POLICY_REJECT_TOTAL.inc());
+                self.stats.recv += 1;
+                self.stats.recv_bytes += end as u64;
+                return Ok(end);
+            }
+            let fingerprint = super::anti_replay::StrikeRegister::compute_fingerprint(
+                &hdr_native.dcid,
+                &hdr_native.scid,
+                &buf[aad_len..end],
+            );
+            if !strike_register.check_and_insert(&fingerprint, self.clock.now()) {
+                crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_REPLAY_REJECT_TOTAL.inc());
+                log::warn!("0-RTT replay-register rejection");
+                self.stats.recv += 1;
+                self.stats.recv_bytes += end as u64;
+                return Ok(end);
+            }
+            Some(plaintext_bytes)
+        } else {
+            None
+        };
+
         if hdr_native.pkt_num_len > 0
             && !self.pkt_spaces[space_idx].on_packet_recv(hdr_native.pkt_num)
         {
@@ -303,30 +352,10 @@ impl Connection {
             return Ok(end);
         }
 
-        // 0-RTT anti-replay gate (RFC 8446 Section 8, RFC 9001 Section 9.2).
-        // After AEAD decryption, frame preflight, and PN dedup.
-        // Silently discard replayed 0-RTT packets - matches duplicate-PN pattern.
-        if pkt_ty == PacketType::ZeroRTT {
-            if let Some(ref strike_register) = self.strike_register {
-                let end_replay = aad_len.saturating_add(pt_len).min(buf.len());
-                let payload = &buf[aad_len..end_replay];
-                let fingerprint = super::anti_replay::StrikeRegister::compute_fingerprint(
-                    &hdr_native.dcid,
-                    &hdr_native.scid,
-                    payload,
-                );
-                if !strike_register.check_and_insert(&fingerprint, self.clock.now()) {
-                    crate::telemetry!(
-                        crate::optimize::telemetry::ZERO_RTT_REPLAY_REJECT_TOTAL.inc()
-                    );
-                    log::warn!("0-RTT replay detected and rejected");
-                    let len = end_replay;
-                    self.stats.recv += 1;
-                    self.stats.recv_bytes += len as u64;
-                    return Ok(len);
-                }
-                crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_ACCEPT_TOTAL.inc());
-            }
+        if let Some(plaintext_bytes) = zero_rtt_plaintext_bytes {
+            self.zero_rtt_received_bytes =
+                self.zero_rtt_received_bytes.saturating_add(plaintext_bytes);
+            crate::telemetry!(crate::optimize::telemetry::ZERO_RTT_ACCEPT_TOTAL.inc());
         }
 
         self.received_non_vn_packet = true;
@@ -377,6 +406,9 @@ impl Connection {
                     match frame {
                         Frame::Stream { stream_id, offset, data, fin } => {
                             ack_eliciting = true;
+                            if pkt_ty == PacketType::ZeroRTT {
+                                self.record_zero_rtt_stream(stream_id);
+                            }
                             if self.readable_stream_ids.insert(stream_id) {
                                 self.readable_streams.push_back(stream_id);
                             }
@@ -933,17 +965,44 @@ impl Connection {
         &mut self,
         out: &mut [u8],
         mut off: usize,
+        early_data_only: bool,
     ) -> Result<(usize, bool, Option<StreamTransmissionEmission>), crate::error::ConnectionError>
     {
         use crate::error::ConnectionError;
 
-        while let Some(transmission_id) = self.stream_retransmit_queue.front().copied() {
+        loop {
+            let transmission_id = if early_data_only {
+                self.stream_retransmit_queue.iter().copied().find(|id| {
+                    self.stream_transmissions
+                        .get(id)
+                        .is_some_and(|transmission| transmission.queued && transmission.early_data)
+                })
+            } else {
+                while let Some(id) = self.stream_retransmit_queue.front().copied() {
+                    if self.stream_transmissions.get(&id).is_some_and(|t| t.queued) {
+                        break;
+                    }
+                    self.stream_retransmit_queue.pop_front();
+                }
+                self.stream_retransmit_queue.front().copied()
+            };
+            let Some(transmission_id) = transmission_id else {
+                break;
+            };
             let Some(transmission) = self.stream_transmissions.get(&transmission_id) else {
-                self.stream_retransmit_queue.pop_front();
+                if early_data_only {
+                    self.stream_retransmit_queue.retain(|id| *id != transmission_id);
+                } else {
+                    self.stream_retransmit_queue.pop_front();
+                }
                 continue;
             };
-            if !transmission.queued {
-                self.stream_retransmit_queue.pop_front();
+            if !transmission.queued || (early_data_only && !transmission.early_data) {
+                if early_data_only {
+                    self.stream_retransmit_queue.retain(|id| *id != transmission_id);
+                } else {
+                    self.stream_retransmit_queue.pop_front();
+                }
                 continue;
             }
 
@@ -952,7 +1011,11 @@ impl Connection {
             let data = Arc::clone(&transmission.data);
             let fin = transmission.fin;
             let need = frames::stream_frame_wire_len(stream_id, stream_offset, data.len());
-            let tag_reserve = self.tag_reserve_1rtt();
+            let tag_reserve = if early_data_only {
+                crate::transport::packet::AEAD_TAG_LEN
+            } else {
+                self.tag_reserve_1rtt()
+            };
             if out.len() < off + need + tag_reserve {
                 let prefix_len = Self::maximum_stream_payload(
                     out.len(),
@@ -984,9 +1047,22 @@ impl Connection {
 
         let ledger_bytes = self.stream_retransmit_bytes;
         let ledger_entries = self.stream_transmissions.len();
-        let mut staged_transmission: Option<(u64, u64, Arc<[u8]>, bool)> = None;
-        if let Some(stream_id) = self.writable_streams.front().copied() {
-            let tag_reserve = self.tag_reserve_1rtt();
+        let mut staged_transmission: Option<StagedStreamTransmission> = None;
+        let writable_stream_id = if early_data_only {
+            self.writable_streams
+                .iter()
+                .copied()
+                .find(|stream_id| self.zero_rtt_streams.contains(stream_id))
+        } else {
+            self.writable_streams.front().copied()
+        };
+        if let Some(stream_id) = writable_stream_id {
+            let early_data = self.zero_rtt_streams.contains(&stream_id);
+            let tag_reserve = if early_data_only {
+                crate::transport::packet::AEAD_TAG_LEN
+            } else {
+                self.tag_reserve_1rtt()
+            };
             if let Some(s) = self.streams.get_mut(&stream_id) {
                 let available = {
                     #[cfg(not(feature = "stream_ring_buffer"))]
@@ -1104,7 +1180,13 @@ impl Connection {
                         if emptied && fin_now {
                             self.remove_front_writable_stream(stream_id);
                         }
-                        staged_transmission = Some((stream_id, stream_offset, data, fin_now));
+                        staged_transmission = Some(StagedStreamTransmission {
+                            stream_id,
+                            offset: stream_offset,
+                            data,
+                            fin: fin_now,
+                            early_data,
+                        });
                     }
                 } else if s.send_fin {
                     // Stream has no pending data but fin was requested: emit a
@@ -1129,7 +1211,13 @@ impl Connection {
                         )?;
                         off += written;
                         self.remove_front_writable_stream(stream_id);
-                        staged_transmission = Some((stream_id, stream_offset, Arc::from([]), true));
+                        staged_transmission = Some(StagedStreamTransmission {
+                            stream_id,
+                            offset: stream_offset,
+                            data: Arc::from([]),
+                            fin: true,
+                            early_data,
+                        });
                     }
                 } else {
                     // Stream has no pending data and no fin: remove it from the
@@ -1139,13 +1227,18 @@ impl Connection {
                     // forever because maybe_flush_one_writable_stream only looks
                     // at the front of the queue.
                     self.remove_front_writable_stream(stream_id);
-                    return self.maybe_flush_one_writable_stream(out, off);
+                    return self.maybe_flush_one_writable_stream(out, off, early_data_only);
                 }
             }
         }
-        if let Some((stream_id, stream_offset, data, fin)) = staged_transmission {
-            let transmission_id =
-                self.stage_stream_transmission(stream_id, stream_offset, data, fin)?;
+        if let Some(transmission) = staged_transmission {
+            let transmission_id = self.stage_stream_transmission(
+                transmission.stream_id,
+                transmission.offset,
+                transmission.data,
+                transmission.fin,
+                transmission.early_data,
+            )?;
             return Ok((
                 off,
                 true,
@@ -1305,7 +1398,7 @@ impl Connection {
     }
 
     /// Queues a QUIC PADDING frame of `len` zero bytes into the next
-    /// outgoing 1-RTT packet (TODO-1061). PADDING is not ack-eliciting —
+    /// outgoing 1-RTT packet (TODO-1061). PADDING is not ack-eliciting -
     /// unlike a cover PING it adds wire bytes without soliciting an ACK,
     /// which is what a Maybenot `SendPadding` action asks for.
     pub(crate) fn queue_cover_padding(&mut self, len: usize) {

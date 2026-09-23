@@ -65,3 +65,7 @@ sudo ./target/release/qf-aead-wire-proof \
 Notable wire finding: the dataplane emits coalesced UDP datagrams (userland GSO/GRO — `src/transport/xdp.rs::coalesce_packets`, receiver splits via `gso_size` cmsg in `src/optimize/uring_batch/recv.rs`). A single 700-byte datagram carried two private short-header packets (pn=6 566B + pn=7 134B); short headers have no length field, so the analyzer recovers the split by trial open at candidate positions. This is a capture artifact, not a crypto fault — both segments authenticate as private epoch-1 above the boundary.
 
 Header protection stays rustls-standard for standard and private payloads (verified — the private install only swaps `packet_aead_owner`, never `header_protection_owner`). QUIC packet shape unchanged by the owner switch: same short-header form, CID, PN encoding, 16-byte tag overhead.
+
+## Follow-up Maintenance (2026-09-23)
+
+The analyzer's truncated packet-number reconstruction now uses checked additions at the `u64` boundary instead of an always-true maximum comparison. A regression exercises the non-wrapping boundary; this does not change the captured QUIC classification.

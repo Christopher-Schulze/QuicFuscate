@@ -2,7 +2,8 @@
 //!
 //! Implements RFC 8446 Section 8 and RFC 9001 Section 9.2 requirements for
 //! single-server deployments. A thread-safe strike register tracks SHA-256
-//! fingerprints of seen 0-RTT packets and rejects duplicates.
+//! fingerprints of seen 0-RTT packets, rejects duplicates, and fails closed
+//! when its bounded replay window is full.
 
 mod config;
 
@@ -25,9 +26,9 @@ pub const MAX_STRIKE_ENTRIES: usize = 1 << 24;
 /// Anti-replay configuration for 0-RTT early data.
 #[derive(Clone, Debug)]
 pub struct AntiReplayConfig {
-    /// Maximum ticket age before rejection (default: 10s per RFC 8446).
+    /// Replay-fingerprint retention window. Rustls independently validates ticket freshness.
     pub max_ticket_age: Duration,
-    /// Maximum entries in the strike register before oldest are evicted.
+    /// Maximum retained entries. New entries fail closed at capacity until cleanup.
     pub max_entries: usize,
     /// Minimum interval between cleanup sweeps (default: 1s).
     pub cleanup_interval: Duration,
@@ -88,29 +89,26 @@ impl StrikeRegister {
         }
     }
 
-    /// Compute the canonical 0-RTT fingerprint from packet components.
-    ///
-    /// Uses SHA-256(dcid || 0x7C || scid || 0x7C || payload) to produce
-    /// a deterministic 32-byte fingerprint. The pipe byte separators prevent
-    /// length-extension ambiguity between fields.
+    /// Compute a domain-separated, length-delimited 0-RTT packet fingerprint.
     pub fn compute_fingerprint(dcid: &[u8], scid: &[u8], payload: &[u8]) -> [u8; 32] {
         let mut h = Sha256::new();
-        h.update(dcid);
-        h.update(b"|");
-        h.update(scid);
-        h.update(b"|");
-        h.update(payload);
+        h.update(b"quicfuscate 0rtt replay v1");
+        for part in [dcid, scid, payload] {
+            h.update((part.len() as u64).to_be_bytes());
+            h.update(part);
+        }
         h.finalize().into()
     }
 
     /// Check-and-insert atomically.
     ///
-    /// Returns `true` if this fingerprint has NOT been seen before (accept).
-    /// Returns `false` if it IS a replay (reject).
+    /// Returns `true` if this fingerprint is accepted.
+    /// Returns `false` for a duplicate or when capacity is saturated.
     ///
-    /// When `max_entries` is reached, the oldest entry is evicted before insertion.
+    /// When `max_entries` is reached, new fingerprints are rejected until cleanup
+    /// removes expired entries. This preserves the replay window under saturation.
     /// A Bloom filter provides fast-negative checks before the full HashMap lookup,
-    /// and a FIFO ring makes capacity eviction O(1).
+    /// and the FIFO supports bounded expiry cleanup.
     pub fn check_and_insert(&self, fingerprint: &[u8; 32], now: Instant) -> bool {
         let mut inner = self.inner.write();
 
@@ -119,15 +117,9 @@ impl StrikeRegister {
             return false;
         }
 
-        // Capacity eviction: remove oldest if at limit
         let capacity = effective_capacity(self.config.max_entries);
-        while inner.entries.len() >= capacity {
-            if let Some(oldest_key) = inner.order.pop_front() {
-                inner.entries.remove(&oldest_key);
-            } else {
-                inner.entries.clear();
-                break;
-            }
+        if inner.entries.len() >= capacity {
+            return false;
         }
         inner.order.push_back(*fingerprint);
         inner.entries.insert(*fingerprint, now);
@@ -169,6 +161,11 @@ impl StrikeRegister {
     /// Returns true if the register is empty.
     pub fn is_empty(&self) -> bool {
         self.inner.read().entries.is_empty()
+    }
+
+    /// Maximum accepted early-data payload bytes per connection.
+    pub fn max_early_data_size(&self) -> u32 {
+        self.config.max_early_data_size
     }
 }
 
@@ -281,26 +278,34 @@ mod tests {
     }
 
     #[test]
-    fn capacity_eviction() {
+    fn capacity_saturation_fails_closed_until_entries_expire() {
         let mut cfg = test_config();
         cfg.max_entries = 3;
+        cfg.max_ticket_age = Duration::from_millis(50);
+        cfg.cleanup_interval = Duration::ZERO;
         let reg = StrikeRegister::new(cfg);
 
         let now = Instant::now();
+        let mut fingerprints = Vec::new();
+        // Fill to configured capacity.
         for i in 0..3u8 {
-            let fp = StrikeRegister::compute_fingerprint(&[i], &[i], &[i]);
-            assert!(reg.check_and_insert(&fp, now + Duration::from_millis(u64::from(i))));
+            let fingerprint = StrikeRegister::compute_fingerprint(&[i], &[i], &[i]);
+            assert!(reg.check_and_insert(&fingerprint, now + Duration::from_millis(u64::from(i))));
+            fingerprints.push(fingerprint);
         }
         assert_eq!(reg.len(), 3);
 
-        // 4th insertion should evict oldest (i=0)
-        let fp_new = StrikeRegister::compute_fingerprint(b"new", b"new", b"new");
-        assert!(reg.check_and_insert(&fp_new, now + Duration::from_millis(10)));
+        // Saturation rejects new fingerprints until the replay window expires.
+        let overflow = StrikeRegister::compute_fingerprint(b"new", b"new", b"new");
+        assert!(!reg.check_and_insert(&overflow, now + Duration::from_millis(10)));
+        assert!(!reg.check_and_insert(&fingerprints[0], now + Duration::from_millis(11)));
         assert_eq!(reg.len(), 3);
 
-        // Evicted entry (i=0) should be insertable again
-        let fp_evicted = StrikeRegister::compute_fingerprint(&[0], &[0], &[0]);
-        assert!(reg.check_and_insert(&fp_evicted, now + Duration::from_millis(11)));
+        // Expiration cleanup releases capacity without forgetting live fingerprints.
+        let expired_at = now + Duration::from_millis(60);
+        reg.cleanup(expired_at);
+        assert!(reg.is_empty());
+        assert!(reg.check_and_insert(&overflow, expired_at));
     }
 
     #[test]
@@ -323,6 +328,8 @@ mod tests {
     fn zero_capacity_is_clamped_to_one_entry() {
         let mut cfg = test_config();
         cfg.max_entries = 0;
+        cfg.max_ticket_age = Duration::from_millis(10);
+        cfg.cleanup_interval = Duration::ZERO;
         let reg = StrikeRegister::new(cfg);
         let now = Instant::now();
 
@@ -330,8 +337,13 @@ mod tests {
         let fp2 = StrikeRegister::compute_fingerprint(b"second", b"second", b"second");
         assert!(reg.check_and_insert(&fp1, now));
         assert!(!reg.check_and_insert(&fp1, now));
-        assert!(reg.check_and_insert(&fp2, now + Duration::from_millis(1)));
+        assert!(!reg.check_and_insert(&fp2, now + Duration::from_millis(1)));
         assert_eq!(reg.len(), 1);
+
+        let expired_at = now + Duration::from_millis(20);
+        reg.cleanup(expired_at);
+        assert!(reg.is_empty());
+        assert!(reg.check_and_insert(&fp2, expired_at));
     }
 
     #[test]
@@ -399,5 +411,12 @@ mod tests {
         let fp1 = StrikeRegister::compute_fingerprint(b"dcid", b"scid", b"payload_a");
         let fp2 = StrikeRegister::compute_fingerprint(b"dcid", b"scid", b"payload_b");
         assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_delimits_binary_component_boundaries() {
+        let first = StrikeRegister::compute_fingerprint(b"a", b"b|c", b"d");
+        let second = StrikeRegister::compute_fingerprint(b"a|b", b"c", b"d");
+        assert_ne!(first, second);
     }
 }

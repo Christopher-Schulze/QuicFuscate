@@ -286,6 +286,10 @@ impl Connection {
             fec_cb_lost_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fec_acked_packets: 0,
             pending_probe_spaces: VecDeque::new(),
+            zero_rtt_streams: HashSet::new(),
+            zero_rtt_received_streams: HashSet::new(),
+            zero_rtt_sent_pns: HashSet::new(),
+            zero_rtt_received_bytes: 0,
             stream_transmissions: HashMap::new(),
             stream_retransmit_queue: VecDeque::new(),
             stream_transmission_by_pn: BTreeMap::new(),
@@ -374,14 +378,25 @@ impl Connection {
     }
 
     pub(super) fn has_sendable_stream_frame(&self) -> bool {
+        self.has_sendable_stream_frame_for(false)
+    }
+
+    pub(super) fn has_sendable_early_stream_frame(&self) -> bool {
+        self.has_sendable_stream_frame_for(true)
+    }
+
+    fn has_sendable_stream_frame_for(&self, early_data_only: bool) -> bool {
         if self.stream_retransmit_queue.iter().any(|transmission_id| {
-            self.stream_transmissions
-                .get(transmission_id)
-                .is_some_and(|transmission| transmission.queued)
+            self.stream_transmissions.get(transmission_id).is_some_and(|transmission| {
+                transmission.queued && (!early_data_only || transmission.early_data)
+            })
         }) {
             return true;
         }
         self.writable_streams.iter().any(|stream_id| {
+            if early_data_only && !self.zero_rtt_streams.contains(stream_id) {
+                return false;
+            }
             let Some(stream) = self.streams.get(stream_id) else {
                 return false;
             };
@@ -403,6 +418,7 @@ impl Connection {
         offset: u64,
         data: Arc<[u8]>,
         fin: bool,
+        early_data: bool,
     ) -> Result<u64, crate::error::ConnectionError> {
         if !self.stream_ledger_has_capacity(data.len()) {
             return Err(crate::error::ConnectionError::Done);
@@ -418,6 +434,7 @@ impl Connection {
                 offset,
                 data,
                 fin,
+                early_data,
                 queued: true,
                 active_packet: None,
                 lost_packets: VecDeque::new(),
@@ -460,6 +477,7 @@ impl Connection {
         let prefix = Arc::<[u8]>::from(&transmission.data[..prefix_len]);
         let tail = Arc::<[u8]>::from(&transmission.data[prefix_len..]);
         let tail_fin = transmission.fin;
+        let early_data = transmission.early_data;
         let lost_packets = transmission.lost_packets.clone();
         let tail_id = self.allocate_stream_transmission_id()?;
 
@@ -475,6 +493,7 @@ impl Connection {
                 offset: tail_offset,
                 data: tail,
                 fin: tail_fin,
+                early_data,
                 queued: true,
                 active_packet: None,
                 lost_packets: lost_packets.clone(),
@@ -602,6 +621,31 @@ impl Connection {
         }
     }
 
+    pub(super) fn finish_zero_rtt(&mut self, accepted: bool) {
+        self.zero_rtt_streams.clear();
+        let sent_packets = std::mem::take(&mut self.zero_rtt_sent_pns);
+        if !accepted {
+            for packet_number in &sent_packets {
+                self.lose_stream_transmission_packet(*packet_number);
+                self.pmtu_above_floor_pns.remove(packet_number);
+            }
+            if !sent_packets.is_empty() {
+                self.recovery.discard_space(recovery::PacketSpace::Application);
+                self.bytes_in_flight = self.recovery.bytes_in_flight;
+                self.cwnd = self.recovery.cwnd;
+                if self.bytes_in_flight == 0 {
+                    self.bytes_in_flight_started = None;
+                }
+            }
+        }
+        for transmission in self.stream_transmissions.values_mut() {
+            transmission.early_data = false;
+        }
+        if !self.is_server {
+            self.crypto.write().clear_zero_rtt_keys();
+        }
+    }
+
     pub(super) fn acknowledge_late_stream_packets(&mut self, ranges: &[(u64, u64)]) {
         let mut transmission_ids = Vec::new();
         for (start, end) in ranges {
@@ -657,6 +701,7 @@ impl Connection {
             self.stats.lost = self.stats.lost.saturating_add(1);
             self.stats.lost_bytes = self.stats.lost_bytes.saturating_add(*sz as u64);
             if *space == recovery::PacketSpace::Application {
+                self.zero_rtt_sent_pns.remove(pn);
                 self.lose_stream_transmission_packet(*pn);
                 self.pmtu_above_floor_pns.remove(pn);
                 if self.pmtu_probe_pn == Some(*pn) {
@@ -731,6 +776,7 @@ impl Connection {
         for &(pn, sz) in &outcome.newly_acked {
             acked_bytes = acked_bytes.saturating_add(sz);
             if space == recovery::PacketSpace::Application {
+                self.zero_rtt_sent_pns.remove(&pn);
                 self.acknowledge_stream_transmission_packet(pn);
                 above_floor_acked |= self.pmtu_above_floor_pns.remove(&pn);
                 if self.pmtu_probe_pn == Some(pn) {
@@ -1152,8 +1198,18 @@ impl Connection {
         }
         .encode_parameter()?;
 
-        // Create the TLS composition stack (rustls + optional TLS Cover).
-        let provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        let server_early_data_ready = self
+            .strike_register
+            .as_ref()
+            .is_some_and(|register| register.max_early_data_size() > 0);
+        let early_data =
+            self.config.enable_early_data && (!self.is_server || server_early_data_ready);
+        if self.config.enable_early_data && self.is_server && !server_early_data_ready {
+            log::warn!(
+                "server 0-RTT remains disabled without a valid anti-replay register and byte limit"
+            );
+        }
+        let mut provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             self.is_server,
             self.config.verify_peer,
             self.config.version,
@@ -1164,7 +1220,11 @@ impl Connection {
             self.config.max_udp_payload_size as usize,
             self.scid.as_ref(),
             self.config.ech_config_list.as_deref(),
+            early_data,
         )?;
+        if early_data {
+            provider.enable_0rtt()?;
+        }
 
         // Store provider
         self.tls_provider = Some(provider);

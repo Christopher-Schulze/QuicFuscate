@@ -453,19 +453,41 @@ fn rustls_startup_validation_builds_every_persona_hello() {
     }
 }
 
+fn provider_with_early_data(is_server: bool, early_data: bool) -> RustlsProvider {
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    let clock = crate::time_source::ProtocolClock::default();
+    RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+        is_server,
+        false,
+        PROTOCOL_VERSION,
+        &[],
+        None,
+        &environment,
+        &clock,
+        rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
+        &[],
+        None,
+        early_data,
+    )
+    .expect("provider construction")
+}
+
 #[test]
-fn real_provider_rejects_every_0rtt_activation_path() {
-    set_max_early_data_size(u32::MAX);
-    let mut client =
-        RustlsProvider::new(false, false, PROTOCOL_VERSION, &[]).expect("client provider");
+fn real_provider_requires_0rtt_opt_in_before_connection_construction() {
+    let mut client = provider_with_early_data(false, false);
     assert!(client.enable_0rtt().is_err());
     assert!(client.get_0rtt_keys().is_none());
 
     let mut profile = TlsProfile::chrome_130();
     profile.timing_jitter = None;
     profile.enable_0rtt = true;
-    let error = client.configure(&profile).expect_err("profile 0-RTT must fail closed");
-    assert!(error.to_string().contains("0-RTT is disabled"));
+    let error = client.configure(&profile).expect_err("profile cannot enable early data late");
+    assert!(error.to_string().contains("when constructing the rustls provider"));
+
+    let mut opted_in = provider_with_early_data(false, true);
+    opted_in.enable_0rtt().expect("constructor opted into early data");
+    opted_in.configure(&profile).expect("profile preserves constructor opt-in");
+    assert!(opted_in.get_0rtt_keys().is_none(), "fresh client has no resumption ticket");
 
     let defaults = [
         TlsProfile::chrome_130(),
@@ -476,6 +498,27 @@ fn real_provider_rejects_every_0rtt_activation_path() {
         TlsProfile::brave_1_73(),
     ];
     assert!(defaults.iter().all(|profile| !profile.enable_0rtt));
+}
+
+#[test]
+fn zero_rtt_installer_rejects_incomplete_direction_without_partial_state() {
+    let keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let result = crate::qftls::QuicTlsKeyInstaller::install_zero_rtt_keys(
+        &keys,
+        crate::qftls::QuicTlsZeroRttKeys {
+            seal: None,
+            open: None,
+            hp_seal: None,
+            hp_open: None,
+            standard_cipher_suite: StandardCipherSuite::Aes128GcmSha256,
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(
+        keys.read().packet_protection_snapshot().zero_rtt.packet_aead_owner,
+        PacketProtectionOwner::Disabled
+    );
 }
 
 #[test]
@@ -510,6 +553,41 @@ fn transfer_tls_crypto(
         }
     }
     Ok(transferred)
+}
+
+fn drive_provider_handshake(
+    client: &mut RustlsProvider,
+    server: &mut RustlsProvider,
+    client_keys: &parking_lot::RwLock<crate::transport::packet::CryptoContext>,
+    server_keys: &parking_lot::RwLock<crate::transport::packet::CryptoContext>,
+) {
+    for _ in 0..64 {
+        client.poll_secrets_and_install(client_keys).expect("poll client keys");
+        server.poll_secrets_and_install(server_keys).expect("poll server keys");
+        let client_bytes = transfer_tls_crypto(client, server).expect("client TLS flight");
+        server.poll_secrets_and_install(server_keys).expect("install server keys");
+        let server_bytes = transfer_tls_crypto(server, client).expect("server TLS flight");
+        client.poll_secrets_and_install(client_keys).expect("install client keys");
+        server.poll_secrets_and_install(server_keys).expect("refresh server keys");
+        if client.handshake_complete() && server.handshake_complete() {
+            return;
+        }
+        assert_ne!(client_bytes + server_bytes, 0, "TLS handshake stalled");
+    }
+    panic!("TLS handshake did not complete within the bounded pump");
+}
+
+fn seed_early_data_ticket(profile: &TlsProfile) {
+    let mut client = provider_with_early_data(false, true);
+    let mut server = provider_with_early_data(true, true);
+    let client_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let server_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    client.configure(profile).expect("configure ticket-issuing client");
+    client.poll_secrets_and_install(&client_keys).expect("poll fresh client");
+    assert!(client_keys.read().seal_0rtt.is_none(), "fresh client has no early key");
+    drive_provider_handshake(&mut client, &mut server, &client_keys, &server_keys);
+    assert!(!client.handshake_resumed());
+    assert!(!server.handshake_resumed());
 }
 
 fn assert_live_rustls_handshake(mut profile: TlsProfile, expected_suite: StandardCipherSuite) {
@@ -722,6 +800,138 @@ fn rustls_ticket_resumption_is_reported_without_0rtt_keys() {
 }
 
 #[test]
+fn rustls_quic_0rtt_resumption_installs_directional_standard_keys() {
+    use crate::crypto::aead::{AeadOpen, AeadSeal};
+
+    static TEST_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sni = format!(
+        "early-data-{}-{}.example",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let mut profile = TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some(sni);
+    profile.cipher_suites = vec![StandardCipherSuite::Aes128GcmSha256.tls_id()];
+    profile.enable_0rtt = true;
+    seed_early_data_ticket(&profile);
+
+    let mut client = provider_with_early_data(false, true);
+    let mut server = provider_with_early_data(true, true);
+    let client_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let server_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    client.configure(&profile).expect("configure resumed client");
+    client.poll_secrets_and_install(&client_keys).expect("install client early keys");
+
+    {
+        let client_crypto = client_keys.read();
+        assert!(client_crypto.seal_0rtt.is_some());
+        assert!(client_crypto.open_0rtt.is_none());
+        assert!(client_crypto.hp_0rtt.is_some());
+        assert!(client_crypto.hp_0rtt_open.is_none());
+        let snapshot = client_crypto.packet_protection_snapshot();
+        assert_eq!(snapshot.zero_rtt.packet_aead_owner, PacketProtectionOwner::RustlsStandard);
+        assert_eq!(
+            snapshot.zero_rtt.standard_cipher_suite,
+            Some(StandardCipherSuite::Aes128GcmSha256)
+        );
+    }
+    assert!(server_keys.read().open_0rtt.is_none());
+
+    let client_flight =
+        transfer_tls_crypto(&mut client, &mut server).expect("resumed ClientHello flight");
+    assert!(client_flight > 0);
+    server
+        .poll_secrets_and_install(&server_keys)
+        .expect("install server early opener after ClientHello");
+    assert!(server.reject_early_data().is_err(), "accepted early keys cannot be revoked late");
+    assert!(server_keys.read().open_0rtt.is_some());
+    assert!(!client.handshake_complete());
+    assert!(!server.handshake_complete());
+    let plaintext = b"replay-safe-control";
+    let aad = b"zero-rtt-header";
+    let mut packet = vec![0u8; plaintext.len() + 16];
+    packet[..plaintext.len()].copy_from_slice(plaintext);
+    {
+        let client_crypto = client_keys.read();
+        client_crypto
+            .seal_0rtt
+            .as_ref()
+            .expect("client early sealer before server response")
+            .seal_with_u64_counter(3, aad, &mut packet, plaintext.len(), None)
+            .expect("seal resumed early data before the server response");
+    }
+    {
+        let server_crypto = server_keys.read();
+        let opened = server_crypto
+            .open_0rtt
+            .as_ref()
+            .expect("server early opener after ClientHello")
+            .open_with_u64_counter(3, aad, &mut packet)
+            .expect("open resumed early data before handshake completion");
+        assert_eq!(&packet[..opened], plaintext);
+    }
+
+    drive_provider_handshake(&mut client, &mut server, &client_keys, &server_keys);
+    assert!(client.handshake_resumed());
+    assert!(server.handshake_resumed());
+    assert_eq!(client.early_data_accepted(), Some(true));
+    assert!(client.get_0rtt_keys().is_none());
+    assert!(server.get_0rtt_keys().is_none());
+
+    let server_snapshot = server_keys.read().packet_protection_snapshot();
+    assert_eq!(server_snapshot.zero_rtt.packet_aead_owner, PacketProtectionOwner::RustlsStandard);
+    assert_eq!(
+        server_snapshot.zero_rtt.standard_cipher_suite,
+        Some(StandardCipherSuite::Aes128GcmSha256)
+    );
+    {
+        let server_crypto = server_keys.read();
+        assert!(server_crypto.seal_0rtt.is_none());
+        assert!(server_crypto.open_0rtt.is_some());
+        assert!(server_crypto.hp_0rtt.is_none());
+        assert!(server_crypto.hp_0rtt_open.is_some());
+    }
+
+    crate::qftls::QuicTlsKeyInstaller::clear_handshake_and_one_rtt_keys(&client_keys);
+    assert_eq!(
+        client_keys.read().packet_protection_snapshot().zero_rtt.packet_aead_owner,
+        PacketProtectionOwner::Disabled
+    );
+}
+
+#[test]
+fn rustls_server_rejection_reports_client_1rtt_fallback() {
+    static TEST_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sni = format!(
+        "early-reject-{}-{}.example",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let mut profile = TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some(sni);
+    profile.cipher_suites = vec![StandardCipherSuite::Aes128GcmSha256.tls_id()];
+    profile.enable_0rtt = true;
+    seed_early_data_ticket(&profile);
+
+    let mut client = provider_with_early_data(false, true);
+    let mut server = provider_with_early_data(true, true);
+    let client_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    let server_keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+    client.configure(&profile).expect("configure resumed client");
+    client.poll_secrets_and_install(&client_keys).expect("install client early keys");
+    assert!(client_keys.read().seal_0rtt.is_some());
+    server.reject_early_data().expect("reject before ClientHello processing");
+
+    drive_provider_handshake(&mut client, &mut server, &client_keys, &server_keys);
+    assert!(client.handshake_resumed());
+    assert!(server.handshake_resumed());
+    assert_eq!(client.early_data_accepted(), Some(false));
+    assert!(server_keys.read().open_0rtt.is_none());
+}
+
+#[test]
 fn profile_chlo_extension_order_keeps_psk_last_when_present() {
     let profiles = [
         TlsProfile::chrome_130(),
@@ -889,12 +1099,12 @@ mod ech_tests {
     //! TODO-1064: ECH only rides the shared outer hop. These tests build real
     //! rustls QUIC client connections with a DNS-sourced ECHConfigList and
     //! inspect the emitted ClientHello on the wire. The HPKE suites come from
-    //! qf-hpke (hpke-rs rustcrypto backend) — no aws-lc-sys needed.
+    //! qf-hpke (hpke-rs rustcrypto backend) - no aws-lc-sys needed.
 
     use super::*;
 
     /// Wire-format ECHConfigList (draft-ietf-tls-esni-18 §4): one config with
-    /// DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256/AES-128-GCM — a suite qf-hpke
+    /// DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256/AES-128-GCM - a suite qf-hpke
     /// ships in `ALL_SUPPORTED_SUITES`.
     fn fixture_ech_config_list() -> Vec<u8> {
         fixture_ech_config_list_with_key(&[0x42u8; 32])
@@ -940,6 +1150,7 @@ mod ech_tests {
             1350,
             &scid,
             ech_config_list,
+            false,
         )
         .expect("client provider")
     }
@@ -966,7 +1177,7 @@ mod ech_tests {
             "ECH-enabled persona + DNS ECHConfigList must emit extension 0xfe0d"
         );
         // The outer ClientHello presents the ECH public_name, not the real
-        // service SNI — proof rustls actually engaged the ECH path.
+        // service SNI - proof rustls actually engaged the ECH path.
         let sni = client_hello_sni(client_hello_extension(&extensions, 0x0000));
         assert_eq!(sni, "example.com");
     }
@@ -974,7 +1185,7 @@ mod ech_tests {
     /// Full end-to-end proof, not just "extension present": build the
     /// ECHConfigList around a real key pair, then decrypt the emitted wire
     /// payload under the draft-ietf-tls-esni-17 construction with the
-    /// matching private key. Recovers the real EncodedClientHelloInner —
+    /// matching private key. Recovers the real EncodedClientHelloInner -
     /// which must carry the true service SNI, not the public_name.
     #[test]
     fn ech_payload_decrypts_to_inner_hello_with_real_sni() {
@@ -999,7 +1210,7 @@ mod ech_tests {
         let body = &frame[4..4 + body_len];
 
         // Locate the encrypted_client_hello extension inside the serialized
-        // ClientHelloOuter — its `payload` field is zeroed for the AAD.
+        // ClientHelloOuter - its `payload` field is zeroed for the AAD.
         let (enc, payload, payload_field_offset) = ech_outer_fields(body);
         assert_eq!(enc.len(), 32, "X25519 encapsulated secret");
 
@@ -1009,7 +1220,7 @@ mod ech_tests {
         aad[payload_field_offset..payload_field_offset + payload.len()].fill(0);
 
         // HPKE info: "tls ech" || 0x00 || ECHConfig (draft-17 §6.1).
-        // The ECHConfig is the config bytes inside the list — skip the
+        // The ECHConfig is the config bytes inside the list - skip the
         // outer u16 list length.
         let mut info = b"tls ech\0".to_vec();
         info.extend_from_slice(&list[2..]);
@@ -1020,7 +1231,7 @@ mod ech_tests {
 
         // EncodedClientHelloInner is a serialized inner hello: it begins
         // with legacy_version 0x0303 and carries the real service SNI
-        // (DEFAULT_TLS_SNI_HOST) — never the ECH public_name.
+        // (DEFAULT_TLS_SNI_HOST) - never the ECH public_name.
         assert_eq!(&plaintext[..2], &[0x03, 0x03], "inner hello legacy_version");
         let inner_sni = b"cdn.cloudflare.com";
         assert!(
@@ -1110,7 +1321,7 @@ mod ech_tests {
 
     #[test]
     fn unsupported_kem_ech_config_list_is_rejected() {
-        // Same wire shape but an unknown KEM: rustls must refuse it — no HPKE
+        // Same wire shape but an unknown KEM: rustls must refuse it - no HPKE
         // suite matches, so the hop would otherwise claim ECH it cannot do.
         let mut list = fixture_ech_config_list();
         // offset: list_len(2) + version(2) + length(2) + config_id(1) → kem_id

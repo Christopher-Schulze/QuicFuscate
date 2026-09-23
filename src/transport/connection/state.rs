@@ -139,6 +139,10 @@ pub struct Connection {
     // `on_recovery_timeout`, consumed by the handshake flight loop and the
     // 1-RTT assembly. Probes bypass the congestion gate (sec. 7.5) but count in flight.
     pub(super) pending_probe_spaces: VecDeque<recovery::PacketSpace>,
+    pub(super) zero_rtt_streams: HashSet<u64>,
+    pub(super) zero_rtt_received_streams: HashSet<u64>,
+    pub(super) zero_rtt_sent_pns: HashSet<u64>,
+    pub(super) zero_rtt_received_bytes: u64,
     // Reliable STREAM ownership. Packet maps hold compact transmission IDs while
     // payload bytes remain owned exactly once until any packet copy is ACKed.
     pub(super) stream_transmissions: HashMap<u64, StreamTransmission>,
@@ -185,12 +189,12 @@ pub struct Connection {
     /// When set, the next short-header packet is padded so its sealed length matches.
     pub(super) pad_short_header_to: Option<usize>,
     /// Shared wire byte budget for repairs, padding, and cover traffic
-    /// (TODO-1052). `None` on `off`/`performance` profiles — the connection
+    /// (TODO-1052). `None` on `off`/`performance` profiles - the connection
     /// adds zero stealth bytes. Installed by the owning runtime from
     /// `StealthManager::build_wire_ledger`.
     pub(super) wire_ledger: Option<qf_stealth::BudgetLedger>,
     /// Inbound-activity marker the idle keepalive already fired for
-    /// (TODO-1054). One PING per silent stretch — re-armed only when the
+    /// (TODO-1054). One PING per silent stretch - re-armed only when the
     /// peer speaks again and `last_activity` moves past the mark.
     pub(super) idle_keepalive_mark: Option<std::time::Instant>,
     #[cfg(test)]
@@ -291,9 +295,12 @@ pub(crate) struct DatagramBuffer {
 
 /// Fixed-size 64 KB ring buffer for zero-copy stream I/O (feature-gated).
 #[cfg(feature = "stream_ring_buffer")]
+pub(super) const STREAM_RING_BUFFER_CAPACITY: usize = 65_536;
+
+#[cfg(feature = "stream_ring_buffer")]
 #[derive(Debug)]
 pub struct StreamRingBuffer {
-    buffer: Box<[u8; 65536]>, // Fixed 64KB ring
+    buffer: Box<[u8; STREAM_RING_BUFFER_CAPACITY]>, // Fixed 64KB ring
     head: usize,
     tail: usize,
     size: usize,

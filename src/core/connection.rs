@@ -113,6 +113,7 @@ pub struct QuicFuscateConnection {
     fec_wrapper_drops: u64,
     fec_epoch_rejects: u64,
     h3_conn: Option<crate::transport::h3::Connection>,
+    rejected_early_h3_streams: HashSet<u64>,
     /// Reusable pooled buffer for HTTP/3 body reads. The default pool block is 64 KiB.
     h3_body_buffer: Option<AlignedBox<[u8]>>,
     h3_tunnel_rx: HashMap<u64, H3TunnelFrameDecoder>,
@@ -569,7 +570,7 @@ impl QuicFuscateConnection {
         .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
 
         // TODO-1052: the server side of a stealth connection shares the
-        // same wire budget discipline — its repairs, padding, and cover
+        // same wire budget discipline - its repairs, padding, and cover
         // bytes come out of one account as well.
         conn.set_wire_ledger(stealth_manager.build_wire_ledger(clock.now()));
 
@@ -636,6 +637,7 @@ impl QuicFuscateConnection {
             fec_wrapper_drops: 0,
             fec_epoch_rejects: 0,
             h3_conn: None,
+            rejected_early_h3_streams: HashSet::new(),
             h3_body_buffer: Some(h3_body_buffer),
             h3_tunnel_rx: HashMap::new(),
             h3_tunnel_tx_frame: Vec::new(),
@@ -810,7 +812,7 @@ impl QuicFuscateConnection {
             .unwrap_or_else(|| format!("{}:443", self.host_header));
 
         let mut extra_headers = self.build_masque_request_headers();
-        // TODO-1055: the MASQUE CONNECT request is the outer hop — the only
+        // TODO-1055: the MASQUE CONNECT request is the outer hop - the only
         // place a middlebox could attribute HTTP/3. Persona headers ride it
         // when masquerade is enabled; their encoded delta is cover traffic
         // paid from the shared wire budget. Inner tunnel streams stay bare.
@@ -957,7 +959,7 @@ impl QuicFuscateConnection {
     }
 
     /// Mutable-buffer receive: framed systematic payloads are delivered by
-    /// slicing `data` in place (zero-copy — `conn.recv` decrypts in place), and
+    /// slicing `data` in place (zero-copy - `conn.recv` decrypts in place), and
     /// non-framed datagrams skip the pool-block copy entirely. Callers holding
     /// a mutable receive buffer should prefer this over [`Self::recv`].
     pub fn recv_mut(&mut self, data: &mut [u8]) -> Result<usize, crate::error::ConnectionError> {
@@ -1198,7 +1200,7 @@ impl QuicFuscateConnection {
             return result;
         }
 
-        // Raw datagram: decrypt in place inside the pooled block — no
+        // Raw datagram: decrypt in place inside the pooled block - no
         // FecPacket wrap, no second buffer.
         if self.fec.telemetry_enabled() {
             self.fec.observe_wire_receive(wire::WireReceiveReport::raw_source(len));
@@ -1295,7 +1297,7 @@ impl QuicFuscateConnection {
     }
 
     /// Borrowed-delivery receive tail: systematic payloads are sliced in place
-    /// from `base` (the original socket/pool buffer — zero-copy), while decoder
+    /// from `base` (the original socket/pool buffer - zero-copy), while decoder
     /// recoveries arrive as pooled owned packets on the same dispatch path.
     fn finish_wire_receive_borrowed(
         &mut self,
@@ -1319,7 +1321,7 @@ impl QuicFuscateConnection {
                         self.deliver_wire_payload(&mut base[start..end], from, to)
                     } else {
                         // Ranges are validated at parse time; out-of-bounds
-                        // here would indicate receiver corruption — skip safely.
+                        // here would indicate receiver corruption - skip safely.
                         Ok(())
                     }
                 }
@@ -1540,7 +1542,7 @@ impl QuicFuscateConnection {
                         self.local_addr = local;
                         telemetry!(telemetry::PATH_MIGRATIONS.inc());
                         // TODO-1056: every validated path counts as the disguise
-                        // event — a real path change redraws the next timer.
+                        // event - a real path change redraws the next timer.
                         if self.pending_disguise_migration == Some((local, peer)) {
                             self.pending_disguise_migration = None;
                             self.disguise_migration_outcome = Some(true);
@@ -1624,7 +1626,7 @@ impl QuicFuscateConnection {
         Self::run_update_state_phase(&clock, diagnostics_enabled, "stealth-intelligence", || {
             self.stealth_manager.sync_intelligent_level();
             // TODO-1059: no `apply_intelligent_traffic_analysis_level` call
-            // here — the traffic-analysis policy (chaff rate/size, constant
+            // here - the traffic-analysis policy (chaff rate/size, constant
             // rate, defense) is part of the frozen wire image. The probe
             // level still reaches the Brain through the level hints and may
             // only move the repair ratio and the Reality/MASQUE armed bit.

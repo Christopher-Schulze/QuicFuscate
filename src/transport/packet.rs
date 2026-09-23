@@ -47,7 +47,7 @@ pub const MAX_CID_LEN: usize = 20;
 pub const MAX_PKT_NUM_LEN: usize = 4;
 /// Bytes of sample used for HP
 pub const SAMPLE_LEN: usize = 16;
-const AEAD_TAG_LEN: usize = 16;
+pub(super) const AEAD_TAG_LEN: usize = 16;
 const MAX_QUIC_VARINT: u64 = 0x3fff_ffff_ffff_ffff;
 const PRIVATE_READ_EPOCH_WINDOW: usize = 4;
 

@@ -3,7 +3,7 @@
 // Consolidates: tls_provider.rs, tls_combined.rs, RealTLS_rustls.rs
 // Provides a single public surface: Level, TlsProfile, QuicTlsProvider, create_provider()
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 #[cfg(unix)]
@@ -50,8 +50,6 @@ static TLS_CERT_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_KEY_PATH_OVERRIDE: OnceLock<String> = OnceLock::new();
 static TLS_SERVER_IDENTITY_OVERRIDE: OnceLock<PreloadedServerIdentity> = OnceLock::new();
 static TLS_OVERRIDE_REQUIRED: AtomicBool = AtomicBool::new(false);
-/// Server early-data advertisement remains disabled until packet-level 0-RTT is implemented.
-static MAX_EARLY_DATA_SIZE: AtomicU32 = AtomicU32::new(0);
 
 /// Reports the result of publishing a preloaded server identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,15 +309,6 @@ fn publish_preloaded_identity(
     }
 }
 
-/// Set the maximum early data size for new server TLS connections.
-pub fn set_max_early_data_size(size: u32) {
-    if size != 0 {
-        log::warn!(
-            "Ignoring unsupported TLS 0-RTT max_early_data_size={size}; packet keys are not wired"
-        );
-    }
-    MAX_EARLY_DATA_SIZE.store(0, Ordering::Relaxed);
-}
 const DEFAULT_TLS_SNI_HOST: &str = "cdn.cloudflare.com";
 
 fn trace_key_change(is_server: bool, label: &str) {
@@ -421,6 +410,24 @@ pub struct QuicTlsHandshakeKeys {
     pub standard_cipher_suite: StandardCipherSuite,
 }
 
+/// Directional 0-RTT packet-protection keys emitted by the TLS owner.
+///
+/// QUIC 0-RTT is inherently unidirectional (client to server), so each side
+/// populates only the direction it owns: a client installs `seal`/`hp_seal`,
+/// a server installs `open`/`hp_open`. The absent direction stays `None`.
+pub struct QuicTlsZeroRttKeys {
+    /// Local packet sealer (client side only).
+    pub(crate) seal: Option<Box<dyn qf_crypto::aead::AeadSeal + Send + Sync>>,
+    /// Remote packet opener (server side only).
+    pub(crate) open: Option<Box<dyn qf_crypto::aead::AeadOpen + Send + Sync>>,
+    /// Local header-protection key (client side only).
+    pub(crate) hp_seal: Option<Box<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>>,
+    /// Remote header-protection key (server side only).
+    pub(crate) hp_open: Option<Box<dyn qf_crypto::aead::PacketHeaderProtector + Send + Sync>>,
+    /// Negotiated standard suite that produced this key bundle.
+    pub(crate) standard_cipher_suite: StandardCipherSuite,
+}
+
 /// Directional 1-RTT packet-protection keys emitted by the TLS owner.
 pub struct QuicTlsOneRttKeys {
     /// Local packet sealer.
@@ -437,10 +444,16 @@ pub struct QuicTlsOneRttKeys {
 
 /// Transport-owned packet-key installation port consumed by the TLS provider.
 pub trait QuicTlsKeyInstaller: Send + Sync {
-    /// Clear Handshake and 1-RTT keys after a TLS transcript rebuild.
+    /// Clear Handshake, 0-RTT, and 1-RTT keys after a TLS transcript rebuild.
     fn clear_handshake_and_one_rtt_keys(&self);
     /// Replace the directional Handshake packet keys atomically under the transport lock.
     fn install_handshake_keys(&self, keys: QuicTlsHandshakeKeys);
+    /// Install the directional 0-RTT packet keys atomically under the transport lock.
+    ///
+    /// Only the direction owned by this side is populated; see
+    /// [`QuicTlsZeroRttKeys`]. Keys always originate from rustls
+    /// `ConnectionCommon::zero_rtt_keys()` and are validated atomically.
+    fn install_zero_rtt_keys(&self, keys: QuicTlsZeroRttKeys) -> Result<(), ConnectionError>;
     /// Replace the directional 1-RTT packet keys atomically under the transport lock.
     fn install_one_rtt_keys(&self, keys: QuicTlsOneRttKeys);
     /// Return whether both directional 1-RTT packet keys are installed.
@@ -507,6 +520,10 @@ pub trait QuicTlsProvider: Send + Sync {
     fn handshake_resumed(&self) -> bool {
         false
     }
+    /// Return the client's final 0-RTT decision after the TLS handshake.
+    fn early_data_accepted(&self) -> Option<bool> {
+        None
+    }
     /// Get negotiated ALPN protocol
     fn alpn(&self) -> Option<&str>;
     /// Get peer certificate (if any)
@@ -522,9 +539,19 @@ pub trait QuicTlsProvider: Send + Sync {
     /// Rustls keeps ticket bytes inside its session store, so callers must use
     /// `handshake_resumed()` for authoritative resumption state.
     fn session_ticket(&self) -> Option<Zeroizing<Vec<u8>>>;
-    /// Enable 0-RTT if supported
+    /// Confirm that 0-RTT was requested at construction and early-data key
+    /// installation is armed. Returns an error when the provider was built
+    /// without the early-data flag - rustls needs `enable_early_data` inside
+    /// the `ClientConfig`/`ServerConfig` before the connection object exists,
+    /// so post-construction opt-in is impossible.
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError>;
-    /// Get 0-RTT keys if available
+    /// Reject client early data while the server TLS handshake is still active.
+    fn reject_early_data(&mut self) -> Result<(), ConnectionError>;
+    /// Raw 0-RTT traffic secrets are never exposed: rustls owns the early
+    /// key schedule and hands out ready-made packet/HP key objects via
+    /// `ConnectionCommon::zero_rtt_keys()`, which the provider installs
+    /// through [`QuicTlsKeyInstaller::install_zero_rtt_keys`]. This always
+    /// returns `None` by design.
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)>;
     /// Export keying material (for QUIC key update) with an erasing owner.
     fn export_keying_material(
@@ -655,6 +682,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
         rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
         &[],
         None,
+        false,
     )
 }
 
@@ -670,6 +698,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
     max_udp_payload_size: usize,
     local_scid: &[u8],
     ech_config_list: Option<&[u8]>,
+    early_data: bool,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
     Ok(Box::new(CombinedProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
@@ -682,6 +711,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
         max_udp_payload_size,
         local_scid,
         ech_config_list,
+        early_data,
     )?))
 }
 
@@ -773,6 +803,7 @@ impl CombinedProvider {
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
             &[],
             None,
+            false,
         )
     }
 
@@ -788,6 +819,7 @@ impl CombinedProvider {
         max_udp_payload_size: usize,
         local_scid: &[u8],
         ech_config_list: Option<&[u8]>,
+        early_data: bool,
     ) -> Result<Self, ConnectionError> {
         let rustls = RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
@@ -800,6 +832,7 @@ impl CombinedProvider {
             max_udp_payload_size,
             local_scid,
             ech_config_list,
+            early_data,
         )?;
         // Cover is optional and intentionally separated from TLS protocol semantics.
         // It can be disabled via ENV QUICFUSCATE_TLS_COVER=0.
@@ -943,6 +976,9 @@ impl QuicTlsProvider for CombinedProvider {
     fn handshake_resumed(&self) -> bool {
         self.rustls.handshake_resumed()
     }
+    fn early_data_accepted(&self) -> Option<bool> {
+        self.rustls.early_data_accepted()
+    }
     fn alpn(&self) -> Option<&str> {
         self.rustls.alpn()
     }
@@ -957,6 +993,9 @@ impl QuicTlsProvider for CombinedProvider {
     }
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError> {
         self.rustls.enable_0rtt()
+    }
+    fn reject_early_data(&mut self) -> Result<(), ConnectionError> {
+        self.rustls.reject_early_data()
     }
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         self.rustls.get_0rtt_keys()
@@ -1084,6 +1123,7 @@ impl RustlsProvider {
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
             &[],
             None,
+            false,
         )
     }
 
@@ -1099,6 +1139,7 @@ impl RustlsProvider {
         max_udp_payload_size: usize,
         local_scid: &[u8],
         ech_config_list: Option<&[u8]>,
+        early_data: bool,
     ) -> Result<Self, ConnectionError> {
         Ok(Self(rustls_provider::make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
@@ -1111,6 +1152,7 @@ impl RustlsProvider {
             max_udp_payload_size,
             local_scid,
             ech_config_list,
+            early_data,
         )?))
     }
 }
@@ -1187,6 +1229,9 @@ impl QuicTlsProvider for RustlsProvider {
     fn handshake_resumed(&self) -> bool {
         self.0.handshake_resumed()
     }
+    fn early_data_accepted(&self) -> Option<bool> {
+        self.0.early_data_accepted()
+    }
     fn alpn(&self) -> Option<&str> {
         self.0.alpn()
     }
@@ -1201,6 +1246,9 @@ impl QuicTlsProvider for RustlsProvider {
     }
     fn enable_0rtt(&mut self) -> Result<(), ConnectionError> {
         self.0.enable_0rtt()
+    }
+    fn reject_early_data(&mut self) -> Result<(), ConnectionError> {
+        self.0.reject_early_data()
     }
     fn get_0rtt_keys(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         self.0.get_0rtt_keys()

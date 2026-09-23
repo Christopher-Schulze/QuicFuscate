@@ -51,7 +51,7 @@ P1 median ns, lower is faster. Decision size is 1400 B.
 ## What stays true
 
 - TODO-1029 stays UNAVAILABLE. Production private enable stays blocked. Do not fake a pcap.
-- TODO-1031 stays OPEN. Do not implement 0-RTT.
+- TODO-1031 owns opt-in rustls-standard 0-RTT, default-off. Private-AEAD 0-RTT remains out of scope.
 - TODO-1028 stays REFUSED. `auto` does not freeze a family.
 - TODO-1033 stays DONE. Do not flip the ship default to libaegis.
 - No frontend. No Docker. No commit unless asked.

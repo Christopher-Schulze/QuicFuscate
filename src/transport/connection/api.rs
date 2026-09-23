@@ -141,6 +141,14 @@ impl Connection {
         Ok((len, fin))
     }
 
+    pub(crate) fn record_zero_rtt_stream(&mut self, stream_id: u64) {
+        self.zero_rtt_received_streams.insert(stream_id);
+    }
+
+    pub(crate) fn take_zero_rtt_stream(&mut self, stream_id: u64) -> bool {
+        self.zero_rtt_received_streams.remove(&stream_id)
+    }
+
     #[inline]
     fn insert_writable_stream_ordered(&mut self, stream_id: u64) {
         let urgency = self.streams.get(&stream_id).map(|s| s.priority_urgency).unwrap_or(3);
@@ -169,7 +177,7 @@ impl Connection {
 
     #[inline]
     pub(super) fn remove_front_writable_stream(&mut self, stream_id: u64) {
-        debug_assert_eq!(self.writable_streams.front().copied(), Some(stream_id));
+        debug_assert!(self.writable_stream_ids.contains(&stream_id));
         if self.writable_streams.front().copied() == Some(stream_id) {
             self.writable_streams.pop_front();
         } else {
@@ -186,6 +194,7 @@ impl Connection {
         buf: &[u8],
         fin: bool,
     ) -> Result<usize, crate::error::ConnectionError> {
+        self.zero_rtt_streams.remove(&stream_id);
         self.stream_send_impl(stream_id, buf.len(), fin, |stream| {
             #[cfg(not(feature = "stream_ring_buffer"))]
             {
@@ -199,6 +208,67 @@ impl Connection {
         })
     }
 
+    /// Queues one complete replay-safe client message for optional 0-RTT transmission.
+    /// Only a new client-initiated bidirectional stream with a non-empty payload and FIN is eligible.
+    /// The caller must ensure the whole message is safe to process more than once.
+    pub fn stream_send_replay_safe_0rtt(
+        &mut self,
+        stream_id: u64,
+        buf: &[u8],
+        fin: bool,
+    ) -> Result<usize, crate::error::ConnectionError> {
+        if self.is_server
+            || !self.config.enable_early_data
+            || self.tls_handshake_complete()
+            || self.is_closed
+            || stream_id & 0x3 != 0
+            || buf.is_empty()
+            || !fin
+            || self.streams.contains_key(&stream_id)
+        {
+            return Err(crate::error::ConnectionError::InvalidState);
+        }
+        let payload_len = buf.len() as u64;
+        let pending_conn_after = self
+            .conn_bytes_sent
+            .saturating_add(self.total_send_buffered_bytes() as u64)
+            .saturating_add(payload_len);
+        if pending_conn_after > self.peer_max_data {
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::DataBlocked { limit: self.peer_max_data },
+            );
+            return Err(crate::error::ConnectionError::FlowControl);
+        }
+        if payload_len > self.config.initial_max_stream_data_bidi_remote {
+            Self::queue_control_frame(
+                &mut self.pending_control,
+                Frame::StreamDataBlocked {
+                    stream_id,
+                    limit: self.config.initial_max_stream_data_bidi_remote,
+                },
+            );
+            return Err(crate::error::ConnectionError::FlowControl);
+        }
+        #[cfg(feature = "stream_ring_buffer")]
+        if buf.len() > super::state::STREAM_RING_BUFFER_CAPACITY {
+            return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        let written = self.stream_send_impl(stream_id, buf.len(), true, |stream| {
+            #[cfg(not(feature = "stream_ring_buffer"))]
+            {
+                stream.send_buf.extend_from_slice(buf);
+                buf.len()
+            }
+            #[cfg(feature = "stream_ring_buffer")]
+            {
+                stream.send_ring.write(buf)
+            }
+        })?;
+        self.zero_rtt_streams.insert(stream_id);
+        Ok(written)
+    }
+
     /// Vectored variant of `stream_send`: appends `parts` concatenated under a
     /// single flow-control decision, so a small frame header plus a borrowed
     /// body never needs a contiguous intermediate buffer.
@@ -208,6 +278,7 @@ impl Connection {
         parts: &[&[u8]],
         fin: bool,
     ) -> Result<usize, crate::error::ConnectionError> {
+        self.zero_rtt_streams.remove(&stream_id);
         let payload_len: usize = parts.iter().map(|part| part.len()).sum();
         self.stream_send_impl(stream_id, payload_len, fin, |stream| {
             let mut written = 0usize;
@@ -339,7 +410,7 @@ impl Connection {
     }
 
     /// Pops the front received DATAGRAM as an owned queue entry so callers can
-    /// dispatch it without copying. Hand it back via `dgram_recv_return` —
+    /// dispatch it without copying. Hand it back via `dgram_recv_return` -
     /// its allocation is reused (freelist) or recycled (pooled block).
     #[cfg(not(feature = "zero_copy_dgram"))]
     #[inline(always)]
@@ -725,10 +796,22 @@ impl Connection {
     pub fn is_resumed(&self) -> bool {
         self.tls_provider.as_ref().is_some_and(|provider| provider.handshake_resumed())
     }
-    /// Returns true while 0-RTT is allowed and handshake has not fully established.
+    /// Returns true while the transport has active 0-RTT keys before TLS completion.
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn is_in_early_data(&self) -> bool {
-        self.config.enable_early_data && !self.is_established && !self.is_closed
+        self.zero_rtt_active()
+    }
+
+    /// Returns true while rustls early-data keys are installed and the TLS
+    /// handshake remains incomplete. The client owns the sealer and the server
+    /// owns the opener. A configuration flag alone never activates this state.
+    pub fn zero_rtt_active(&self) -> bool {
+        if !self.config.enable_early_data || self.tls_handshake_complete() || self.is_closed {
+            return false;
+        }
+        let crypto = self.crypto.read();
+        (crypto.seal_0rtt.is_some() && crypto.hp_0rtt.is_some())
+            || (crypto.open_0rtt.is_some() && crypto.hp_0rtt_open.is_some())
     }
 
     /// Returns connection statistics
@@ -794,16 +877,16 @@ impl Connection {
         let read_material = machine
             .derive_material(read_direction, epoch)
             .map_err(|error| crate::error::ConnectionError::CryptoError(error.to_string()))?;
-        dump_private_packet_install(
-            self.is_server,
+        dump_private_packet_install(PrivatePacketInstallDump {
+            is_server: self.is_server,
             epoch,
             family,
-            &write_material,
-            &read_material,
+            write_material: &write_material,
+            read_material: &read_material,
             write_boundary,
             read_boundary,
-            Some(&schedule),
-        );
+            schedule: Some(&schedule),
+        });
         {
             let mut crypto = self.crypto.write();
             crypto.install_authenticated_private_1rtt_with_schedule(
@@ -1053,7 +1136,7 @@ impl Connection {
     pub fn set_external_pacing_for_test(&mut self, v: bool) {
         self.config.external_pacing = v;
     }
-    /// Enables/disables stealth timing on the frozen image (test helper —
+    /// Enables/disables stealth timing on the frozen image (test helper -
     /// production shape is fixed at connect via `Config`).
     #[cfg(any(test, feature = "rust-tests"))]
     pub fn set_stealth_timing_for_test(&mut self, enabled: bool, max_jitter_us: u32) {
@@ -1321,7 +1404,7 @@ impl Connection {
 
     /// Applies the authorized Level-2 defense or restores the authenticated baseline.
     /// Test-only: the production tick no longer swaps the traffic-analysis
-    /// policy on probe level — it is part of the frozen wire image (TODO-1059).
+    /// policy on probe level - it is part of the frozen wire image (TODO-1059).
     /// Retained for the ceiling-enforcement tests and the Maybenot work (TODO-1061).
     #[cfg(any(test, feature = "rust-tests"))]
     #[allow(dead_code)]
@@ -1411,19 +1494,31 @@ impl Connection {
 
 /// Opt-in diagnostic dump of the exact private packet material installed on
 /// the wire path (`QUICFUSCATE_PRIVATE_KEY_DUMP=<path>`), used by the
-/// packet-capture AEAD proof (TODO-1029). The file receives raw key material —
+/// packet-capture AEAD proof (TODO-1029). The file receives raw key material -
 /// a transient analysis artifact that must never be committed. No-op unless
 /// the env var names a path.
-fn dump_private_packet_install(
+struct PrivatePacketInstallDump<'a> {
     is_server: bool,
     epoch: u32,
     family: qf_crypto::PrivateAeadFamily,
-    write_material: &crate::qftls::PrivateKeyMaterial,
-    read_material: &crate::qftls::PrivateKeyMaterial,
+    write_material: &'a crate::qftls::PrivateKeyMaterial,
+    read_material: &'a crate::qftls::PrivateKeyMaterial,
     write_boundary: u64,
     read_boundary: u64,
-    schedule: Option<&crate::qftls::PrivateEpochSchedule>,
-) {
+    schedule: Option<&'a crate::qftls::PrivateEpochSchedule>,
+}
+
+fn dump_private_packet_install(dump: PrivatePacketInstallDump<'_>) {
+    let PrivatePacketInstallDump {
+        is_server,
+        epoch,
+        family,
+        write_material,
+        read_material,
+        write_boundary,
+        read_boundary,
+        schedule,
+    } = dump;
     let Some(path) = std::env::var_os("QUICFUSCATE_PRIVATE_KEY_DUMP") else {
         return;
     };
