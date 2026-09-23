@@ -2512,6 +2512,7 @@ name = "qf-hpke"
 version = "0.5.0"
 dependencies = [
  "hpke-rs",
+ "hpke-rs-crypto",
  "hpke-rs-rust-crypto",
  "rustls",
 ]

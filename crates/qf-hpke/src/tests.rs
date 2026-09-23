@@ -45,6 +45,20 @@ fn wrong_key_fails() {
 }
 
 #[test]
+fn malformed_key_material_fails_closed() {
+    for suite in [
+        DH_KEM_X25519_HKDF_SHA256_AES_128 as &dyn Hpke,
+        DH_KEM_P256_HKDF_SHA256_AES_128 as &dyn Hpke,
+        DH_KEM_P384_HKDF_SHA384_AES_128 as &dyn Hpke,
+    ] {
+        let (public_key, _secret_key) = suite.generate_key_pair().unwrap();
+        assert!(suite.seal(b"i", b"a", b"payload", &HpkePublicKey(vec![0])).is_err());
+        let (enc, ciphertext) = suite.seal(b"i", b"a", b"payload", &public_key).unwrap();
+        assert!(suite.open(&enc, b"i", b"a", &ciphertext, &HpkePrivateKey::from(vec![0])).is_err());
+    }
+}
+
+#[test]
 fn wrong_aad_and_info_fail() {
     let suite = DH_KEM_X25519_HKDF_SHA256_AES_128;
     let (pk, sk) = suite.generate_key_pair().unwrap();
@@ -62,6 +76,28 @@ fn key_sizes_match_kem() {
     let (pk, sk) = DH_KEM_P256_HKDF_SHA256_AES_128.generate_key_pair().unwrap();
     assert!(!pk.0.is_empty());
     assert!(!sk.secret_bytes().is_empty());
+}
+
+#[test]
+fn upstream_secret_debug_is_redacted() {
+    let secret = hpke_rs::HpkePrivateKey::from(vec![0xa5; 32]);
+    let debug = format!("{secret:?}");
+    assert!(debug.contains("***"), "upstream secret Debug must redact its value");
+    assert!(!debug.contains("165"), "upstream secret Debug exposed the sentinel bytes");
+
+    let mut hpke = RsHpke::<Backend>::new(
+        Mode::Base,
+        KemAlgorithm::DhKem25519,
+        KdfAlgorithm::HkdfSha256,
+        AeadAlgorithm::Aes128Gcm,
+    );
+    let (_secret_key, public_key) = hpke.generate_key_pair().unwrap().into_keys();
+    let (_enc, context) =
+        hpke.setup_sender(&public_key, b"debug-redaction", None, None, None).unwrap();
+    let debug = format!("{context:?}");
+    for field in ["key", "nonce", "exporter_secret", "seq no"] {
+        assert!(debug.contains(&format!("{field}: \"***\"")), "unredacted context field: {field}");
+    }
 }
 
 #[test]
@@ -111,18 +147,12 @@ fn hpke_rs_ciphertext_opens_through_trait() {
         KdfAlgorithm::HkdfSha256,
         AeadAlgorithm::Aes128Gcm,
     );
-    let (sk, pk) = hpke.generate_key_pair().unwrap().into_keys();
+    let (pk, sk) = suite.generate_key_pair().unwrap();
 
-    let (enc, ct) = hpke.seal(&pk, b"i", b"a", b"payload", None, None, None).unwrap();
-
-    let out = suite
-        .open(
-            &EncapsulatedSecret(enc),
-            b"i",
-            b"a",
-            &ct,
-            &HpkePrivateKey::from(sk.as_slice().to_vec()),
-        )
+    let (enc, ct) = hpke
+        .seal(&hpke_rs::HpkePublicKey::from(pk.0), b"i", b"a", b"payload", None, None, None)
         .unwrap();
+
+    let out = suite.open(&EncapsulatedSecret(enc), b"i", b"a", &ct, &sk).unwrap();
     assert_eq!(out, b"payload");
 }

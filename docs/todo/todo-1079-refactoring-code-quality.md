@@ -50,6 +50,14 @@ where duplication is proven — never cosmetic churn.
   `src/stealth/manager/coverage_tests.rs:183`. Update these three independent
   test expressions without changing their assertions or production behavior;
   rerun the exact command and retain the existing green root-library gate.
+- `cargo check --no-default-features --locked` succeeds but emits 47 root-lib
+  warnings: unused imports and dead code in
+  `src/implementations/server/{limits.rs,limits/blacklist.rs,limits/ddos_policy.rs,limits/geoip.rs,ddos.rs,metrics.rs,config.rs}`
+  plus an unnecessary `mut` in `runtime_admin.rs`. Map each warning to its
+  intended feature and actual callers; gate feature-owned exports and
+  implementations consistently or remove genuinely unreachable code. Keep
+  the disabled-feature build behavior and enabled-feature public surface;
+  reach zero warnings on the exact no-default build, without blanket allows.
 
 ## Non-goals
 

@@ -12,6 +12,7 @@
 
 use hpke_rs::hpke_types::{AeadAlgorithm, KdfAlgorithm, KemAlgorithm};
 use hpke_rs::{Hpke as RsHpke, Mode};
+use hpke_rs_crypto::HpkeCrypto;
 use hpke_rs_rust_crypto::HpkeRustCrypto;
 use rustls::crypto::hpke::{
     EncapsulatedSecret, Hpke, HpkeOpener, HpkePrivateKey, HpkePublicKey, HpkeSealer, HpkeSuite,
@@ -129,9 +130,10 @@ impl Hpke for RustCryptoHpke {
     }
 
     fn generate_key_pair(&self) -> Result<(HpkePublicKey, HpkePrivateKey), Error> {
-        let mut hpke = self.config();
-        let (sk, pk) = hpke.generate_key_pair().map_err(map_err)?.into_keys();
-        Ok((HpkePublicKey(pk.as_slice().to_vec()), HpkePrivateKey::from(sk.as_slice().to_vec())))
+        let mut prng = Backend::prng();
+        let (public_key, private_key) =
+            Backend::kem_key_gen(self.kem, &mut prng).map_err(|error| map_err(error.into()))?;
+        Ok((HpkePublicKey(public_key), HpkePrivateKey::from(private_key)))
     }
 
     fn suite(&self) -> HpkeSuite {

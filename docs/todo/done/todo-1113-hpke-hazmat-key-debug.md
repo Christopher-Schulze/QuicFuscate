@@ -4,7 +4,7 @@ title: Remove HPKE hazmat private-key debug exposure
 severity: MED
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-23
 depends_on: [TODO-1064]
 ---
@@ -46,19 +46,19 @@ adding a cryptographic implementation.
 
 ## Implementation and proof
 
-- [ ] Read the exact pinned `HpkeCrypto` trait signatures, result order,
+- [x] Read the exact pinned `HpkeCrypto` trait signatures, result order,
       error type, PRNG and `HpkeRustCrypto` implementation before editing;
       add `hpke-rs-crypto` as a direct dependency only if the trait cannot
       be accessed through the existing direct dependencies.
-- [ ] Remove `hazmat` from `crates/qf-hpke/Cargo.toml`. Update only the
+- [x] Remove `hazmat` from `crates/qf-hpke/Cargo.toml`. Update only the
       generated-key adapter and tests that currently inspect upstream
       secret bytes; preserve the nine static suite definitions and all
       open/seal behavior.
-- [ ] Add a regression proving the upstream private-key Debug output is
+- [x] Add a regression proving the upstream private-key Debug output is
       redacted in the actual resolved Cargo feature set. Check `cargo tree
       -e features -p qf-hpke` to ensure another dependency does not
       re-enable `hazmat` through Cargo feature unification.
-- [ ] Run all `qf-hpke` suite roundtrips, cross-adapter tests, rustls ECH
+- [x] Run all `qf-hpke` suite roundtrips, cross-adapter tests, rustls ECH
       decryption test, and the relevant no-default-features/root build
       gates. Verify malformed-key errors remain fail-closed.
 
@@ -68,3 +68,23 @@ adding a cryptographic implementation.
   private-key/context Debug output contains no secret bytes.
 - All nine suite IDs and bidirectional adapter interop remain correct;
   the real ECH proof and affected builds pass with the same wire behavior.
+
+## Verification record
+
+- The pinned `HpkeCrypto::kem_key_gen` returns `(public, private)` byte
+  vectors. `HpkeRustCrypto::prng` and that KEM method replace the upstream
+  key-pair wrapper only at the rustls ownership boundary; the private vector
+  moves into rustls' zeroizing `HpkePrivateKey`. No KEM/KDF/AEAD implementation
+  or suite definition changed.
+- The upstream private-key Debug regression failed with `hazmat` enabled and
+  passes after its removal. It also checks context key, nonce, exporter secret
+  and sequence-number redaction. Resolved default and all-features root Cargo
+  trees contain no `hpke-rs/hazmat` activation.
+- `cargo test -p qf-hpke --locked --quiet`: 10/10 passed, including all nine
+  suites, both adapter directions, malformed X25519/P-256/P-384 keys, and
+  Debug redaction. `cargo test --features rust-tests --lib
+  qftls::tests::ech_tests --locked --quiet`: 8/8 passed, including real wire
+  ECH payload decryption. `cargo clippy -p qf-hpke --all-targets --locked --
+  -D warnings`, `cargo fmt --all -- --check`, and `cargo check
+  --no-default-features --locked` passed. The no-default root build emits
+  pre-existing warnings tracked under TODO-1079.

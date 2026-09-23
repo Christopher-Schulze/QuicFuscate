@@ -613,7 +613,7 @@
 - Detail: none — standing rule, enforced per commit.
 
 ### TODO-1079 - Refactoring and code-quality cluster
-- OPEN. Cluster parent. Structural improvements only where they pay: module clarity, ownership boundaries, feature-gate correctness (TODO-1070 class of bugs), dead-path removal, shared-abstraction extraction. Rust 1.98 strict all-target Clippy additionally reports three pre-existing test-source diagnostics, recorded in the detail file. Hard gate: a refactor lands only with the behavior test suite green and a TODO-1071 baseline showing no dataplane regression. No cosmetic rewrites.
+- OPEN. Cluster parent. Structural improvements only where they pay: module clarity, ownership boundaries, feature-gate correctness (TODO-1070 class of bugs), dead-path removal, shared-abstraction extraction. Rust 1.98 strict all-target Clippy reports three pre-existing test-source diagnostics; the no-default root build passes with 47 unused/dead-code warnings concentrated in server policy modules. Exact scopes and zero-warning target are in the detail file. Hard gate: a refactor lands only with the behavior test suite green and a TODO-1071 baseline showing no dataplane regression. No cosmetic rewrites.
 - Detail: `docs/todo/todo-1079-refactoring-code-quality.md`
 
 ### TODO-1080 - Reality probe fallback correctness
@@ -749,8 +749,8 @@
 - Detail: `docs/todo/todo-1112-transactional-admitted-send-state.md`
 
 ### TODO-1113 - Remove HPKE hazmat private-key debug exposure
-- OPEN. `qf-hpke` enables `hpke-rs/hazmat` to export generated private-key bytes into rustls. In pinned `hpke-rs` 0.7.0, that same feature makes `Debug` print raw HPKE private keys and context key material. Use the existing RustCrypto backend's public KEM key-generation trait for this adapter boundary, remove `hazmat` from the product dependency, and preserve all suite and ECH interoperability gates.
-- Detail: `docs/todo/todo-1113-hpke-hazmat-key-debug.md`
+- DONE. The RustCrypto backend generates KEM bytes directly at the rustls ownership boundary; `hpke-rs/hazmat` is absent from default and all-features root dependency trees. Upstream key and context Debug output is redacted. Ten provider tests and eight real-ECH root tests pass; the no-default root build and strict provider Clippy pass. Its pre-existing no-default warnings are in TODO-1079.
+- Detail: `docs/todo/done/todo-1113-hpke-hazmat-key-debug.md`
 
 ### TODO-1114 - Negotiate WebTransport only with real transport and persona support
 - OPEN. WebTransport is currently H3 cover only. Its H3 SETTINGS gate ignores mandatory QUIC DATAGRAM and `reset_stream_at` support; Chrome/Safari fixtures declare the latter absent, while Firefox advertises it without a `RESET_STREAM_AT` transport handler. The server accepts any nonempty CONNECT authority/path with `200`. Pin the draft, implement complete negotiated support and authorized-resource admission where justified, disable cover otherwise, and prove a persona-consistent peer transcript.
