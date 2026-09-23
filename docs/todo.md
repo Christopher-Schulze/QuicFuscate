@@ -834,7 +834,7 @@
 - Detail: `docs/todo/done/todo-1133-authenticated-error-probe-routing.md`
 
 ### TODO-1134 - Flush the physical QUIC close before client assignment teardown
-- DONE. Assignment now detects a physical close after either receive result and sends one Core close directly over UDP before teardown, bypassing circuit drive. A real peer opened `0x0d`; an unconnected socket produced typed `TransportSend` while retaining the CRYPTO cause. Focused 2/2, default root 1,874 passed/1 ignored, feature root 1,879 passed/1 ignored, strict library Clippy and formatting pass. Protected inbound `recv_mut` error proof remains TODO-1136; nested relay remains TODO-1135.
+- DONE. Assignment now detects a physical close after either receive result and sends one Core close directly over UDP before teardown, bypassing circuit drive. A real peer opened `0x0d`; an unconnected socket produced typed `TransportSend` while retaining the CRYPTO cause. Focused 2/2, default root 1,874 passed/1 ignored, feature root 1,879 passed/1 ignored, strict library Clippy and formatting pass. Protected inbound wire proof remains TODO-1136; nested relay remains TODO-1135.
 - Detail: `docs/todo/done/todo-1134-client-assignment-close-flush.md`
 
 ### TODO-1135 - Carry a nested-hop terminal close through the circuit without cover leakage
@@ -842,12 +842,16 @@
 - Detail: `docs/todo/todo-1135-nested-hop-terminal-close.md`
 
 ### TODO-1136 - Prove assignment close on protected inbound CRYPTO failure
-- OPEN. The TODO-1134 loopback queues a real CRYPTO admission close while assignment waits, but does not inject the failing frame as protected peer traffic. Prove the terminal `recv_mut` error branch, one peer-opened close, and cover suppression on a real UDP/TLS pair.
-- Detail: `docs/todo/todo-1136-inbound-crypto-close-assignment-wire.md`
+- DONE. The real UDP/TLS test exposed and fixed a frame-parser defect: 1-RTT CRYPTO (`0x06`) was wrongly rejected, and the packet-space test plus product documentation encoded that error. RFC 9000 Table 3 confirms 1-RTT admission. The corrected parser and loopback prove a peer-opened `0x0d` close, no Reality fallback, and retained cover. Frame leaf 21/21; default root 1,875 passed/1 ignored; feature root 1,880 passed/1 ignored; strict library Clippy and formatting pass. The distinct live successful-assignment gate is TODO-1138.
+- Detail: `docs/todo/done/todo-1136-inbound-crypto-close-assignment-wire.md`
 
 ### TODO-1137 - Reconcile queued QUIC closes on other assignment exits
 - OPEN. The post-receive terminal drain does not cover earlier returns from outbound flush, control rejection, assignment finalization, tunnel start or H3 polling. Classify which can queue a physical or nested close and reuse the bounded terminal path only where deliverable.
 - Detail: `docs/todo/todo-1137-assignment-early-exit-close-drain.md`
+
+### TODO-1138 - Prove successful live authenticated assignment
+- OPEN. Control-plane capsule reception is unit-tested, but no real UDP/TLS/H3 test proves the successful `negotiate_assignment` return and ready transition through the peer-protected control path. Build one bounded positive fixture without direct state injection.
+- Detail: `docs/todo/todo-1138-live-successful-assignment-e2e.md`
 
 ## Completed
 

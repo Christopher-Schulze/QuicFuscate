@@ -1652,4 +1652,184 @@ mod assignment_close_tests {
             Some(&crate::error::ConnectionError::CryptoBufferExceeded)
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn protected_inbound_crypto_failure_flushes_close_before_cached_cover() {
+        let client_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("client UDP"));
+        let server_socket = UdpSocket::bind("127.0.0.1:0").await.expect("server UDP");
+        let client_addr = client_socket.local_addr().expect("client address");
+        let server_addr = server_socket.local_addr().expect("server address");
+        client_socket.connect(server_addr).await.expect("connect client UDP");
+        server_socket.connect(client_addr).await.expect("connect server UDP");
+
+        let mut client_config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("client transport config");
+        client_config.verify_peer = false;
+        let mut client_stealth = crate::stealth::StealthConfig::default();
+        client_stealth.reality_cover_targets = vec!["127.0.0.1:443".to_string()];
+        let mut client = crate::core::QuicFuscateConnection::new_client(
+            "localhost",
+            client_addr,
+            server_addr,
+            client_config,
+            client_stealth,
+            crate::fec::FecConfig::default(),
+            crate::optimize::OptimizeConfig::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("Core client");
+        let mut packet = [0u8; 65_535];
+        let initial_length = client.send(&mut packet).expect("client Initial");
+        let (initial, _) = crate::transport::packet::parse_header(&packet[..initial_length], 0)
+            .expect("parse client Initial");
+        let server_cid = crate::transport::ConnectionId::from_ref(b"assignment-server");
+        let initial_dcid = crate::transport::ConnectionId::from_ref(&initial.dcid);
+        let mut server_config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
+                .expect("server transport config");
+        server_config.verify_peer = false;
+        let mut server = crate::core::QuicFuscateConnection::new_server(
+            &server_cid,
+            Some(&initial_dcid),
+            server_addr,
+            client_addr,
+            &mut server_config,
+            crate::stealth::StealthConfig::default(),
+            crate::fec::FecConfig::default(),
+            crate::optimize::OptimizeConfig::default(),
+        )
+        .expect("Core server");
+        server.conn.set_destination_cid(crate::transport::ConnectionId::from_ref(&initial.scid));
+        let client_to_server =
+            crate::transport::RecvInfo { from: client_addr, to: server_addr, ecn: None };
+        let server_to_client =
+            crate::transport::RecvInfo { from: server_addr, to: client_addr, ecn: None };
+        server
+            .conn
+            .recv(&mut packet[..initial_length], &client_to_server)
+            .expect("open client Initial");
+        for _ in 0..64 {
+            let mut progressed = false;
+            match client.conn.send(&mut packet) {
+                Ok((length, _)) => {
+                    server
+                        .conn
+                        .recv(&mut packet[..length], &client_to_server)
+                        .expect("deliver client TLS flight");
+                    progressed = true;
+                }
+                Err(crate::error::ConnectionError::Done) => {}
+                Err(error) => panic!("client TLS send failed: {error}"),
+            }
+            match server.conn.send(&mut packet) {
+                Ok((length, _)) => {
+                    client
+                        .conn
+                        .recv(&mut packet[..length], &server_to_client)
+                        .expect("deliver server TLS flight");
+                    progressed = true;
+                }
+                Err(crate::error::ConnectionError::Done) => {}
+                Err(error) => panic!("server TLS send failed: {error}"),
+            }
+            if client.conn.tls_handshake_complete() && server.conn.tls_handshake_complete() {
+                break;
+            }
+            if !progressed {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        assert!(client.conn.tls_handshake_complete());
+        assert!(server.conn.tls_handshake_complete());
+
+        let connection = Arc::new(parking_lot::Mutex::new(ClientDataPlane::single(client)));
+        let barrier = Arc::new(tokio::sync::Notify::new());
+        let mut driver = IoDriver::new(IoDriverConfig::default());
+        driver.assignment_receive_barrier = Some(Arc::clone(&barrier));
+        let assignment_connection = Arc::clone(&connection);
+        let assignment_socket = Arc::clone(&client_socket);
+        let task = tokio::spawn(async move {
+            driver
+                .negotiate_assignment(
+                    &assignment_connection,
+                    &assignment_socket,
+                    1,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), barrier.notified())
+            .await
+            .expect("assignment reached UDP receive");
+        let mut drained_before_error = 0;
+        for _ in 0..32 {
+            let Ok(Ok(length)) =
+                tokio::time::timeout(Duration::from_millis(5), server_socket.recv(&mut packet))
+                    .await
+            else {
+                break;
+            };
+            server.recv_mut(&mut packet[..length]).expect("consume pre-error assignment output");
+            drained_before_error += 1;
+        }
+        assert!(
+            !task.is_finished(),
+            "assignment ended before fault injection after draining {drained_before_error} packets"
+        );
+
+        let manager = connection.lock().physical().stealth_manager();
+        manager
+            .reality_proxy
+            .as_ref()
+            .expect("configured Reality proxy")
+            .send_cached_response(server_addr, b"queued cover response".to_vec());
+        let frame = crate::transport::Frame::Crypto {
+            offset: 65_536,
+            data: std::borrow::Cow::Borrowed(b"x"),
+        };
+        let length = server
+            .conn
+            .send_test_short_frame(&mut packet, &frame)
+            .expect("seal protected out-of-window CRYPTO frame");
+        server_socket.send(&packet[..length]).await.expect("send protected CRYPTO frame");
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("assignment terminates")
+            .expect("assignment task joins");
+        assert!(result.is_err());
+        let (local_error, closed) = {
+            let guard = connection.lock();
+            (guard.physical().conn.local_error().cloned(), guard.physical().conn.is_closed())
+        };
+        assert_eq!(
+            local_error,
+            Some(crate::error::ConnectionError::CryptoBufferExceeded),
+            "assignment={result:?}, closed={closed}, fallback_invocations={}",
+            manager.fallback_invocations_for_test()
+        );
+        assert_eq!(manager.fallback_invocations_for_test(), 0);
+
+        let close_length =
+            tokio::time::timeout(Duration::from_secs(1), server_socket.recv(&mut packet))
+                .await
+                .expect("close reaches peer UDP socket")
+                .expect("receive protected close");
+        let recv_info =
+            crate::transport::RecvInfo { from: client_addr, to: server_addr, ecn: None };
+        server
+            .conn
+            .recv(&mut packet[..close_length], &recv_info)
+            .expect("server decrypts terminal close");
+        assert!(matches!(
+            server.conn.remote_error(),
+            Some(crate::error::ConnectionError::PeerConnectionClosed { error_code: 0x0d, .. })
+        ));
+        assert_eq!(manager.poll_fallback().expect("cover retained").data, b"queued cover response");
+        assert!(tokio::time::timeout(Duration::from_millis(30), server_socket.recv(&mut packet))
+            .await
+            .is_err());
+    }
 }

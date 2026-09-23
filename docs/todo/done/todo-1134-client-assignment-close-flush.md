@@ -89,8 +89,8 @@ that circuit-wide terminal path.
   1,879 passed, 1 ignored. Strict root library Clippy, formatting and diff
   checks passed on macOS. Linux/Windows live-socket behavior is not claimed.
 - The loopback failure is queued by direct CRYPTO admission rather than a
-  protected inbound peer packet; the actual `recv_mut` terminal-`Err` wire
-  gate and cover suppression remain TODO-1136. Nested-hop terminal relay
+  protected inbound peer packet; the actual protected-input wire gate and
+  cover suppression remain TODO-1136. Nested-hop terminal relay
   remains TODO-1135. Other early assignment exits that may acquire a queued
   close remain TODO-1137. These limits do not change the post-receive physical
   close contract.

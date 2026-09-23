@@ -633,7 +633,7 @@ fn frame_type_allowed(ty: u64, pkt: PacketType) -> bool {
             // sender separately requires explicit replay-safe stream admission.
             stream_frame_type(ty) || matches!(ty, 0x00 | 0x01 | 0x04 | 0x05 | 0x10..=0x17 | 0x1d)
         }
-        PT::Short => matches!(ty, 0x00..=0x05 | 0x07..=0x1e | 0x30 | 0x31),
+        PT::Short => matches!(ty, 0x00..=0x1e | 0x30 | 0x31),
         PT::Retry | PT::VersionNegotiation => false,
     }
 }
@@ -1142,10 +1142,7 @@ mod tests {
             from_bytes(&crypto, PacketType::ZeroRTT),
             Err(ConnectionError::InvalidFrame)
         ));
-        assert!(matches!(
-            from_bytes(&crypto, PacketType::Short),
-            Err(ConnectionError::InvalidFrame)
-        ));
+        assert!(from_bytes(&crypto, PacketType::Short).is_ok());
 
         let stream = [0x0A, 0x00, 0x00];
         assert!(from_bytes(&stream, PacketType::ZeroRTT).is_ok());
