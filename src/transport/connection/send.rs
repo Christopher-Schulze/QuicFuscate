@@ -12,7 +12,7 @@ impl Connection {
     }
 
     /// Emit a transport close at a level the peer can decrypt before version validation.
-    fn send_pre_validation_close(
+    pub(super) fn send_pre_validation_close(
         &mut self,
         out: &mut [u8],
     ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
@@ -313,6 +313,10 @@ impl Connection {
                 };
                 if max_len < 32 {
                     continue;
+                }
+                {
+                    let crypto = self.crypto.read();
+                    packet::preflight_outgoing_packet_keys(&crypto, pkt_ty, pn)?;
                 }
                 let crypto_frame = self.next_crypto_frame(lvl, max_len)?;
                 let probe_pos = self

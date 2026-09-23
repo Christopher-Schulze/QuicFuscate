@@ -794,8 +794,16 @@
 - Detail: `docs/todo/todo-1123-core-outgoing-send-handoff.md`
 
 ### TODO-1124 - Fail closed when QUIC packet encryption lacks a sealer
-- OPEN. `encrypt_and_protect` can return `Ok(hdr_len)` with no Initial, Handshake, 0-RTT or 1-RTT AEAD key, and its callers treat that as a protected send. Replace no-key and unsupported-type successes with typed errors, prove send-state preservation, and validate peer-opened retries at each reachable level.
-- Detail: `docs/todo/todo-1124-packet-encryption-missing-key-fail-closed.md`
+- DONE. Missing AEAD/HP owners and unsupported packet types now fail closed before AEAD mutation. Initial/Handshake preflight protects queued CRYPTO, ACK and PTO probes; close and replay-safe 0-RTT ownership survives no-key errors. Initial/Handshake and 0-RTT retries open at the peer. Default library `1,861 passed, 1 ignored`; relevant feature-mode connection `179/179`; strict library Clippy and formatting pass. Post-selection handshake transaction is TODO-1125; CRYPTO retention backpressure is TODO-1126.
+- Detail: `docs/todo/done/todo-1124-packet-encryption-missing-key-fail-closed.md`
+
+### TODO-1125 - Commit Initial and Handshake send obligations after seal
+- OPEN. The Initial/Handshake path removes CRYPTO, ACK and PTO-probe obligations before AEAD/HP succeeds. TODO-1124 preflights absent keys; this task stages all obligations through buffer, serialization, AEAD and HP failures, then commits them once after sealing. Exact retry delivery and recovery accounting must be proved for both packet spaces.
+- Detail: `docs/todo/todo-1125-transactional-handshake-send.md`
+
+### TODO-1126 - Bound CRYPTO retention without dropping unacknowledged bytes
+- OPEN. `CryptoStream::next_crypto_frame` evicts the oldest unacknowledged ranges after 4 MiB, making later loss/PTO retransmission impossible; its unsent queue is also unbounded. Replace eviction with bounded admission/backpressure, preserve queued bytes and offsets at capacity, and prove exact ACK-release/loss/retry behavior for the transport and QFTLS owners. TODO-1125 consumes this contract.
+- Detail: `docs/todo/todo-1126-crypto-retention-backpressure.md`
 
 ## Completed
 

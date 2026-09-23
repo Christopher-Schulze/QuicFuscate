@@ -447,21 +447,78 @@ pub fn protect_header(
     pkt_type: PacketType,
 ) -> Result<(), ConnectionError> {
     hp_packet_number_bounds(buf.len(), pn_off, pn_len)?;
+    let hp = outgoing_header_protector(crypto, pkt_type)?;
+    protect_header_with_key(hp, buf, pn_off, pn_len, pkt_type)
+}
 
-    // Select HP based on packet type
+fn outgoing_header_protector(
+    crypto: &CryptoContext,
+    pkt_type: PacketType,
+) -> Result<&(dyn HeaderProtector + Send + Sync), ConnectionError> {
     let hp = match pkt_type {
         PacketType::Initial => crypto.hp_initial.as_deref(),
         PacketType::Handshake => crypto.hp_handshake.as_deref(),
         PacketType::ZeroRTT => crypto.hp_0rtt.as_deref(),
         PacketType::Short => crypto.hp_1rtt.as_deref(),
-        _ => return Ok(()),
+        _ => return Err(ConnectionError::InvalidPacket),
     };
+    hp.ok_or_else(|| {
+        ConnectionError::TlsError(format!("missing header protector for {pkt_type:?}"))
+    })
+}
 
-    let hp = match hp {
-        Some(h) => h,
-        None => return Ok(()), // No HP available yet
-    };
+fn outgoing_packet_sealer(
+    crypto: &CryptoContext,
+    packet_type: PacketType,
+    packet_number: u64,
+) -> Result<&dyn tls_aead::AeadSeal, ConnectionError> {
+    match packet_type {
+        PacketType::Initial => crypto
+            .seal_initial
+            .as_deref()
+            .map(|seal| seal as &dyn tls_aead::AeadSeal)
+            .ok_or_else(|| ConnectionError::TlsError("missing Initial AEAD sealer".into())),
+        PacketType::Handshake => crypto
+            .seal_handshake
+            .as_deref()
+            .map(|seal| seal as &dyn tls_aead::AeadSeal)
+            .ok_or_else(|| ConnectionError::TlsError("missing Handshake AEAD sealer".into())),
+        PacketType::ZeroRTT => crypto
+            .seal_0rtt
+            .as_ref()
+            .map(|seal| seal as &dyn tls_aead::AeadSeal)
+            .ok_or_else(|| ConnectionError::TlsError("missing 0-RTT AEAD sealer".into())),
+        PacketType::Short => select_private_seal(
+            crypto.seal_1rtt.as_ref(),
+            crypto.private_seal_1rtt.as_ref(),
+            packet_number,
+            crypto.private_write_boundary_1rtt,
+        )
+        .map_err(|error| match error {
+            ConnectionError::Done => ConnectionError::TlsError("missing 1-RTT AEAD sealer".into()),
+            other => other,
+        }),
+        _ => Err(ConnectionError::InvalidPacket),
+    }
+}
 
+pub(crate) fn preflight_outgoing_packet_keys(
+    crypto: &CryptoContext,
+    packet_type: PacketType,
+    packet_number: u64,
+) -> Result<(), ConnectionError> {
+    outgoing_packet_sealer(crypto, packet_type, packet_number)?;
+    outgoing_header_protector(crypto, packet_type)?;
+    Ok(())
+}
+
+fn protect_header_with_key(
+    hp: &dyn HeaderProtector,
+    buf: &mut [u8],
+    pn_off: usize,
+    pn_len: usize,
+    pkt_type: PacketType,
+) -> Result<(), ConnectionError> {
     let (sample_off, sample_end) = hp_sample_bounds(buf.len(), pn_off)?;
 
     let mask = hp.new_mask(&buf[sample_off..sample_end])?;
@@ -496,12 +553,6 @@ pub fn encrypt_and_protect(
     if hdr_len > buf.len() {
         return Err(ConnectionError::BufferTooShort);
     }
-    if !matches!(
-        pkt_type,
-        PacketType::Initial | PacketType::Handshake | PacketType::ZeroRTT | PacketType::Short
-    ) {
-        return Ok(hdr_len);
-    }
     if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || hdr_len < pn_len {
         return Err(ConnectionError::InvalidPacket);
     }
@@ -515,31 +566,8 @@ pub fn encrypt_and_protect(
 
     // Select AEAD based on packet type. Short-header packets use the committed packet-number
     // boundary, while header protection remains the standard QUIC owner.
-    let aead: &dyn tls_aead::AeadSeal = match pkt_type {
-        PacketType::Initial => match crypto.seal_initial.as_deref() {
-            Some(aead) => aead as &dyn tls_aead::AeadSeal,
-            None => return Ok(hdr_len),
-        },
-        PacketType::Handshake => match crypto.seal_handshake.as_deref() {
-            Some(aead) => aead as &dyn tls_aead::AeadSeal,
-            None => return Ok(hdr_len),
-        },
-        PacketType::ZeroRTT => match crypto.seal_0rtt.as_ref() {
-            Some(aead) => aead as &dyn tls_aead::AeadSeal,
-            None => return Ok(hdr_len),
-        },
-        PacketType::Short => match select_private_seal(
-            crypto.seal_1rtt.as_ref(),
-            crypto.private_seal_1rtt.as_ref(),
-            pn,
-            crypto.private_write_boundary_1rtt,
-        ) {
-            Ok(aead) => aead,
-            Err(ConnectionError::Done) => return Ok(hdr_len),
-            Err(error) => return Err(error),
-        },
-        _ => return Ok(hdr_len),
-    };
+    let aead = outgoing_packet_sealer(crypto, pkt_type, pn)?;
+    let hp = outgoing_header_protector(crypto, pkt_type)?;
 
     // Encode packet number length (pn_len - 1) into the low 2 bits of the first header byte.
     // This is required for correct header protection removal on the peer.
@@ -551,7 +579,7 @@ pub fn encrypt_and_protect(
     let ciphertext_len = aead.seal_with_u64_counter(pn, aad, payload, plaintext_len, None)?;
 
     // Apply header protection
-    protect_header(crypto, buf, pn_off, pn_len, pkt_type)?;
+    protect_header_with_key(hp, buf, pn_off, pn_len, pkt_type)?;
 
     checked_usize_add(hdr_len, ciphertext_len)
 }

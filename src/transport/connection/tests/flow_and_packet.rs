@@ -335,6 +335,108 @@ fn zero_rtt_sends_only_explicit_safe_stream_data() {
 }
 
 #[test]
+fn pre_validation_close_without_keys_keeps_close_and_packet_number() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+
+    let mut client = make_conn();
+    client.pending_control.push_back(Frame::ConnectionClose {
+        error_code: 0,
+        frame_type: 0,
+        reason: std::borrow::Cow::Borrowed(b"close"),
+    });
+    let mut packet = [0u8; 1500];
+    assert!(matches!(
+        client.send_pre_validation_close(&mut packet),
+        Err(ConnectionError::TlsError(_))
+    ));
+    assert_eq!(client.pending_control.len(), 1);
+    assert_eq!(client.next_send_pn_by_space[0], 0);
+    assert_eq!(client.stats.sent, 0);
+
+    client
+        .crypto
+        .write()
+        .set_write_secret(Level::Initial, Algorithm::AES128_GCM, &[0x5A; 32])
+        .expect("install close packet keys");
+    let (length, _) = client.send_pre_validation_close(&mut packet).expect("retry close");
+    assert!(length >= MIN_CLIENT_INITIAL_LEN);
+    assert!(client.pending_control.is_empty());
+    assert_eq!(client.next_send_pn_by_space[0], 1);
+    assert_eq!(client.stats.sent, 1);
+}
+
+#[test]
+fn handshake_missing_hp_preserves_crypto_until_peer_opened_retry() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+
+    for (packet_type, level) in
+        [(PacketType::Initial, Level::Initial), (PacketType::Handshake, Level::Handshake)]
+    {
+        let mut client = make_conn();
+        let payload = b"queued handshake bytes";
+        let secret = [0x5Au8; 32];
+        {
+            let mut crypto = client.crypto.write();
+            crypto
+                .set_write_secret(level, Algorithm::AES128_GCM, &secret)
+                .expect("install outgoing packet keys");
+            let stream = if packet_type == PacketType::Initial {
+                &mut crypto.crypto_initial
+            } else {
+                &mut crypto.crypto_handshake
+            };
+            stream.send(payload).expect("queue CRYPTO flight");
+            if packet_type == PacketType::Initial {
+                crypto.hp_initial = None;
+            } else {
+                crypto.hp_handshake = None;
+            }
+        }
+        let space = if packet_type == PacketType::Initial { 0 } else { 1 };
+        let mut packet = [0u8; 1500];
+        assert!(matches!(client.send(&mut packet), Err(ConnectionError::TlsError(_))));
+        assert_eq!(client.next_send_pn_by_space[space], 0);
+        assert_eq!(client.stats.sent, 0);
+        assert_eq!(client.crypto.read().crypto_initial.unacked_bytes(), 0);
+        assert_eq!(client.crypto.read().crypto_handshake.unacked_bytes(), 0);
+
+        client
+            .crypto
+            .write()
+            .set_write_secret(level, Algorithm::AES128_GCM, &secret)
+            .expect("restore outgoing packet keys");
+        let (length, _) = client.send(&mut packet).expect("retry CRYPTO flight");
+        assert_eq!(client.next_send_pn_by_space[space], 1);
+        assert_eq!(client.stats.sent, 1);
+        let (header, pn_offset) = packet::parse_header(&packet[..length], 0).expect("parse retry");
+        assert_eq!(header.ty, packet_type);
+
+        let mut peer_crypto = packet::CryptoContext::default();
+        peer_crypto
+            .set_read_secret(level, Algorithm::AES128_GCM, &secret)
+            .expect("install peer opener");
+        let header_protector = if packet_type == PacketType::Initial {
+            peer_crypto.hp_initial_open.as_deref().expect("Initial peer HP")
+        } else {
+            peer_crypto.hp_handshake_open.as_deref().expect("Handshake peer HP")
+        };
+        let (_, pn_len) = packet::remove_hp(&mut packet[..length], header_protector, pn_offset)
+            .expect("unprotect retry header");
+        let opener = if packet_type == PacketType::Initial {
+            peer_crypto.open_initial.as_deref().expect("Initial peer opener")
+        } else {
+            peer_crypto.open_handshake.as_deref().expect("Handshake peer opener")
+        };
+        let plaintext_end =
+            packet::decrypt_payload(&mut packet[..length], 0, pn_len, pn_offset + pn_len, opener)
+                .expect("peer opens retried flight");
+        assert!(packet[pn_offset + pn_len..plaintext_end]
+            .windows(payload.len())
+            .any(|window| window == payload));
+    }
+}
+
+#[test]
 fn failed_zero_rtt_seal_preserves_replay_safe_stream_for_retry() {
     use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
     use crate::transport::anti_replay::{AntiReplayConfig, StrikeRegister};
@@ -362,6 +464,15 @@ fn failed_zero_rtt_seal_preserves_replay_safe_stream_for_retry() {
     let original_buffered = client.send_buffered_bytes;
     let mut packet = [0u8; 2048];
     let now = client.clock.now();
+    assert!(matches!(
+        client.send_zero_rtt_packet(&mut packet, now),
+        Err(ConnectionError::TlsError(_))
+    ));
+    assert_eq!(client.writable_streams, original_queue);
+    assert_eq!(client.send_buffered_bytes, original_buffered);
+    assert_eq!(client.streams.get(&0).unwrap().send_off, 0);
+    assert_eq!(client.next_send_pn_by_space[2], 0);
+    assert_eq!(client.stats.sent, 0);
     let hp_calls = std::sync::Arc::new(AtomicUsize::new(0));
     let real_hp = {
         let mut crypto = client.crypto.write();

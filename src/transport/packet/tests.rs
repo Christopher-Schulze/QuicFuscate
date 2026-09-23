@@ -1009,6 +1009,79 @@ fn packet_payload_boundaries_reject_overflow_before_aead() {
 }
 
 #[test]
+fn packet_protection_rejects_missing_aead_for_every_encrypted_level() {
+    let crypto = CryptoContext::default();
+    for packet_type in
+        [PacketType::Initial, PacketType::Handshake, PacketType::ZeroRTT, PacketType::Short]
+    {
+        let mut packet = [0x40; 64];
+        let original = packet;
+        let result = encrypt_and_protect(&crypto, &mut packet, 4, 0, 1, packet_type);
+        assert!(matches!(result, Err(ConnectionError::TlsError(_))), "{packet_type:?}: {result:?}");
+        assert_eq!(packet, original, "missing AEAD must not mutate the packet");
+    }
+}
+
+#[test]
+fn packet_protection_rejects_missing_hp_and_unencrypted_packet_types() {
+    let crypto = CryptoContext::default();
+    for packet_type in
+        [PacketType::Initial, PacketType::Handshake, PacketType::ZeroRTT, PacketType::Short]
+    {
+        let mut packet = [0x40; 64];
+        let original = packet;
+        let result = protect_header(&crypto, &mut packet, 3, 1, packet_type);
+        assert!(matches!(result, Err(ConnectionError::TlsError(_))), "{packet_type:?}: {result:?}");
+        assert_eq!(packet, original, "missing HP must not mutate the packet");
+    }
+    for packet_type in [PacketType::Retry, PacketType::VersionNegotiation] {
+        let mut packet = [0x40; 64];
+        let original = packet;
+        assert_eq!(
+            protect_header(&crypto, &mut packet, 3, 1, packet_type),
+            Err(ConnectionError::InvalidPacket)
+        );
+        assert_eq!(
+            encrypt_and_protect(&crypto, &mut packet, 4, 0, 1, packet_type),
+            Err(ConnectionError::InvalidPacket)
+        );
+        assert_eq!(packet, original);
+    }
+}
+
+#[test]
+fn packet_protection_checks_hp_before_aead_mutates_output() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+
+    for (packet_type, level) in [
+        (PacketType::Initial, Level::Initial),
+        (PacketType::Handshake, Level::Handshake),
+        (PacketType::ZeroRTT, Level::ZeroRTT),
+        (PacketType::Short, Level::OneRTT),
+    ] {
+        let mut crypto = CryptoContext::default();
+        if packet_type == PacketType::ZeroRTT {
+            crypto.set_zero_rtt_enabled(true);
+        }
+        crypto
+            .set_write_secret(level, Algorithm::AES128_GCM, &[0x5A; 32])
+            .expect("install AEAD and HP");
+        match packet_type {
+            PacketType::Initial => crypto.hp_initial = None,
+            PacketType::Handshake => crypto.hp_handshake = None,
+            PacketType::ZeroRTT => crypto.hp_0rtt = None,
+            PacketType::Short => crypto.hp_1rtt = None,
+            _ => unreachable!("test covers encrypted levels only"),
+        }
+        let mut packet = [0x40; 64];
+        let original = packet;
+        let result = encrypt_and_protect(&crypto, &mut packet, 4, 0, 1, packet_type);
+        assert!(matches!(result, Err(ConnectionError::TlsError(_))), "{packet_type:?}: {result:?}");
+        assert_eq!(packet, original, "missing HP must be detected before AEAD mutation");
+    }
+}
+
+#[test]
 fn pending_handshake_send_tracks_only_unsent_handshake_flights() {
     let mut crypto = CryptoContext::default();
     assert!(!crypto.has_pending_handshake_send());
