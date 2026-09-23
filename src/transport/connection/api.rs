@@ -686,13 +686,7 @@ impl Connection {
 
     /// Returns true if the connection is established
     pub fn is_established(&self) -> bool {
-        self.is_established
-            && !self.is_closed
-            && self
-                .tls_provider
-                .as_ref()
-                .map(|provider| provider.handshake_complete())
-                .unwrap_or(true)
+        self.is_established && !self.is_closed && self.tls_handshake_complete()
     }
 
     /// Returns true only when an outer data-plane envelope cannot capture a

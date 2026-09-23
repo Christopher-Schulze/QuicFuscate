@@ -1302,17 +1302,22 @@ impl Connection {
             // QuicFuscateConnection after transport establishment. Creating a
             // second default H3 owner here would queue another control-stream
             // SETTINGS prologue before the persona-configured owner starts.
-            Ok(provider.handshake_complete())
+            Ok(provider.handshake_complete() && self.version_negotiation.peer_information_validated)
         } else {
             // No TLS provider configured, consider handshake complete
             Ok(true)
         }
     }
 
-    /// Returns true when the TLS provider reports handshake completion.
+    /// Returns true after rustls completes and authenticated peer version information is valid.
     /// This is intentionally distinct from transport liveness/establishment.
     pub fn tls_handshake_complete(&self) -> bool {
-        self.tls_provider.as_ref().map(|p| p.handshake_complete()).unwrap_or(true)
+        self.tls_provider
+            .as_ref()
+            .map(|provider| {
+                provider.handshake_complete() && self.version_negotiation.peer_information_validated
+            })
+            .unwrap_or(true)
     }
 
     /// Enable HTTP/3 connection bound to this transport (idempotent)

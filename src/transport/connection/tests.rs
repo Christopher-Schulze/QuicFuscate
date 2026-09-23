@@ -113,6 +113,15 @@ fn make_v2_client() -> Connection {
     connection
 }
 
+fn make_v2_server() -> Connection {
+    let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
+    config
+        .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
+        .unwrap();
+    Connection::new_with_role(b"server-scid", local(), peer(), config, true)
+        .expect("valid test server configuration")
+}
+
 fn assert_reno_window_grows(connection: &mut Connection) {
     let initial_cwnd = connection.recovery.cwnd;
     let now = Instant::now();
@@ -368,15 +377,27 @@ fn v2_requires_authenticated_version_information() {
 }
 
 #[test]
-fn server_may_accept_missing_version_information_and_client_accepts_retiring_choice() {
-    let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
-    config
-        .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
-        .unwrap();
-    let mut server = Connection::new_with_role(b"server-scid", local(), peer(), config, true)
-        .expect("valid test connection configuration");
-    assert_eq!(server.validate_peer_version_information(Some(Vec::new())), Ok(()));
+fn v2_server_rejects_missing_version_information_before_handshake_done() {
+    let mut server = make_v2_server();
+    assert_eq!(server.validate_peer_version_information(None), Ok(()));
+    assert!(!server.version_negotiation.peer_information_validated);
+    server.maybe_queue_handshake_done();
+    assert!(!server.handshake_done_queued);
+    assert!(!server.pending_control.iter().any(|frame| matches!(frame, Frame::HandshakeDone)));
 
+    assert!(server.validate_peer_version_information(Some(Vec::new())).is_err());
+    assert!(server.is_closed);
+    assert!(!server.version_negotiation.peer_information_validated);
+    assert!(!server.handshake_done_queued);
+    assert!(server.pending_control.iter().any(|frame| matches!(
+        frame,
+        Frame::ConnectionClose { error_code, .. }
+            if *error_code == super::super::version::VERSION_NEGOTIATION_ERROR_CODE
+    )));
+}
+
+#[test]
+fn v2_client_accepts_retiring_server_choice() {
     let mut client = make_v2_client();
     let parameters = super::super::version::VersionInformation {
         chosen: crate::transport::PROTOCOL_VERSION_V2,
@@ -388,6 +409,61 @@ fn server_may_accept_missing_version_information_and_client_accepts_retiring_cho
 }
 
 #[test]
+fn v2_version_information_rejects_malformed_duplicate_and_wrong_choice_on_both_roles() {
+    let v2 = crate::transport::PROTOCOL_VERSION_V2;
+    let valid = super::super::version::VersionInformation {
+        chosen: v2,
+        available: vec![v2, PROTOCOL_VERSION],
+    }
+    .encode_parameter()
+    .unwrap();
+    let wrong_choice = super::super::version::VersionInformation {
+        chosen: PROTOCOL_VERSION,
+        available: vec![v2, PROTOCOL_VERSION],
+    }
+    .encode_parameter()
+    .unwrap();
+    let mut duplicate = valid.clone();
+    duplicate.extend_from_slice(&valid);
+    let mut malformed = valid.clone();
+    malformed.pop();
+
+    for is_server in [false, true] {
+        for (parameters, error_code) in [
+            (Vec::new(), super::super::version::VERSION_NEGOTIATION_ERROR_CODE),
+            (duplicate.clone(), super::super::version::TRANSPORT_PARAMETER_ERROR_CODE),
+            (malformed.clone(), super::super::version::TRANSPORT_PARAMETER_ERROR_CODE),
+            (wrong_choice.clone(), super::super::version::VERSION_NEGOTIATION_ERROR_CODE),
+        ] {
+            let mut connection = if is_server { make_v2_server() } else { make_v2_client() };
+            assert!(connection.validate_peer_version_information(Some(parameters)).is_err());
+            assert!(!connection.version_negotiation.peer_information_validated);
+            assert!(connection.pending_control.iter().any(|frame| matches!(
+                frame,
+                Frame::ConnectionClose { error_code: actual, .. } if *actual == error_code
+            )));
+        }
+    }
+}
+
+#[test]
+fn v2_server_rejects_chosen_version_missing_from_client_available_versions() {
+    let mut server = make_v2_server();
+    let parameters = super::super::version::VersionInformation {
+        chosen: crate::transport::PROTOCOL_VERSION_V2,
+        available: vec![PROTOCOL_VERSION],
+    }
+    .encode_parameter()
+    .unwrap();
+    assert!(server.validate_peer_version_information(Some(parameters)).is_err());
+    assert!(server.pending_control.iter().any(|frame| matches!(
+        frame,
+        Frame::ConnectionClose { error_code, .. }
+            if *error_code == super::super::version::TRANSPORT_PARAMETER_ERROR_CODE
+    )));
+}
+
+#[test]
 fn v1_fallback_accepts_legacy_server_without_version_information() {
     let mut client = make_v2_client();
     client.config.select_version(PROTOCOL_VERSION).unwrap();
@@ -396,6 +472,323 @@ fn v1_fallback_accepts_legacy_server_without_version_information() {
     client.version_negotiation.reacted_to_vn = true;
     assert_eq!(client.validate_peer_version_information(Some(Vec::new())), Ok(()));
     assert!(client.version_negotiation.peer_information_validated);
+}
+
+fn complete_live_version_handshake(
+    mut client: Connection,
+    server_scid: &[u8],
+    legacy_v1_server: bool,
+) {
+    let version = client.config.version;
+    let client_addr = "127.0.0.1:29101".parse().unwrap();
+    let server_addr = "127.0.0.1:29102".parse().unwrap();
+    let mut server_config = Config::new_with_version(version).unwrap();
+    server_config.verify_peer = false;
+    let mut server = packet::accept(
+        server_scid,
+        Some(server_scid),
+        server_addr,
+        client_addr,
+        &mut server_config,
+    )
+    .unwrap();
+    server.set_destination_cid(client.scid);
+
+    let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
+        "QUICFUSCATE_TLS_COVER",
+        "0",
+    )]));
+    if client.tls_provider.is_none() {
+        client.set_environment_snapshot(std::sync::Arc::clone(&environment));
+    }
+    server.set_environment_snapshot(environment);
+    if client.tls_provider.is_none() {
+        client.enable_tls("version-information-test").unwrap();
+    }
+    server.enable_tls("version-information-test").unwrap();
+    if legacy_v1_server {
+        assert_eq!(version, PROTOCOL_VERSION);
+        server.tls_provider = Some(
+            crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+                true,
+                server.config.verify_peer,
+                version,
+                &[],
+                server.config.verify_locations_file.as_deref(),
+                &server.environment,
+                &server.clock,
+                server.config.max_udp_payload_size as usize,
+                server.scid.as_ref(),
+                server.config.ech_config_list.as_deref(),
+                false,
+            )
+            .unwrap(),
+        );
+    }
+    let mut profile = crate::qftls::TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some("localhost".to_string());
+    if client.tls_profile.is_none() {
+        client.configure_tls(&profile, "localhost").unwrap();
+    }
+    server.configure_tls(&profile, "localhost").unwrap();
+
+    let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
+    let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
+    let mut packet = [0u8; 4096];
+    for _ in 0..64 {
+        let mut progressed = false;
+        match client.send(&mut packet) {
+            Ok((len, _)) => {
+                server.recv(&mut packet[..len], &client_to_server).unwrap();
+                progressed = true;
+            }
+            Err(ConnectionError::Done) => {}
+            Err(error) => panic!("v{version:x} client flight failed: {error:?}"),
+        }
+        match server.send(&mut packet) {
+            Ok((len, _)) => {
+                client.recv(&mut packet[..len], &server_to_client).unwrap();
+                progressed = true;
+            }
+            Err(ConnectionError::Done) => {}
+            Err(error) => panic!("v{version:x} server flight failed: {error:?}"),
+        }
+        if client.tls_handshake_complete() && server.tls_handshake_complete() {
+            assert!(client.version_negotiation.peer_information_validated);
+            assert!(server.version_negotiation.peer_information_validated);
+            assert!(server.handshake_done_queued);
+            return;
+        }
+        assert!(progressed, "v{version:x} handshake stalled");
+    }
+    panic!("v{version:x} handshake exceeded packet pump");
+}
+
+#[test]
+fn live_v1_and_v2_tls_peers_validate_version_information_before_completion() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        let mut client_config = Config::new_with_version(version).unwrap();
+        client_config.verify_peer = false;
+        let mut client = Connection::new_client(
+            b"version-client-scid",
+            "127.0.0.1:29101".parse().unwrap(),
+            "127.0.0.1:29102".parse().unwrap(),
+            client_config,
+        )
+        .unwrap();
+        let server_scid = b"version-server-scid";
+        client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+        complete_live_version_handshake(client, server_scid, false);
+    }
+}
+
+#[test]
+fn live_v2_to_v1_version_negotiation_validates_authenticated_server_versions() {
+    for legacy_v1_server in [false, true] {
+        let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
+        config
+            .set_supported_versions(vec![crate::transport::PROTOCOL_VERSION_V2, PROTOCOL_VERSION])
+            .unwrap();
+        config.verify_peer = false;
+        let mut client = Connection::new_client(
+            b"version-client-scid",
+            "127.0.0.1:29101".parse().unwrap(),
+            "127.0.0.1:29102".parse().unwrap(),
+            config,
+        )
+        .unwrap();
+        client.set_initial_dcid(ConnectionId::from_ref(b"version-original"));
+        let mut vn = packet::generate_version_negotiation_packet(
+            &[],
+            &[PROTOCOL_VERSION],
+            client.scid.as_ref(),
+            client.initial_dcid.as_ref(),
+        )
+        .unwrap();
+        let from_server = RecvInfo {
+            from: "127.0.0.1:29102".parse().unwrap(),
+            to: "127.0.0.1:29101".parse().unwrap(),
+            ecn: None,
+        };
+        assert_eq!(client.recv(&mut vn, &from_server), Ok(vn.len()));
+        assert!(client.version_negotiation.reacted_to_vn);
+        assert_eq!(client.config.version, PROTOCOL_VERSION);
+        assert!(!client.version_negotiation.peer_information_validated);
+        let server_scid = client.initial_dcid.to_vec();
+        complete_live_version_handshake(client, &server_scid, legacy_v1_server);
+    }
+}
+
+#[test]
+fn live_v2_retry_preserves_authenticated_version_information() {
+    let mut config = Config::new_with_version(crate::transport::PROTOCOL_VERSION_V2).unwrap();
+    config.verify_peer = false;
+    let mut client = Connection::new_client(
+        b"version-client-scid",
+        "127.0.0.1:29101".parse().unwrap(),
+        "127.0.0.1:29102".parse().unwrap(),
+        config,
+    )
+    .unwrap();
+    let original_dcid = ConnectionId::from_ref(b"version-original");
+    client.set_initial_dcid(original_dcid);
+    client.set_environment_snapshot(std::sync::Arc::new(
+        crate::env_utils::EnvSnapshot::from_pairs([("QUICFUSCATE_TLS_COVER", "0")]),
+    ));
+    client.enable_tls("version-retry-test").unwrap();
+    let mut profile = crate::qftls::TlsProfile::chrome_130();
+    profile.timing_jitter = None;
+    profile.sni = Some("localhost".to_string());
+    client.configure_tls(&profile, "localhost").unwrap();
+    let mut initial = [0u8; 4096];
+    let (initial_len, _) = client.send(&mut initial).expect("first v2 Initial flight");
+    assert!(initial_len >= MIN_CLIENT_INITIAL_LEN);
+    let retry_scid = b"version-retry-scid";
+    let header = packet::Header {
+        ty: PacketType::Retry,
+        version: crate::transport::PROTOCOL_VERSION_V2,
+        dcid: client.scid.to_vec(),
+        scid: retry_scid.to_vec(),
+        pkt_num: 0,
+        pkt_num_len: 0,
+        token: Some(vec![0x10, 0x20, 0x30, 0x40]),
+        versions: None,
+        key_phase: false,
+    };
+    let mut storage = [0u8; 256];
+    let header_len = packet::format_header(&header, &mut storage).unwrap();
+    let mut retry = storage[..header_len].to_vec();
+    packet::append_retry_tag(
+        &mut retry,
+        original_dcid.as_ref(),
+        crate::transport::PROTOCOL_VERSION_V2,
+    )
+    .unwrap();
+    let from_server = RecvInfo {
+        from: "127.0.0.1:29102".parse().unwrap(),
+        to: "127.0.0.1:29101".parse().unwrap(),
+        ecn: None,
+    };
+    assert_eq!(client.recv(&mut retry, &from_server), Ok(retry.len()));
+    assert_eq!(client.config.version, crate::transport::PROTOCOL_VERSION_V2);
+    assert!(!client.version_negotiation.peer_information_validated);
+    assert_eq!(client.initial_dcid, original_dcid);
+    assert_eq!(client.dcid, ConnectionId::from_ref(retry_scid));
+    complete_live_version_handshake(client, retry_scid, false);
+}
+
+#[test]
+fn live_v2_tls_rejects_missing_version_information_from_either_peer() {
+    let version = crate::transport::PROTOCOL_VERSION_V2;
+    for missing_from_client in [true, false] {
+        let client_addr = "127.0.0.1:29101".parse().unwrap();
+        let server_addr = "127.0.0.1:29102".parse().unwrap();
+        let client_scid = b"version-client-scid";
+        let server_scid = b"version-server-scid";
+        let mut client_config = Config::new_with_version(version).unwrap();
+        client_config.verify_peer = false;
+        let mut server_config = Config::new_with_version(version).unwrap();
+        server_config.verify_peer = false;
+        let mut client =
+            Connection::new_client(client_scid, client_addr, server_addr, client_config).unwrap();
+        client.set_initial_dcid(ConnectionId::from_ref(server_scid));
+        let mut server = packet::accept(
+            server_scid,
+            Some(server_scid),
+            server_addr,
+            client_addr,
+            &mut server_config,
+        )
+        .unwrap();
+        server.set_destination_cid(ConnectionId::from_ref(client_scid));
+        let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
+            "QUICFUSCATE_TLS_COVER",
+            "0",
+        )]));
+        client.set_environment_snapshot(std::sync::Arc::clone(&environment));
+        server.set_environment_snapshot(environment);
+        client.enable_tls("version-information-negative").unwrap();
+        server.enable_tls("version-information-negative").unwrap();
+        let sender = if missing_from_client { &mut client } else { &mut server };
+        sender.tls_provider = Some(
+            crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+                sender.is_server,
+                sender.config.verify_peer,
+                version,
+                &[],
+                sender.config.verify_locations_file.as_deref(),
+                &sender.environment,
+                &sender.clock,
+                sender.config.max_udp_payload_size as usize,
+                sender.scid.as_ref(),
+                sender.config.ech_config_list.as_deref(),
+                false,
+            )
+            .unwrap(),
+        );
+        let mut profile = crate::qftls::TlsProfile::chrome_130();
+        profile.timing_jitter = None;
+        profile.sni = Some("localhost".to_string());
+        client.configure_tls(&profile, "localhost").unwrap();
+        server.configure_tls(&profile, "localhost").unwrap();
+
+        let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
+        let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
+        let mut packet = [0u8; 4096];
+        let mut rejected = false;
+        for _ in 0..64 {
+            match client.send(&mut packet) {
+                Ok((len, _)) => match server.recv(&mut packet[..len], &client_to_server) {
+                    Ok(_) => {}
+                    Err(_) if missing_from_client => {
+                        rejected = true;
+                        break;
+                    }
+                    Err(error) => panic!("valid server rejected client flight: {error:?}"),
+                },
+                Err(ConnectionError::Done) => {}
+                Err(error) => panic!("client flight failed before peer validation: {error:?}"),
+            }
+            match server.send(&mut packet) {
+                Ok((len, _)) => match client.recv(&mut packet[..len], &server_to_client) {
+                    Ok(_) => {}
+                    Err(_) if !missing_from_client => {
+                        rejected = true;
+                        break;
+                    }
+                    Err(error) => panic!("valid client rejected server flight: {error:?}"),
+                },
+                Err(ConnectionError::Done) => {}
+                Err(error) => panic!("server flight failed before peer validation: {error:?}"),
+            }
+        }
+        assert!(rejected, "peer missing version_information was accepted");
+        let receiver = if missing_from_client { &server } else { &client };
+        assert!(receiver.is_closed);
+        assert!(!receiver.version_negotiation.peer_information_validated);
+        assert!(!receiver.tls_handshake_complete());
+        assert!(receiver.pending_control.iter().any(|frame| matches!(
+            frame,
+            Frame::ConnectionClose { error_code, .. }
+                if *error_code == super::super::version::VERSION_NEGOTIATION_ERROR_CODE
+        )));
+        if missing_from_client {
+            assert!(!server.handshake_done_queued);
+        }
+        let (receiver, sender, close_info) = if missing_from_client {
+            (&mut server, &mut client, server_to_client)
+        } else {
+            (&mut client, &mut server, client_to_server)
+        };
+        let (close_len, _) = receiver.send(&mut packet).expect("serialize version error close");
+        sender.recv(&mut packet[..close_len], &close_info).expect("peer decrypts version error");
+        assert!(matches!(
+            sender.remote_error(),
+            Some(ConnectionError::PeerConnectionClosed { error_code, .. })
+                if *error_code == super::super::version::VERSION_NEGOTIATION_ERROR_CODE
+        ));
+    }
 }
 
 // ---- Priority 1: Flow Control ----------------------------------------

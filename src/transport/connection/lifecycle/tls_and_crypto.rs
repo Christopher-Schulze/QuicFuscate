@@ -164,9 +164,7 @@ impl Connection {
                 ));
             }
         };
-        let required = !self.is_server
-            && (self.config.version == super::super::PROTOCOL_VERSION_V2
-                || self.version_negotiation.reacted_to_vn);
+        let required = self.config.version == super::super::PROTOCOL_VERSION_V2;
         let information = match information {
             Some(information) => information,
             None if !self.is_server
@@ -454,8 +452,12 @@ impl Connection {
         crypto.open_handshake = None;
     }
 
-    fn maybe_queue_handshake_done(&mut self) {
-        if !self.is_server || self.handshake_done_queued || !self.tls_handshake_complete() {
+    pub(in crate::transport::connection) fn maybe_queue_handshake_done(&mut self) {
+        if !self.is_server
+            || self.handshake_done_queued
+            || !self.version_negotiation.peer_information_validated
+            || !self.tls_handshake_complete()
+        {
             return;
         }
         Self::queue_control_frame(&mut self.pending_control, Frame::HandshakeDone);

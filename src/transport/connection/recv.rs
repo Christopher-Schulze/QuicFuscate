@@ -182,6 +182,9 @@ impl Connection {
                 self.refresh_short_header_tag_reserve();
                 self.next_send_pn_by_space[0] = 0;
                 self.pkt_spaces[0] = pnspace::PktNumSpace::new_with_clock(self.clock.clone());
+                if let Some(provider) = &mut self.tls_provider {
+                    provider.requeue_all_crypto(qf_transport_types::QuicEncryptionLevel::Initial);
+                }
             }
             // For Retry we do not parse further.
             self.received_non_vn_packet = true;

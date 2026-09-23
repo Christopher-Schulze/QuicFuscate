@@ -757,8 +757,8 @@
 - Detail: `docs/todo/todo-1114-webtransport-capability-and-persona-coherence.md`
 
 ### TODO-1115 - Enforce authenticated QUIC v2 version information on both peers
-- OPEN. `validate_peer_version_information` requires the parameter only on the client, while the v2 server accepts a missing parameter and marks it validated; the existing test asserts that path. RFC 9369 requires v2 endpoints to send, process and validate `version_information` against downgrade. Require and verify the parameter on a v2 server before handshake completion, preserve a narrowly defined v1 compatibility rule, and prove malformed/missing/downgrade cases on both roles.
-- Detail: `docs/todo/todo-1115-quic-v2-version-information-validation.md`
+- DONE. Both v2 roles require authenticated `version_information` before completion, 1-RTT readiness or server `HANDSHAKE_DONE`. Real rustls packet pumps cover v1/v2, VN-to-v1 including a legacy server, authenticated v2 Retry after the first Initial, and peer-received errors for missing parameters on both roles. Direct parser tests cover duplicate, malformed, wrong-choice and availability errors. The independent standards-wire capture remains with TODO-1095; the complete Retry recovery reset belongs to TODO-1118.
+- Detail: `docs/todo/done/todo-1115-quic-v2-version-information-validation.md`
 
 ### TODO-1116 - Route migration packets through the actual old and new sockets
 - OPEN. The TODO-1056 client loop swaps to the new connected UDP socket before path validation and never polls the standby socket. Its receive call labels new-socket packets with the old `CoreConnection::local_addr`, while the connected send helper calls `send` and discards `SendInfo.from/to`. PATH_RESPONSE can be attributed to the wrong path and data on the old path can be lost during validation. Keep both sockets serviced and route every packet by the transport-selected path until commit or rollback; then apply TODO-1086's new-CID privacy rule.
@@ -767,6 +767,10 @@
 ### TODO-1117 - Complete H3 protocol-error wire closure
 - OPEN. `h3::Connection::poll` returns most peer protocol errors without queuing their RFC 9114/QPACK application close; core converts them to text and may stop processing without sending a close. TODO-1110 owns `IdError` and `StreamCreationError` from peer STREAM processing; this task owns the remaining classes and runtime dispatch. Classify peer-caused versus local/retryable failures, map every remaining fatal H3/QPACK error once, and prove actual peer-received codes plus runtime flush/teardown behavior without closing on `Done`, partial frames, backpressure or unknown stream types.
 - Detail: `docs/todo/todo-1117-h3-protocol-error-wire-close.md`
+
+### TODO-1118 - Reset loss recovery and congestion state after authenticated Retry
+- OPEN. A real Initial-before-Retry v2 handshake now retransmits TLS CRYPTO, but the Retry receive path still leaves the old Initial in `Recovery` while resetting its packet number to zero. RFC 9002 Section 6.3 requires a full loss-recovery and congestion reset including timers. Preserve the TLS transcript, configured CC and callbacks; prove v1/v2 Retry, induced loss, 0-RTT disposition and negative Retry immutability with real peers.
+- Detail: `docs/todo/todo-1118-retry-recovery-state-reset.md`
 
 ## Completed
 

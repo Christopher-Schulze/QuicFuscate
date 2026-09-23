@@ -4,7 +4,7 @@ title: Require authenticated QUIC v2 version information on both endpoints
 severity: HIGH
 phase: S
 priority: P1
-status: OPEN
+status: DONE
 created: 2026-09-23
 depends_on: []
 ---
@@ -25,6 +25,28 @@ validate the `version_information` transport parameter to prevent downgrade.
 The current v2 server acceptance violates that contract. This is source
 proof; no external v2 peer capture has yet been checked. RFC source:
 https://www.rfc-editor.org/rfc/rfc9369.html#section-4.
+
+## Completed implementation and proof (2026-09-23)
+
+The both-role v2 requirement, authenticated-completion gate and server
+`HANDSHAKE_DONE` gate are patched locally. The old permissive server test is
+replaced by an error-code assertion; both-role malformed, duplicate and
+wrong-choice cases, both-role real-TLS missing-parameter rejection, and
+in-memory v1/v2, VN-to-v1 with a legacy v1 server, and v2-Retry rustls handshakes are added. The real
+Retry test exposed a missing Initial CRYPTO requeue after
+the client adopts the Retry token and CID; the receive path now requeues the
+retained rustls Initial flight under the freshly derived keys. These changes
+also exposed that a failed version check could repeatedly block its queued
+CONNECTION_CLOSE. The send path now emits the close in the peer-readable
+Initial or Handshake space before re-polling the rejected parameter; the real
+negative test checks the peer-received error code. `cargo test --offline --lib
+transport::connection:: -- --quiet` passed 157/157; `core::connection::tests::`
+passed 77/77; `qf-transport-version` passed 7/7; `cargo clippy --offline
+--lib -- -D warnings` and `cargo fmt --all -- --check` passed. RFC 9368 Sections 3 and 8 permit
+missing information on v1 as a legacy compatibility case, including the
+synthetic v1-only server list after a client reacts to VN. No v2 connection
+inherits that exception. Wire interoperability remains unclaimed pending
+TODO-1095's standards framing and independent packet capture.
 
 ## Target contract
 
@@ -51,20 +73,20 @@ https://www.rfc-editor.org/rfc/rfc9369.html#section-4.
 
 ## Implementation and proof
 
-- [ ] Trace `enable_tls`, `poll_tls_and_validate_versions`,
+- [x] Trace `enable_tls`, `poll_tls_and_validate_versions`,
       `validate_peer_version_information`, `maybe_queue_handshake_done`,
       `qf_transport_version::find_version_information`, version-switch reset,
       and both role tests to an authenticated peer-parameter boundary.
-- [ ] Replace the role-only missing-parameter exemption with an explicit
+- [x] Replace the role-only missing-parameter exemption with an explicit
       negotiated-version rule. Keep error codes and reason strings stable
       where correct; define the exact v1-only compatibility exception.
-- [ ] Test v2 client and server with valid, missing, duplicated, malformed,
+- [x] Test v2 client and server with valid, missing, duplicated, malformed,
       wrong-chosen, downgrade-inconsistent and peer-unavailable parameters.
       Assert no server `HANDSHAKE_DONE` before successful validation.
-- [ ] Test v1/v2 negotiation and Retry with real in-memory TLS peers; inspect
-      a corrected captured first flight using an independent parser before
-      claiming wire interoperability. Update `docs/DOCUMENTATION.md`,
-      `docs/MAP.md` and the relevant version-negotiation task history.
+- [x] Test v1/v2 negotiation, v1 legacy compatibility and Retry with real
+      in-memory TLS peers; update `docs/DOCUMENTATION.md`, `docs/MAP.md` and
+      the version-negotiation task history. Independent first-flight wire
+      parsing remains in TODO-1095; no external interoperability is claimed.
 
 ## Acceptance
 

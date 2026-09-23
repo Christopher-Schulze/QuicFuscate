@@ -11,6 +11,102 @@ impl Connection {
         self.send_with_datagram_overhead(out, 0)
     }
 
+    /// Emit a transport close at a level the peer can decrypt before version validation.
+    fn send_pre_validation_close(
+        &mut self,
+        out: &mut [u8],
+    ) -> Result<(usize, SendInfo), crate::error::ConnectionError> {
+        use crate::error::ConnectionError;
+
+        let close_index = self
+            .pending_control
+            .iter()
+            .position(|frame| matches!(frame, Frame::ConnectionClose { .. }))
+            .ok_or(ConnectionError::Done)?;
+        // The server learns the client's parameters in its Initial. The client
+        // learns the server's parameters in EncryptedExtensions, after Handshake
+        // keys become available. Use the corresponding peer-readable space.
+        let packet_type = if !self.is_server && self.crypto.read().seal_handshake.is_some() {
+            PacketType::Handshake
+        } else {
+            PacketType::Initial
+        };
+        let space_idx = if packet_type == PacketType::Handshake { 1 } else { 0 };
+        let pn = self.next_send_packet_number(space_idx)?;
+        let header = packet::Header {
+            ty: packet_type,
+            version: self.config.version,
+            dcid: self.dcid.to_vec(),
+            scid: self.scid.to_vec(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token: if packet_type == PacketType::Initial {
+                self.config.initial_token.clone()
+            } else {
+                None
+            },
+            versions: None,
+            key_phase: false,
+        };
+        let pn_off = packet::format_header(&header, out)?;
+        let pn_len = if pn < (1 << 8) {
+            1
+        } else if pn < (1 << 16) {
+            2
+        } else if pn < (1 << 24) {
+            3
+        } else {
+            4
+        };
+        let header_len = pn_off + pn_len;
+        if out.len() < header_len {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        let mut truncated_pn = [0u8; 4];
+        packet::encode_pkt_num(pn, pn_len, &mut truncated_pn[..pn_len])?;
+        out[pn_off..header_len].copy_from_slice(&truncated_pn[..pn_len]);
+
+        let close = &self.pending_control[close_index];
+        let close_len = frames::wire_len(close)?;
+        let sample_end = pn_off + packet::MAX_PKT_NUM_LEN + packet::SAMPLE_LEN;
+        let total = (header_len + close_len + packet::AEAD_TAG_LEN)
+            .max(sample_end)
+            .max(if packet_type == PacketType::Initial { MIN_CLIENT_INITIAL_LEN } else { 0 });
+        if out.len() < total {
+            return Err(ConnectionError::BufferTooShort);
+        }
+        let frame_end = header_len + frames::to_bytes(close, &mut out[header_len..])?;
+        if frame_end < total - packet::AEAD_TAG_LEN {
+            frames::write_padding(total - packet::AEAD_TAG_LEN - frame_end, &mut out[frame_end..])?;
+        }
+        let used = {
+            let crypto = self.crypto.read();
+            packet::encrypt_and_protect(
+                &crypto,
+                &mut out[..total],
+                header_len,
+                pn,
+                pn_len,
+                packet_type,
+            )?
+        };
+        self.advance_send_packet_number(space_idx)?;
+        self.pending_control.remove(close_index);
+        self.stats.sent = self.stats.sent.saturating_add(1);
+        self.stats.sent_bytes = self.stats.sent_bytes.saturating_add(used as u64);
+        Ok((
+            used,
+            SendInfo {
+                at: self.clock.now(),
+                from: self.local_addr,
+                to: self.peer_addr,
+                congestion_controlled: false,
+                path_control: false,
+                bulk_only: false,
+            },
+        ))
+    }
+
     /// Generates an outgoing packet while reserving bytes for an outer datagram
     /// envelope. Non-zero overhead is valid only after the QUIC handshake.
     #[inline(always)]
@@ -23,6 +119,25 @@ impl Connection {
         use udpfast::unlikely;
         if unlikely(out.len() < MIN_CLIENT_INITIAL_LEN) {
             return Err(ConnectionError::BufferTooShort);
+        }
+        if self.is_closed {
+            if self.tls_provider.is_some()
+                && !self.version_negotiation.peer_information_validated
+                && self
+                    .pending_control
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::ConnectionClose { .. }))
+            {
+                if datagram_overhead != 0 {
+                    return Err(ConnectionError::InvalidState);
+                }
+                return self.send_pre_validation_close(out);
+            }
+            if !self.pending_control.iter().any(|frame| {
+                matches!(frame, Frame::ConnectionClose { .. } | Frame::ApplicationClose { .. })
+            }) {
+                return Err(ConnectionError::Done);
+            }
         }
         if unlikely(datagram_overhead != 0 && !self.post_handshake_datagram_ready()?) {
             return Err(ConnectionError::InvalidState);
@@ -110,8 +225,7 @@ impl Connection {
         // handshake completion and key installation are not dependent on receiving more CRYPTO.
         self.poll_tls_and_validate_versions()?;
 
-        let handshake_incomplete =
-            self.tls_provider.as_ref().map(|p| !p.handshake_complete()).unwrap_or(false);
+        let handshake_incomplete = self.tls_provider.is_some() && !self.tls_handshake_complete();
 
         // Always flush any pending Initial/Handshake CRYPTO before falling through to the
         // 1-RTT path, even if rustls has just reported the handshake complete. The client's
