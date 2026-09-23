@@ -1894,6 +1894,108 @@ fn tls_crypto_failure_queues_connection_close() {
     )));
 }
 
+#[test]
+fn inbound_crypto_capacity_failure_queues_rfc_close_at_every_level() {
+    for provider_enabled in [false, true] {
+        for level in [
+            qf_transport_types::QuicEncryptionLevel::Initial,
+            qf_transport_types::QuicEncryptionLevel::Handshake,
+            qf_transport_types::QuicEncryptionLevel::Application,
+        ] {
+            let mut connection = make_conn();
+            if provider_enabled {
+                connection.enable_tls("crypto-capacity-test").expect("enable real TLS provider");
+            }
+            let result =
+                connection.process_crypto_frame(level, 65_536, std::borrow::Cow::Owned(vec![0xA5]));
+            assert_eq!(result, Err(ConnectionError::CryptoBufferExceeded));
+            assert!(connection.is_closed(), "capacity rejection must close at {level:?}");
+            assert_eq!(connection.local_error(), Some(&ConnectionError::CryptoBufferExceeded));
+            assert!(matches!(
+                connection.pending_control.front(),
+                Some(Frame::ConnectionClose { error_code: 0x0d, .. })
+            ));
+            assert_eq!(connection.pending_control.len(), 1);
+            assert_eq!(
+                connection.process_crypto_frame(
+                    level,
+                    u64::MAX,
+                    std::borrow::Cow::Owned(vec![0x5A]),
+                ),
+                Err(ConnectionError::InvalidPacket)
+            );
+            assert_eq!(connection.local_error(), Some(&ConnectionError::CryptoBufferExceeded));
+            assert_eq!(connection.pending_control.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn conflicting_inbound_crypto_bytes_queue_protocol_close() {
+    for provider_enabled in [false, true] {
+        let mut connection = make_conn();
+        if provider_enabled {
+            connection.enable_tls("crypto-overlap-test").expect("enable real TLS provider");
+        }
+        connection
+            .process_crypto_frame(
+                qf_transport_types::QuicEncryptionLevel::Initial,
+                1,
+                std::borrow::Cow::Owned(b"bc".to_vec()),
+            )
+            .expect("hold reordered CRYPTO bytes");
+        let result = connection.process_crypto_frame(
+            qf_transport_types::QuicEncryptionLevel::Initial,
+            2,
+            std::borrow::Cow::Owned(b"XY".to_vec()),
+        );
+        assert_eq!(result, Err(ConnectionError::InvalidFrame));
+        assert!(connection.is_closed());
+        assert_eq!(connection.local_error(), Some(&ConnectionError::InvalidFrame));
+        assert!(matches!(
+            connection.pending_control.front(),
+            Some(Frame::ConnectionClose { error_code: 0x0a, .. })
+        ));
+        assert_eq!(connection.pending_control.len(), 1);
+    }
+}
+
+#[test]
+fn invalid_inbound_crypto_range_queues_frame_encoding_close() {
+    let mut connection = make_conn();
+    let result = connection.process_crypto_frame(
+        qf_transport_types::QuicEncryptionLevel::Initial,
+        u64::MAX,
+        std::borrow::Cow::Owned(vec![0xA5]),
+    );
+    assert_eq!(result, Err(ConnectionError::InvalidPacket));
+    assert!(connection.is_closed());
+    assert_eq!(connection.local_error(), Some(&ConnectionError::InvalidPacket));
+    assert!(matches!(
+        connection.pending_control.front(),
+        Some(Frame::ConnectionClose { error_code: 0x07, .. })
+    ));
+}
+
+#[test]
+fn crypto_capacity_close_is_protected_and_peer_opened() {
+    let mut pair = bench_paired_1rtt_connections();
+    let result = pair.client.process_crypto_frame(
+        qf_transport_types::QuicEncryptionLevel::Application,
+        65_536,
+        std::borrow::Cow::Owned(vec![0xA5]),
+    );
+    assert_eq!(result, Err(ConnectionError::CryptoBufferExceeded));
+
+    let mut packet = [0u8; 1500];
+    let (length, _) = pair.client.send(&mut packet).expect("seal CRYPTO_BUFFER_EXCEEDED close");
+    pair.server.recv(&mut packet[..length], &pair.recv_info).expect("peer opens protected close");
+    assert!(matches!(
+        pair.server.remote_error(),
+        Some(ConnectionError::PeerConnectionClosed { error_code: 0x0d, .. })
+    ));
+}
+
 // ---- Priority 4: In-Flight / Congestion Control ----------------------
 
 #[test]

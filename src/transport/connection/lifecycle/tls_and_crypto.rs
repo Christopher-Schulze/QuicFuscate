@@ -102,6 +102,21 @@ fn peer_max_udp_payload_size(
 }
 
 impl Connection {
+    fn reject_received_crypto(
+        &mut self,
+        error: crate::error::ConnectionError,
+    ) -> Result<(), crate::error::ConnectionError> {
+        let error_code = match &error {
+            crate::error::ConnectionError::CryptoBufferExceeded => 0x0d,
+            crate::error::ConnectionError::InvalidFrame => 0x0a,
+            crate::error::ConnectionError::InvalidPacket => 0x07,
+            _ => 0x01,
+        };
+        self.record_local_error(error.clone());
+        self.close(false, error_code, error.to_string().as_bytes())?;
+        Err(error)
+    }
+
     /// Process incoming CRYPTO frame
     pub(crate) fn process_crypto_frame(
         &mut self,
@@ -113,7 +128,7 @@ impl Connection {
             // CRYPTO frames can arrive out-of-order. Buffer and drain contiguous handshake bytes
             // before feeding into the TLS provider.
             let mut chunks: Vec<Vec<u8>> = Vec::new();
-            {
+            let receive_result = {
                 let mut crypto = self.crypto.write();
                 let stream = match level {
                     qf_transport_types::QuicEncryptionLevel::Initial => &mut crypto.crypto_initial,
@@ -122,15 +137,21 @@ impl Connection {
                     }
                     _ => &mut crypto.crypto_application,
                 };
-                stream.recv(offset, data.into_owned())?;
-                let mut tmp = [0u8; 2048];
-                while stream.has_data() {
-                    let n = stream.read(&mut tmp);
-                    if n == 0 {
-                        break;
+                let result = stream.recv(offset, data.into_owned());
+                if result.is_ok() {
+                    let mut tmp = [0u8; 2048];
+                    while stream.has_data() {
+                        let n = stream.read(&mut tmp);
+                        if n == 0 {
+                            break;
+                        }
+                        chunks.push(tmp[..n].to_vec());
                     }
-                    chunks.push(tmp[..n].to_vec());
                 }
+                result
+            };
+            if let Err(error) = receive_result {
+                return self.reject_received_crypto(error);
             }
 
             if let Some(provider) = &mut self.tls_provider {
@@ -148,13 +169,20 @@ impl Connection {
             }
         } else {
             // Store in crypto stream for later processing
-            let mut crypto = self.crypto.write();
-            let stream = match level {
-                qf_transport_types::QuicEncryptionLevel::Initial => &mut crypto.crypto_initial,
-                qf_transport_types::QuicEncryptionLevel::Handshake => &mut crypto.crypto_handshake,
-                _ => &mut crypto.crypto_application,
+            let receive_result = {
+                let mut crypto = self.crypto.write();
+                let stream = match level {
+                    qf_transport_types::QuicEncryptionLevel::Initial => &mut crypto.crypto_initial,
+                    qf_transport_types::QuicEncryptionLevel::Handshake => {
+                        &mut crypto.crypto_handshake
+                    }
+                    _ => &mut crypto.crypto_application,
+                };
+                stream.recv(offset, data.into_owned())
             };
-            stream.recv(offset, data.into_owned())?;
+            if let Err(error) = receive_result {
+                return self.reject_received_crypto(error);
+            }
         }
 
         Ok(())

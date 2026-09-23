@@ -814,7 +814,7 @@
 - Detail: `docs/todo/done/todo-1128-crypto-retransmit-index.md`
 
 ### TODO-1129 - Commit receive packet numbers only after stateful frame admission
-- OPEN. The receive path marks a packet number before stateful CRYPTO and other fallible frame handlers run. A rejected packet can retain duplicate-detection or earlier-frame effects. Inventory all post-preflight failures and establish one bounded packet-level admission/commit boundary; TODO-1127 fixes the CRYPTO buffer contract separately.
+- OPEN. The receive path marks a packet number before stateful CRYPTO and other fallible frame handlers run. RFC 9000 forbids ACK eligibility before every frame is processed and allows discarding invalid Initial only before effects or after rollback; fatal errors instead require a correctly coded close. The task now separates discardable, terminal and recoverable outcomes rather than demanding whole-TLS rollback. TODO-1132/1133 own immediate CRYPTO close and Reality-fallback routing.
 - Detail: `docs/todo/todo-1129-transactional-receive-admission.md`
 
 ### TODO-1130 - Bound high-offset CRYPTO ACK scans and full-ACK cloning
@@ -824,6 +824,14 @@
 ### TODO-1131 - Diagnose build artifact removal during active Cargo compilation
 - OPEN. During the TODO-1130 feature-suite compile, `target/` disappeared and free disk rose from 4.7 to 13 GiB; rustc then failed to copy a missing incremental object. The responsible process is unknown. Identify the cleanup owner and prevent it from deleting an active Cargo target while keeping the 2 GiB free-space policy; prove a clean rebuild and bounded cleanup coexist.
 - Detail: `docs/todo/todo-1131-cargo-target-cleanup-race.md`
+
+### TODO-1132 - Close on inbound CRYPTO capacity and overlap failures
+- DONE. Inbound CRYPTO capacity, conflicting overlap and invalid-range errors now close once with QUIC codes `0x0d`, `0x0a` and `0x07` in both real-TLS and local receive paths. The red-before-fix regressions pass; a paired peer decrypts the protected `0x0d` close. Default root `1,869 passed, 1 ignored`, feature root `1,874 passed, 1 ignored`, strict library Clippy and formatting pass. Initial discard/ACK semantics and Core Reality-fallback routing remain TODO-1129/1133.
+- Detail: `docs/todo/done/todo-1132-inbound-crypto-error-close.md`
+
+### TODO-1133 - Keep authenticated QUIC failures out of Reality probe fallback
+- OPEN. Core currently forwards every non-TLS transport receive error to the Reality fallback, including errors from authenticated packets after a local QUIC close. Classify authentication and terminal state at one transport/Core boundary, preserve the protected close path, and keep unauthenticated probe cover behavior.
+- Detail: `docs/todo/todo-1133-authenticated-error-probe-routing.md`
 
 ## Completed
 
