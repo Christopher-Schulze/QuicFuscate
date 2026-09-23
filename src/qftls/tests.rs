@@ -456,6 +456,11 @@ fn rustls_startup_validation_builds_every_persona_hello() {
 fn provider_with_early_data(is_server: bool, early_data: bool) -> RustlsProvider {
     let environment = crate::env_utils::EnvSnapshot::capture();
     let clock = crate::time_source::ProtocolClock::default();
+    let connection_ids = if is_server {
+        qf_stealth::transport_params::HandshakeConnectionIds::server(&[], &[], None)
+    } else {
+        qf_stealth::transport_params::HandshakeConnectionIds::client(&[])
+    };
     RustlsProvider::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
         false,
@@ -465,7 +470,7 @@ fn provider_with_early_data(is_server: bool, early_data: bool) -> RustlsProvider
         &environment,
         &clock,
         rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
-        &[],
+        &connection_ids,
         None,
         early_data,
     )
@@ -1148,7 +1153,7 @@ mod ech_tests {
             &environment,
             &clock,
             1350,
-            &scid,
+            &qf_stealth::transport_params::HandshakeConnectionIds::client(&scid),
             ech_config_list,
             false,
         )

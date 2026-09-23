@@ -325,7 +325,7 @@ pub struct RustlsProviderImpl {
     /// QUIC transport parameters to send to the peer.
     pub transport_params: Vec<u8>,
     /// Real local source connection ID copied into initial_source_connection_id.
-    pub local_scid: Vec<u8>,
+    pub connection_ids: qf_stealth::transport_params::HandshakeConnectionIds,
     /// Fully encoded version_information parameter appended to the fixture block.
     pub version_information: Vec<u8>,
     /// Path MTU/UDP-payload budget cap for max_udp_payload_size.
@@ -474,6 +474,11 @@ impl RustlsProviderImpl {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, ConnectionError> {
+        let connection_ids = if is_server {
+            qf_stealth::transport_params::HandshakeConnectionIds::server(&[], &[], None)
+        } else {
+            qf_stealth::transport_params::HandshakeConnectionIds::client(&[])
+        };
         Self::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
             verify_peer,
@@ -483,7 +488,7 @@ impl RustlsProviderImpl {
             environment,
             clock,
             DEFAULT_MAX_UDP_PAYLOAD_SIZE,
-            &[],
+            &connection_ids,
             None,
             false,
         )
@@ -499,10 +504,30 @@ impl RustlsProviderImpl {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
-        local_scid: &[u8],
+        connection_ids: &qf_stealth::transport_params::HandshakeConnectionIds,
         ech_config_list: Option<&[u8]>,
         early_data: bool,
     ) -> Result<Self, ConnectionError> {
+        let cid_lengths_valid = match connection_ids {
+            qf_stealth::transport_params::HandshakeConnectionIds::Client { initial_source } => {
+                !is_server && initial_source.len() <= crate::transport::MAX_CONN_ID_LEN
+            }
+            qf_stealth::transport_params::HandshakeConnectionIds::Server {
+                initial_source,
+                original_destination,
+                retry_source,
+            } => {
+                is_server
+                    && initial_source.len() <= crate::transport::MAX_CONN_ID_LEN
+                    && original_destination.len() <= crate::transport::MAX_CONN_ID_LEN
+                    && retry_source
+                        .as_ref()
+                        .is_none_or(|cid| cid.len() <= crate::transport::MAX_CONN_ID_LEN)
+            }
+        };
+        if !cid_lengths_valid {
+            return Err(ConnectionError::InvalidState);
+        }
         let quic_version = Self::map_quic_version(version)?;
         // The fixture block is built for the baseline (Chromium) engine at
         // construction; a persona-aware rebuild happens in
@@ -510,7 +535,7 @@ impl RustlsProviderImpl {
         let transport_params = Self::fixture_transport_params(
             qf_stealth::transport_params::EngineFamily::Chromium,
             max_udp_payload_size,
-            local_scid,
+            connection_ids,
             version_information_parameter,
         )?;
         let client_ca_path = client_ca_path.map(str::to_owned);
@@ -550,7 +575,7 @@ impl RustlsProviderImpl {
             zero_rtt_requested: early_data,
             zero_rtt_keys_installed: false,
             transport_params,
-            local_scid: local_scid.to_vec(),
+            connection_ids: connection_ids.clone(),
             version_information: version_information_parameter.to_vec(),
             max_udp_payload_size,
             quic_version,
@@ -1053,7 +1078,7 @@ impl RustlsProviderImpl {
     fn fixture_transport_params(
         family: qf_stealth::transport_params::EngineFamily,
         max_udp_payload_size: usize,
-        local_scid: &[u8],
+        connection_ids: &qf_stealth::transport_params::HandshakeConnectionIds,
         version_information_parameter: &[u8],
     ) -> Result<Vec<u8>, ConnectionError> {
         if !(1200..=65_527).contains(&max_udp_payload_size) {
@@ -1062,7 +1087,7 @@ impl RustlsProviderImpl {
         Ok(qf_stealth::transport_params::encode_transport_params(
             family,
             max_udp_payload_size as u64,
-            local_scid,
+            connection_ids,
             version_information_parameter,
             &mut rand::rng(),
         ))
@@ -1078,7 +1103,7 @@ impl RustlsProviderImpl {
         self.transport_params = Self::fixture_transport_params(
             qf_stealth::transport_params::EngineFamily::from_browser(profile.browser),
             self.max_udp_payload_size,
-            &self.local_scid,
+            &self.connection_ids,
             &self.version_information,
         )?;
         Ok(())
@@ -1633,7 +1658,7 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
     max_udp_payload_size: usize,
-    local_scid: &[u8],
+    connection_ids: &qf_stealth::transport_params::HandshakeConnectionIds,
     ech_config_list: Option<&[u8]>,
     early_data: bool,
 ) -> Result<RustlsProviderImpl, ConnectionError> {
@@ -1646,7 +1671,7 @@ pub(super) fn make_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         environment,
         clock,
         max_udp_payload_size,
-        local_scid,
+        connection_ids,
         ech_config_list,
         early_data,
     )

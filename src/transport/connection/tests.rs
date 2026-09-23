@@ -56,6 +56,122 @@ fn max_udp_payload_transport_parameter(value: u64) -> Vec<u8> {
     encode_transport_parameter(0x03, &encoded_value[..value_len])
 }
 
+fn cid_transport_parameters(
+    initial: &[u8],
+    original: Option<&[u8]>,
+    retry: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut encoded = encode_transport_parameter(0x0f, initial);
+    if let Some(original) = original {
+        encoded.extend(encode_transport_parameter(0x00, original));
+    }
+    if let Some(retry) = retry {
+        encoded.extend(encode_transport_parameter(0x10, retry));
+    }
+    encoded
+}
+
+#[test]
+fn authenticated_cid_parameters_match_presence_values_and_retry_history() {
+    let mut client = make_conn();
+    client.set_original_dcid(ConnectionId::from_ref(b"original-cid"));
+    client.peer_initial_scid = Some(ConnectionId::from_ref(b"server-scid"));
+    let valid = cid_transport_parameters(b"server-scid", Some(b"original-cid"), None);
+    assert_eq!(client.validate_peer_connection_ids(&valid), Ok(()));
+    assert!(client.peer_cids_validated);
+    assert!(!client.is_closed);
+
+    let mut retried = make_conn();
+    retried.set_original_dcid(ConnectionId::from_ref(b"original-cid"));
+    retried.set_retry_source_cid(ConnectionId::from_ref(b"retry-scid"));
+    retried.peer_initial_scid = Some(ConnectionId::from_ref(b"server-scid"));
+    let valid_retry =
+        cid_transport_parameters(b"server-scid", Some(b"original-cid"), Some(b"retry-scid"));
+    assert_eq!(retried.validate_peer_connection_ids(&valid_retry), Ok(()));
+    assert!(retried.peer_cids_validated);
+
+    let mut zero_length = make_conn();
+    zero_length.peer_initial_scid = Some(ConnectionId::default());
+    zero_length.set_original_dcid(ConnectionId::default());
+    assert_eq!(
+        zero_length.validate_peer_connection_ids(&cid_transport_parameters(b"", Some(b""), None)),
+        Ok(())
+    );
+    assert!(zero_length.peer_cids_validated);
+}
+
+#[test]
+fn invalid_authenticated_cid_parameters_queue_one_transport_parameter_close() {
+    let valid = cid_transport_parameters(b"server-scid", Some(b"original-cid"), None);
+    let mut duplicate = valid.clone();
+    duplicate.extend(encode_transport_parameter(0x0f, b"server-scid"));
+    let too_long = cid_transport_parameters(&[7; 21], Some(b"original-cid"), None);
+    let cases = [
+        ("missing initial", encode_transport_parameter(0x00, b"original-cid")),
+        ("missing original", cid_transport_parameters(b"server-scid", None, None)),
+        ("wrong initial", cid_transport_parameters(b"other-scid", Some(b"original-cid"), None)),
+        ("wrong original", cid_transport_parameters(b"server-scid", Some(b"other-cid"), None)),
+        (
+            "unsolicited retry",
+            cid_transport_parameters(b"server-scid", Some(b"original-cid"), Some(b"retry-scid")),
+        ),
+        ("duplicate", duplicate),
+        ("truncated", vec![0x0f, 0x0a, 0x01]),
+        ("oversized", too_long),
+    ];
+    for (name, parameters) in cases {
+        let mut client = make_conn();
+        client.set_original_dcid(ConnectionId::from_ref(b"original-cid"));
+        client.peer_initial_scid = Some(ConnectionId::from_ref(b"server-scid"));
+        assert!(client.validate_peer_connection_ids(&parameters).is_err(), "{name}");
+        assert!(!client.peer_cids_validated, "{name}");
+        assert_eq!(
+            client
+                .pending_control
+                .iter()
+                .filter(|frame| matches!(
+                    frame,
+                    Frame::ConnectionClose { error_code, .. }
+                        if *error_code == super::super::version::TRANSPORT_PARAMETER_ERROR_CODE
+                ))
+                .count(),
+            1,
+            "{name}"
+        );
+    }
+
+    for (name, parameters) in [
+        ("missing retry", cid_transport_parameters(b"server-scid", Some(b"original-cid"), None)),
+        (
+            "wrong retry",
+            cid_transport_parameters(b"server-scid", Some(b"original-cid"), Some(b"wrong-scid")),
+        ),
+    ] {
+        let mut client = make_conn();
+        client.set_original_dcid(ConnectionId::from_ref(b"original-cid"));
+        client.set_retry_source_cid(ConnectionId::from_ref(b"retry-scid"));
+        client.peer_initial_scid = Some(ConnectionId::from_ref(b"server-scid"));
+        assert!(client.validate_peer_connection_ids(&parameters).is_err(), "{name}");
+        assert!(client.is_closed, "{name}");
+    }
+
+    for forbidden in [0x00, 0x02, 0x0d, 0x10] {
+        let mut server = Connection::new_with_role(
+            b"server-scid",
+            local(),
+            peer(),
+            Config::new_with_version(PROTOCOL_VERSION).unwrap(),
+            true,
+        )
+        .unwrap();
+        server.peer_initial_scid = Some(ConnectionId::from_ref(b"client-scid"));
+        let mut parameters = cid_transport_parameters(b"client-scid", None, None);
+        parameters.extend(encode_transport_parameter(forbidden, b"forbidden"));
+        assert!(server.validate_peer_connection_ids(&parameters).is_err());
+        assert!(server.is_closed);
+    }
+}
+
 fn enable_test_traffic_analysis(
     connection: &mut Connection,
     mode: crate::transport::config::TrafficAnalysisDefense,
@@ -713,6 +829,7 @@ fn v1_fallback_accepts_legacy_server_without_version_information() {
 fn complete_live_version_handshake(
     mut client: Connection,
     server_scid: &[u8],
+    initial_key_dcid: &[u8],
     legacy_v1_server: bool,
 ) {
     let version = client.config.version;
@@ -722,13 +839,17 @@ fn complete_live_version_handshake(
     server_config.verify_peer = false;
     let mut server = packet::accept(
         server_scid,
-        Some(server_scid),
+        Some(initial_key_dcid),
         server_addr,
         client_addr,
         &mut server_config,
     )
     .unwrap();
     server.set_destination_cid(client.scid);
+    server.set_original_dcid(client.original_dcid);
+    if let Some(retry_source_cid) = client.retry_source_cid {
+        server.set_retry_source_cid(retry_source_cid);
+    }
 
     let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
         "QUICFUSCATE_TLS_COVER",
@@ -754,7 +875,11 @@ fn complete_live_version_handshake(
                 &server.environment,
                 &server.clock,
                 server.config.max_udp_payload_size as usize,
-                server.scid.as_ref(),
+                &qf_stealth::transport_params::HandshakeConnectionIds::server(
+                    server.scid.as_ref(),
+                    server.original_dcid.as_ref(),
+                    server.retry_source_cid.as_ref().map(AsRef::as_ref),
+                ),
                 server.config.ech_config_list.as_deref(),
                 false,
             )
@@ -768,6 +893,29 @@ fn complete_live_version_handshake(
         client.configure_tls(&profile, "localhost").unwrap();
     }
     server.configure_tls(&profile, "localhost").unwrap();
+
+    let client_parameters = qf_stealth::transport_params::decode_transport_params(
+        &client.tls_provider.as_ref().unwrap().get_quic_transport_params(),
+    );
+    let server_parameters = qf_stealth::transport_params::decode_transport_params(
+        &server.tls_provider.as_ref().unwrap().get_quic_transport_params(),
+    );
+    let values = |parameters: &[(u64, Vec<u8>)], id: u64| -> Vec<Vec<u8>> {
+        parameters
+            .iter()
+            .filter(|(parameter_id, _)| *parameter_id == id)
+            .map(|(_, value)| value.clone())
+            .collect()
+    };
+    assert_eq!(values(&client_parameters, 0x0f), vec![client.scid.to_vec()]);
+    assert!(values(&client_parameters, 0x00).is_empty());
+    assert!(values(&client_parameters, 0x10).is_empty());
+    assert_eq!(values(&server_parameters, 0x0f), vec![server.scid.to_vec()]);
+    assert_eq!(values(&server_parameters, 0x00), vec![client.original_dcid.to_vec()]);
+    assert_eq!(
+        values(&server_parameters, 0x10),
+        client.retry_source_cid.map(|cid| vec![cid.to_vec()]).unwrap_or_default(),
+    );
 
     let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
     let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
@@ -791,6 +939,9 @@ fn complete_live_version_handshake(
             Err(error) => panic!("v{version:x} server flight failed: {error:?}"),
         }
         if client.tls_handshake_complete() && server.tls_handshake_complete() {
+            assert!(client.peer_cids_validated);
+            assert!(server.peer_cids_validated);
+            assert_eq!(client.dcid, ConnectionId::from_ref(server_scid));
             assert!(client.version_negotiation.peer_information_validated);
             assert!(server.version_negotiation.peer_information_validated);
             assert!(server.handshake_done_queued);
@@ -815,7 +966,7 @@ fn live_v1_and_v2_tls_peers_validate_version_information_before_completion() {
         .unwrap();
         let server_scid = b"version-server-scid";
         client.set_initial_dcid(ConnectionId::from_ref(server_scid));
-        complete_live_version_handshake(client, server_scid, false);
+        complete_live_version_handshake(client, server_scid, server_scid, false);
     }
 }
 
@@ -852,7 +1003,7 @@ fn live_v2_to_v1_version_negotiation_validates_authenticated_server_versions() {
         assert_eq!(client.config.version, PROTOCOL_VERSION);
         assert!(!client.version_negotiation.peer_information_validated);
         let server_scid = client.initial_dcid.to_vec();
-        complete_live_version_handshake(client, &server_scid, legacy_v1_server);
+        complete_live_version_handshake(client, &server_scid, &server_scid, legacy_v1_server);
     }
 }
 
@@ -926,7 +1077,7 @@ fn live_v1_and_v2_retry_recover_after_a_lost_post_retry_initial() {
             .tracks_sent_packet(recovery::PacketSpace::Initial, next_initial_pn));
         let deadline = client.recovery_deadline().expect("lost post-Retry Initial arms recovery");
         client.on_recovery_timeout(deadline);
-        complete_live_version_handshake(client, retry_scid, false);
+        complete_live_version_handshake(client, b"server-initial-scid", retry_scid, false);
     }
 }
 
@@ -958,7 +1109,7 @@ fn live_server_initial_prevents_later_retry_on_both_versions() {
             "0",
         )]));
         client.set_environment_snapshot(std::sync::Arc::clone(&environment));
-        server.set_environment_snapshot(environment);
+        server.set_environment_snapshot(std::sync::Arc::clone(&environment));
         client.enable_tls("retry-after-initial").unwrap();
         server.enable_tls("retry-after-initial").unwrap();
         let mut profile = crate::qftls::TlsProfile::chrome_130();
@@ -970,10 +1121,37 @@ fn live_server_initial_prevents_later_retry_on_both_versions() {
         let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
         let mut packet = [0u8; 4096];
         let (client_len, _) = client.send(&mut packet).unwrap();
+        let mut client_initial = packet[..client_len].to_vec();
         server.recv(&mut packet[..client_len], &client_to_server).unwrap();
         let (server_len, _) = server.send(&mut packet).unwrap();
         client.recv(&mut packet[..server_len], &server_to_client).unwrap();
         assert!(client.received_non_vn_packet);
+        assert_eq!(client.peer_initial_scid, Some(ConnectionId::from_ref(server_scid)));
+
+        let mut second_config = Config::new_with_version(version).unwrap();
+        second_config.verify_peer = false;
+        let mut second_server = packet::accept(
+            b"other-server-scid",
+            Some(server_scid),
+            server_addr,
+            client_addr,
+            &mut second_config,
+        )
+        .unwrap();
+        second_server.set_destination_cid(client.scid);
+        second_server.set_environment_snapshot(environment);
+        second_server.enable_tls("different-initial-scid").unwrap();
+        second_server.configure_tls(&profile, "localhost").unwrap();
+        second_server.recv(&mut client_initial, &client_to_server).unwrap();
+        let (second_len, _) = second_server.send(&mut packet).unwrap();
+        let recv_before = client.stats.recv;
+        assert_eq!(
+            client.recv(&mut packet[..second_len], &server_to_client),
+            Ok(second_len - packet::AEAD_TAG_LEN)
+        );
+        assert_eq!(client.peer_initial_scid, Some(ConnectionId::from_ref(server_scid)));
+        assert_eq!(client.dcid, ConnectionId::from_ref(server_scid));
+        assert_eq!(client.stats.recv, recv_before);
         let retry = retry_packet_for_test(
             version,
             client.scid.as_ref(),
@@ -1028,7 +1206,17 @@ fn live_v2_tls_rejects_missing_version_information_from_either_peer() {
                 &sender.environment,
                 &sender.clock,
                 sender.config.max_udp_payload_size as usize,
-                sender.scid.as_ref(),
+                &if sender.is_server {
+                    qf_stealth::transport_params::HandshakeConnectionIds::server(
+                        sender.scid.as_ref(),
+                        sender.original_dcid.as_ref(),
+                        sender.retry_source_cid.as_ref().map(AsRef::as_ref),
+                    )
+                } else {
+                    qf_stealth::transport_params::HandshakeConnectionIds::client(
+                        sender.scid.as_ref(),
+                    )
+                },
                 sender.config.ech_config_list.as_deref(),
                 false,
             )
@@ -1095,6 +1283,124 @@ fn live_v2_tls_rejects_missing_version_information_from_either_peer() {
             Some(ConnectionError::PeerConnectionClosed { error_code, .. })
                 if *error_code == super::super::version::VERSION_NEGOTIATION_ERROR_CODE
         ));
+    }
+}
+
+#[test]
+fn live_v1_and_v2_tls_reject_wrong_cid_parameters_with_peer_received_close() {
+    for version in [PROTOCOL_VERSION, crate::transport::PROTOCOL_VERSION_V2] {
+        for wrong_client_scid in [true, false] {
+            let client_addr = "127.0.0.1:29101".parse().unwrap();
+            let server_addr = "127.0.0.1:29102".parse().unwrap();
+            let mut client_config = Config::new_with_version(version).unwrap();
+            client_config.verify_peer = false;
+            let mut server_config = Config::new_with_version(version).unwrap();
+            server_config.verify_peer = false;
+            let mut client =
+                Connection::new_client(b"client-scid", client_addr, server_addr, client_config)
+                    .unwrap();
+            client.set_initial_dcid(ConnectionId::from_ref(b"original-dcid"));
+            let mut server = packet::accept(
+                b"server-scid",
+                Some(b"original-dcid"),
+                server_addr,
+                client_addr,
+                &mut server_config,
+            )
+            .unwrap();
+            server.set_destination_cid(client.scid);
+            let environment = std::sync::Arc::new(crate::env_utils::EnvSnapshot::from_pairs([(
+                "QUICFUSCATE_TLS_COVER",
+                "0",
+            )]));
+            client.set_environment_snapshot(std::sync::Arc::clone(&environment));
+            server.set_environment_snapshot(environment);
+            client.enable_tls("cid-parameter-negative").unwrap();
+            server.enable_tls("cid-parameter-negative").unwrap();
+            let sender = if wrong_client_scid { &mut client } else { &mut server };
+            let wrong_ids = if wrong_client_scid {
+                qf_stealth::transport_params::HandshakeConnectionIds::client(b"wrong-scid")
+            } else {
+                qf_stealth::transport_params::HandshakeConnectionIds::server(
+                    sender.scid.as_ref(),
+                    b"wrong-original",
+                    None,
+                )
+            };
+            sender.tls_provider = Some(
+                crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+                    sender.is_server,
+                    false,
+                    version,
+                    &super::super::version::VersionInformation {
+                        chosen: version,
+                        available: vec![version],
+                    }
+                    .encode_parameter()
+                    .unwrap(),
+                    None,
+                    &sender.environment,
+                    &sender.clock,
+                    sender.config.max_udp_payload_size as usize,
+                    &wrong_ids,
+                    None,
+                    false,
+                )
+                .unwrap(),
+            );
+            let mut profile = crate::qftls::TlsProfile::chrome_130();
+            profile.timing_jitter = None;
+            profile.sni = Some("localhost".to_string());
+            client.configure_tls(&profile, "localhost").unwrap();
+            server.configure_tls(&profile, "localhost").unwrap();
+
+            let client_to_server = RecvInfo { from: client_addr, to: server_addr, ecn: None };
+            let server_to_client = RecvInfo { from: server_addr, to: client_addr, ecn: None };
+            let mut packet = [0u8; 4096];
+            let mut rejected = false;
+            for _ in 0..64 {
+                match client.send(&mut packet) {
+                    Ok((len, _)) => match server.recv(&mut packet[..len], &client_to_server) {
+                        Ok(_) => {}
+                        Err(_) if wrong_client_scid => {
+                            rejected = true;
+                            break;
+                        }
+                        Err(error) => panic!("valid client rejected: {error:?}"),
+                    },
+                    Err(ConnectionError::Done) => {}
+                    Err(error) => panic!("client flight failed: {error:?}"),
+                }
+                match server.send(&mut packet) {
+                    Ok((len, _)) => match client.recv(&mut packet[..len], &server_to_client) {
+                        Ok(_) => {}
+                        Err(_) if !wrong_client_scid => {
+                            rejected = true;
+                            break;
+                        }
+                        Err(error) => panic!("valid server rejected: {error:?}"),
+                    },
+                    Err(ConnectionError::Done) => {}
+                    Err(error) => panic!("server flight failed: {error:?}"),
+                }
+            }
+            assert!(rejected, "wrong CID parameter was accepted");
+            let (receiver, sender, info) = if wrong_client_scid {
+                (&mut server, &mut client, server_to_client)
+            } else {
+                (&mut client, &mut server, client_to_server)
+            };
+            assert!(receiver.is_closed);
+            assert!(!receiver.tls_handshake_complete());
+            assert!(!receiver.peer_cids_validated);
+            let (close_len, _) = receiver.send(&mut packet).expect("serialize CID error close");
+            sender.recv(&mut packet[..close_len], &info).expect("peer decrypts CID error close");
+            assert!(matches!(
+                sender.remote_error(),
+                Some(ConnectionError::PeerConnectionClosed { error_code, .. })
+                    if *error_code == super::super::version::TRANSPORT_PARAMETER_ERROR_CODE
+            ));
+        }
     }
 }
 

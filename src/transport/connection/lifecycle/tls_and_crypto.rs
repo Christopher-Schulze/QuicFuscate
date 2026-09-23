@@ -3,6 +3,63 @@ use super::*;
 const MAX_UDP_PAYLOAD_SIZE_PARAMETER_ID: u64 = 0x03;
 const MIN_QUIC_UDP_PAYLOAD_SIZE: usize = 1200;
 const MAX_QUIC_UDP_PAYLOAD_SIZE: usize = 65_527;
+const ORIGINAL_DESTINATION_CONNECTION_ID_PARAMETER_ID: u64 = 0x00;
+const INITIAL_SOURCE_CONNECTION_ID_PARAMETER_ID: u64 = 0x0f;
+const RETRY_SOURCE_CONNECTION_ID_PARAMETER_ID: u64 = 0x10;
+
+struct PeerConnectionIds<'a> {
+    original_destination: Option<&'a [u8]>,
+    initial_source: Option<&'a [u8]>,
+    retry_source: Option<&'a [u8]>,
+    other_server_only: bool,
+}
+
+fn parse_peer_connection_ids(
+    parameters: &[u8],
+) -> Result<PeerConnectionIds<'_>, crate::error::ConnectionError> {
+    let mut ids = PeerConnectionIds {
+        original_destination: None,
+        initial_source: None,
+        retry_source: None,
+        other_server_only: false,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut offset = 0usize;
+    while offset < parameters.len() {
+        let (parameter_id, id_len) = qf_transport_pn::varint::read_varint(&parameters[offset..])
+            .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        offset += id_len;
+        let (value_len, length_len) = qf_transport_pn::varint::read_varint(&parameters[offset..])
+            .map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        offset += length_len;
+        let value_len =
+            usize::try_from(value_len).map_err(|_| crate::error::ConnectionError::InvalidPacket)?;
+        let end = offset
+            .checked_add(value_len)
+            .filter(|end| *end <= parameters.len())
+            .ok_or(crate::error::ConnectionError::InvalidPacket)?;
+        if !seen.insert(parameter_id) {
+            return Err(crate::error::ConnectionError::InvalidPacket);
+        }
+        let value = &parameters[offset..end];
+        match parameter_id {
+            ORIGINAL_DESTINATION_CONNECTION_ID_PARAMETER_ID => {
+                ids.original_destination = Some(value)
+            }
+            INITIAL_SOURCE_CONNECTION_ID_PARAMETER_ID => ids.initial_source = Some(value),
+            RETRY_SOURCE_CONNECTION_ID_PARAMETER_ID => ids.retry_source = Some(value),
+            0x02 | 0x0d => ids.other_server_only = true,
+            _ => {}
+        }
+        if matches!(parameter_id, 0x00 | 0x0f | 0x10)
+            && value_len > crate::transport::MAX_CONN_ID_LEN
+        {
+            return Err(crate::error::ConnectionError::InvalidPacket);
+        }
+        offset = end;
+    }
+    Ok(ids)
+}
 
 fn peer_max_udp_payload_size(
     parameters: &[u8],
@@ -117,11 +174,47 @@ impl Connection {
             self.finish_zero_rtt(accepted);
         }
         if let Some(parameters) = peer_parameters.as_deref() {
+            self.validate_peer_connection_ids(parameters)?;
             self.apply_peer_transport_limits(parameters)?;
         }
         self.refresh_short_header_tag_reserve();
         self.validate_peer_version_information(peer_parameters)?;
         self.maybe_queue_handshake_done();
+        Ok(())
+    }
+
+    pub(in crate::transport::connection) fn validate_peer_connection_ids(
+        &mut self,
+        parameters: &[u8],
+    ) -> Result<(), crate::error::ConnectionError> {
+        if self.peer_cids_validated {
+            return Ok(());
+        }
+        let parsed = parse_peer_connection_ids(parameters).map_err(|_| {
+            self.fail_version_negotiation(
+                super::super::version::TRANSPORT_PARAMETER_ERROR_CODE,
+                "malformed or duplicate connection-ID transport parameter",
+            )
+        })?;
+        let Some(peer_initial_scid) = self.peer_initial_scid else {
+            return Ok(());
+        };
+        let initial_matches = parsed.initial_source == Some(peer_initial_scid.as_ref());
+        let role_matches = if self.is_server {
+            parsed.original_destination.is_none()
+                && parsed.retry_source.is_none()
+                && !parsed.other_server_only
+        } else {
+            parsed.original_destination == Some(self.original_dcid.as_ref())
+                && parsed.retry_source == self.retry_source_cid.as_ref().map(AsRef::as_ref)
+        };
+        if !initial_matches || !role_matches {
+            return Err(self.fail_version_negotiation(
+                super::super::version::TRANSPORT_PARAMETER_ERROR_CODE,
+                "connection-ID transport parameters do not match handshake history",
+            ));
+        }
+        self.peer_cids_validated = true;
         Ok(())
     }
 
@@ -372,6 +465,9 @@ impl Connection {
         self.is_closed = false;
         self.is_draining = false;
         self.retry_accepted = false;
+        self.retry_source_cid = None;
+        self.peer_initial_scid = None;
+        self.peer_cids_validated = false;
         self.local_error = None;
         self.remote_error = None;
         self.pkt_spaces = [

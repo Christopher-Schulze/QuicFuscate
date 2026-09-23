@@ -377,6 +377,8 @@ fn validated_retry_uses_retry_scid_for_initial_keys_and_restores_qkey_identity()
     .expect("retried Initial authentication");
 
     assert_eq!(context.initial_key_dcid.as_ref(), retry_scid);
+    assert_eq!(context.original_dcid.as_ref(), original_dcid);
+    assert_eq!(context.retry_source_cid.as_ref().map(AsRef::as_ref), Some(retry_scid.as_slice()));
     assert_eq!(context.qkey_record.expect("QKey record").id, qkey_id);
     assert!(context.pending_qkey_auth.is_some());
 }

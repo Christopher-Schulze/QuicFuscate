@@ -227,6 +227,7 @@ pub fn reconcile_live_clients(
 pub struct LiveInitialAuthContext {
     pub initial_key_dcid: crate::transport::ConnectionId,
     pub original_dcid: crate::transport::ConnectionId,
+    pub retry_source_cid: Option<crate::transport::ConnectionId>,
     pub version: u32,
     pub qkey_record: Option<QKeyRecord>,
     pub pending_qkey_auth: Option<QKeyAuthState>,
@@ -265,6 +266,7 @@ pub(crate) fn parse_live_server_initial_auth(
     let version = initial_hdr.version;
     let initial_key_dcid = crate::transport::ConnectionId::from_ref(&initial_hdr.dcid);
     let mut original_dcid = initial_key_dcid;
+    let mut retry_source_cid = None;
     let mut initial_token = initial_hdr.token.take();
     if initial_token
         .as_deref()
@@ -277,6 +279,7 @@ pub(crate) fn parse_live_server_initial_auth(
             .validate(initial_token.as_deref().unwrap_or_default(), remote_ip, &initial_hdr.dcid)
             .map_err(|_| LiveInitialAuthError::InvalidCredential)?;
         original_dcid = crate::transport::ConnectionId::from_ref(&claims.original_dcid);
+        retry_source_cid = Some(initial_key_dcid);
         initial_token = Some(claims.credential);
     }
     let require_qkey = require_qkey_for_new_clients();
@@ -313,6 +316,7 @@ pub(crate) fn parse_live_server_initial_auth(
     Ok(LiveInitialAuthContext {
         initial_key_dcid,
         original_dcid,
+        retry_source_cid,
         version,
         qkey_record,
         pending_qkey_auth,
@@ -419,6 +423,7 @@ pub fn create_live_server_connection_with_runtime_and_clock(
         opt_params,
         initial_key_dcid,
         None,
+        None,
         runtime_owner,
         clock,
     )
@@ -434,6 +439,7 @@ pub fn create_live_server_connection_with_runtime_and_clock_and_original(
     opt_params: crate::optimize::OptimizeConfig,
     initial_key_dcid: &crate::transport::ConnectionId,
     original_dcid: Option<&crate::transport::ConnectionId>,
+    retry_source_cid: Option<&crate::transport::ConnectionId>,
     runtime_owner: Option<Arc<StealthRuntimeOwner>>,
     clock: crate::time_source::ProtocolClock,
 ) -> Result<QuicFuscateConnection, String> {
@@ -444,6 +450,7 @@ pub fn create_live_server_connection_with_runtime_and_clock_and_original(
         &scid,
         Some(initial_key_dcid),
         original_dcid,
+        retry_source_cid,
         local_addr,
         remote_addr,
         transport_config,

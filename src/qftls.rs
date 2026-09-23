@@ -671,6 +671,11 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
+    let connection_ids = if is_server {
+        qf_stealth::transport_params::HandshakeConnectionIds::server(&[], &[], None)
+    } else {
+        qf_stealth::transport_params::HandshakeConnectionIds::client(&[])
+    };
     create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
         is_server,
         verify_peer,
@@ -680,7 +685,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock(
         environment,
         clock,
         rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
-        &[],
+        &connection_ids,
         None,
         false,
     )
@@ -696,7 +701,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
     environment: &crate::env_utils::EnvSnapshot,
     clock: &crate::time_source::ProtocolClock,
     max_udp_payload_size: usize,
-    local_scid: &[u8],
+    connection_ids: &qf_stealth::transport_params::HandshakeConnectionIds,
     ech_config_list: Option<&[u8]>,
     early_data: bool,
 ) -> Result<Box<dyn QuicTlsProvider>, ConnectionError> {
@@ -709,7 +714,7 @@ pub(crate) fn create_provider_for_version_with_ca_with_snapshot_and_clock_and_ma
         environment,
         clock,
         max_udp_payload_size,
-        local_scid,
+        connection_ids,
         ech_config_list,
         early_data,
     )?))
@@ -792,6 +797,11 @@ impl CombinedProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, ConnectionError> {
+        let connection_ids = if is_server {
+            qf_stealth::transport_params::HandshakeConnectionIds::server(&[], &[], None)
+        } else {
+            qf_stealth::transport_params::HandshakeConnectionIds::client(&[])
+        };
         Self::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
             verify_peer,
@@ -801,7 +811,7 @@ impl CombinedProvider {
             environment,
             clock,
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
-            &[],
+            &connection_ids,
             None,
             false,
         )
@@ -817,7 +827,7 @@ impl CombinedProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
-        local_scid: &[u8],
+        connection_ids: &qf_stealth::transport_params::HandshakeConnectionIds,
         ech_config_list: Option<&[u8]>,
         early_data: bool,
     ) -> Result<Self, ConnectionError> {
@@ -830,7 +840,7 @@ impl CombinedProvider {
             environment,
             clock,
             max_udp_payload_size,
-            local_scid,
+            connection_ids,
             ech_config_list,
             early_data,
         )?;
@@ -1112,6 +1122,11 @@ impl RustlsProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
     ) -> Result<Self, ConnectionError> {
+        let connection_ids = if is_server {
+            qf_stealth::transport_params::HandshakeConnectionIds::server(&[], &[], None)
+        } else {
+            qf_stealth::transport_params::HandshakeConnectionIds::client(&[])
+        };
         Self::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             is_server,
             verify_peer,
@@ -1121,7 +1136,7 @@ impl RustlsProvider {
             environment,
             clock,
             rustls_provider::DEFAULT_MAX_UDP_PAYLOAD_SIZE,
-            &[],
+            &connection_ids,
             None,
             false,
         )
@@ -1137,7 +1152,7 @@ impl RustlsProvider {
         environment: &crate::env_utils::EnvSnapshot,
         clock: &crate::time_source::ProtocolClock,
         max_udp_payload_size: usize,
-        local_scid: &[u8],
+        connection_ids: &qf_stealth::transport_params::HandshakeConnectionIds,
         ech_config_list: Option<&[u8]>,
         early_data: bool,
     ) -> Result<Self, ConnectionError> {
@@ -1150,7 +1165,7 @@ impl RustlsProvider {
             environment,
             clock,
             max_udp_payload_size,
-            local_scid,
+            connection_ids,
             ech_config_list,
             early_data,
         )?))

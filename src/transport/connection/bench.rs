@@ -67,7 +67,9 @@ pub fn bench_paired_1rtt_connections_stealth(stealth_on: bool) -> BenchConnectio
     let mut server = Connection::new_server(&server_scid, local_server, peer_server, config)
         .expect("valid benchmark server configuration");
 
-    client.set_destination_cid(ConnectionId::from_ref(&server_scid));
+    client.set_initial_dcid(ConnectionId::from_ref(&server_scid));
+    server.set_initial_dcid(ConnectionId::from_ref(&server_scid));
+    server.set_original_dcid(ConnectionId::from_ref(&server_scid));
     server.set_destination_cid(ConnectionId::from_ref(&client_scid));
 
     {

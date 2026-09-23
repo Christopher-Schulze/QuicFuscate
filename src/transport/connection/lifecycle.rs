@@ -30,7 +30,9 @@ impl Connection {
     ) -> crate::error::ConnectionError {
         self.record_local_error(error.clone());
         let reason = error.to_string();
-        let _ = self.close(false, 0x0100, reason.as_bytes());
+        if !self.is_closed {
+            let _ = self.close(false, 0x0100, reason.as_bytes());
+        }
         error
     }
 
@@ -132,6 +134,10 @@ impl Connection {
         self.original_dcid = dcid;
     }
 
+    pub(crate) fn set_retry_source_cid(&mut self, cid: ConnectionId) {
+        self.retry_source_cid = Some(cid);
+    }
+
     /// Set the current destination CID (what we put into outgoing DCID fields).
     pub(crate) fn set_destination_cid(&mut self, dcid: ConnectionId) {
         self.dcid = dcid;
@@ -216,6 +222,9 @@ impl Connection {
             is_draining: false,
             received_non_vn_packet: false,
             retry_accepted: false,
+            retry_source_cid: None,
+            peer_initial_scid: None,
+            peer_cids_validated: false,
             streams: HashMap::new(),
             local_addr: local,
             peer_addr: peer,
@@ -1187,6 +1196,11 @@ impl Connection {
         &mut self,
         profile_name: &str,
     ) -> Result<(), crate::error::ConnectionError> {
+        if self.is_server && self.original_dcid.is_empty() {
+            return Err(crate::error::ConnectionError::TlsError(
+                "server original destination connection ID is unavailable".to_string(),
+            ));
+        }
         log::info!("Enabling rustls TLS provider with profile: {}", profile_name);
 
         // The TLS provider emits complete packet-key bundles through the transport-owned
@@ -1210,6 +1224,15 @@ impl Connection {
                 "server 0-RTT remains disabled without a valid anti-replay register and byte limit"
             );
         }
+        let connection_ids = if self.is_server {
+            qf_stealth::transport_params::HandshakeConnectionIds::server(
+                self.scid.as_ref(),
+                self.original_dcid.as_ref(),
+                self.retry_source_cid.as_ref().map(AsRef::as_ref),
+            )
+        } else {
+            qf_stealth::transport_params::HandshakeConnectionIds::client(self.scid.as_ref())
+        };
         let mut provider = crate::qftls::create_provider_for_version_with_ca_with_snapshot_and_clock_and_max_udp_payload(
             self.is_server,
             self.config.verify_peer,
@@ -1219,7 +1242,7 @@ impl Connection {
             &self.environment,
             &self.clock,
             self.config.max_udp_payload_size as usize,
-            self.scid.as_ref(),
+            &connection_ids,
             self.config.ech_config_list.as_deref(),
             early_data,
         )?;
@@ -1303,7 +1326,9 @@ impl Connection {
             // QuicFuscateConnection after transport establishment. Creating a
             // second default H3 owner here would queue another control-stream
             // SETTINGS prologue before the persona-configured owner starts.
-            Ok(provider.handshake_complete() && self.version_negotiation.peer_information_validated)
+            Ok(provider.handshake_complete()
+                && self.version_negotiation.peer_information_validated
+                && self.peer_cids_validated)
         } else {
             // No TLS provider configured, consider handshake complete
             Ok(true)
@@ -1316,7 +1341,9 @@ impl Connection {
         self.tls_provider
             .as_ref()
             .map(|provider| {
-                provider.handshake_complete() && self.version_negotiation.peer_information_validated
+                provider.handshake_complete()
+                    && self.version_negotiation.peer_information_validated
+                    && self.peer_cids_validated
             })
             .unwrap_or(true)
     }

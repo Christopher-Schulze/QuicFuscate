@@ -769,7 +769,7 @@
 - Detail: `docs/todo/todo-1117-h3-protocol-error-wire-close.md`
 
 ### TODO-1118 - Reset loss recovery and congestion state after authenticated Retry
-- DONE. Authenticated v1/v2 Retry retains the TLS transcript and monotonic packet numbers, requeues Initial CRYPTO, rejects outstanding 0-RTT transmissions for 1-RTT replay, forbids further 0-RTT admission/emission in the attempt, and retires old recovery/CC/timer/probe state while preserving controller policy and FEC callbacks. Invalid, duplicate, empty-token and late Retry inputs leave the connection unchanged. Real rustls packet pumps complete after induced post-Retry Initial loss; focused recovery 53/53, transport 160/160, core 91/91, TLS 57 passed (1 ignored), strict library Clippy and formatting pass. Peer CID parameter binding remains TODO-1120; independent standards-wire capture remains TODO-1095.
+- DONE. Authenticated v1/v2 Retry retains the TLS transcript and monotonic packet numbers, requeues Initial CRYPTO, rejects outstanding 0-RTT transmissions for 1-RTT replay, forbids further 0-RTT admission/emission in the attempt, and retires old recovery/CC/timer/probe state while preserving controller policy and FEC callbacks. Invalid, duplicate, empty-token and late Retry inputs leave the connection unchanged. Real rustls packet pumps complete after induced post-Retry Initial loss; focused recovery 53/53, transport 160/160, core 91/91, TLS 57 passed (1 ignored), strict library Clippy and formatting pass. Peer CID parameter binding is completed in TODO-1120; independent standards-wire capture remains TODO-1095.
 - Detail: `docs/todo/done/todo-1118-retry-recovery-state-reset.md`
 
 ### TODO-1119 - Archive completed task details and repair their links
@@ -777,8 +777,12 @@
 - Detail: `docs/todo/done/todo-1119-archive-completed-task-details.md`
 
 ### TODO-1120 - Bind QUIC handshake transport parameters to observed connection IDs and Retry
-- OPEN. The persona parameter encoder emits only the local initial SCID; the server's original DCID and Retry SCID are absent, and neither role validates the authenticated peer CID parameters against observed packet history. Extend one typed transport/TLS identity boundary and reject missing or mismatched values before application readiness for v1/v2 direct and Retry handshakes.
-- Detail: `docs/todo/todo-1120-quic-retry-connection-id-transport-parameter-binding.md`
+- DONE. The client adopts the first server Initial SCID after Retry and discards conflicting later Initials. One persona encoder receives role-typed CID history; live server admission passes original DCID and validated Retry SCID before TLS construction, and both peers validate authenticated CID parameters before handshake readiness. Paired v1/v2 direct, Retry, VN, and wrong-value tests pass, including peer-received `0x08`; parser tests cover missing, duplicate, malformed, role-forbidden, oversized, and mismatched CIDs. Focused transport 160/160, core 77/77 plus constructor guard, qftls 33 passed (one ignored) plus provider guard, qf-stealth parameter 6/6, strict Clippy and formatting pass. Independent standards-wire capture remains TODO-1095; core TLS setup failure remains TODO-1121.
+- Detail: `docs/todo/done/todo-1120-quic-retry-connection-id-transport-parameter-binding.md`
+
+### TODO-1121 - Fail closed when core TLS provider setup fails
+- OPEN. Core construction logs and swallows TLS provider creation/profile errors, while provider-less transport reports TLS handshake completion. Make construction fallible end to end and prevent provider-less production readiness, with client/server failure regression and cleanup proof.
+- Detail: `docs/todo/todo-1121-fail-closed-core-tls-provider-initialization.md`
 
 ## Completed
 

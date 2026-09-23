@@ -34,6 +34,37 @@ impl EngineFamily {
     }
 }
 
+/// Handshake connection IDs authenticated by the TLS transport-parameter block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandshakeConnectionIds {
+    Client { initial_source: Vec<u8> },
+    Server { initial_source: Vec<u8>, original_destination: Vec<u8>, retry_source: Option<Vec<u8>> },
+}
+
+impl HandshakeConnectionIds {
+    pub fn client(initial_source: &[u8]) -> Self {
+        Self::Client { initial_source: initial_source.to_vec() }
+    }
+
+    pub fn server(
+        initial_source: &[u8],
+        original_destination: &[u8],
+        retry_source: Option<&[u8]>,
+    ) -> Self {
+        Self::Server {
+            initial_source: initial_source.to_vec(),
+            original_destination: original_destination.to_vec(),
+            retry_source: retry_source.map(<[u8]>::to_vec),
+        }
+    }
+
+    pub fn initial_source(&self) -> &[u8] {
+        match self {
+            Self::Client { initial_source } | Self::Server { initial_source, .. } => initial_source,
+        }
+    }
+}
+
 /// Flow-control values shared between the wire fixture and the runtime
 /// transport configuration. Applying the same struct to both paths makes a
 /// drift between advertised and internal parameters impossible.
@@ -382,8 +413,8 @@ fn convert_entry(entry: FixtureEntry) -> TransportParamFixture {
 /// * `path_max_udp_payload` is the concrete MTU/path budget of this hop; when
 ///   the fixture advertises `max_udp_payload_size`, the emitted value is the
 ///   minimum of both caps.
-/// * `local_scid` fills `initial_source_connection_id` with the real local
-///   source connection ID.
+/// * `connection_ids` supplies mandatory role-specific CIDs from the actual
+///   handshake, independently of persona fixture membership.
 /// * `version_information` carries the already-encoded version_information
 ///   parameter (parameter id + length + value) and is appended when the
 ///   fixture advertises it.
@@ -394,12 +425,13 @@ fn convert_entry(entry: FixtureEntry) -> TransportParamFixture {
 pub fn encode_transport_params(
     family: EngineFamily,
     path_max_udp_payload: u64,
-    local_scid: &[u8],
+    connection_ids: &HandshakeConnectionIds,
     version_information: &[u8],
     random: &mut dyn rand::RngCore,
 ) -> Vec<u8> {
     let fixture = transport_param_fixture(family);
-    let mut entries: Vec<(u64, Vec<u8>)> = Vec::with_capacity(fixture.sends.len() + 1);
+    let mut entries: Vec<(u64, Vec<u8>)> = Vec::with_capacity(fixture.sends.len() + 3);
+    let mut initial_source_emitted = false;
 
     let version_information_value =
         if fixture.version_information && !version_information.is_empty() {
@@ -414,9 +446,9 @@ pub fn encode_transport_params(
 
     for name in &fixture.sends {
         match name.as_str() {
-            // Filled with the real per-connection values.
             "initial_source_connection_id" => {
-                entries.push((0x0f, local_scid.to_vec()));
+                entries.push((0x0f, connection_ids.initial_source().to_vec()));
+                initial_source_emitted = true;
             }
             "version_information" => {
                 if let Some(value) = &version_information_value {
@@ -457,6 +489,18 @@ pub fn encode_transport_params(
         }
     }
 
+    if !initial_source_emitted {
+        entries.push((0x0f, connection_ids.initial_source().to_vec()));
+    }
+    if let HandshakeConnectionIds::Server { original_destination, retry_source, .. } =
+        connection_ids
+    {
+        entries.push((0x00, original_destination.clone()));
+        if let Some(retry_source) = retry_source {
+            entries.push((0x10, retry_source.clone()));
+        }
+    }
+
     // Per-connection GREASE transport parameter at a random position, when
     // the engine emits one.
     if fixture.grease_tp {
@@ -479,8 +523,9 @@ pub fn encode_transport_params(
         }
     }
 
-    let mut out =
-        Vec::with_capacity(entries.len() * 8 + local_scid.len() + version_information.len());
+    let mut out = Vec::with_capacity(
+        entries.len() * 8 + connection_ids.initial_source().len() + version_information.len(),
+    );
     for (id, value) in entries {
         put_param(&mut out, id, &value);
     }
@@ -578,8 +623,13 @@ mod tests {
         for family in [EngineFamily::Chromium, EngineFamily::Firefox, EngineFamily::WebKit] {
             let fixture = transport_param_fixture(family);
             let scid = [0xabu8; 16];
-            let encoded =
-                encode_transport_params(family, 1350, &scid, &version_information, &mut rng);
+            let encoded = encode_transport_params(
+                family,
+                1350,
+                &HandshakeConnectionIds::client(&scid),
+                &version_information,
+                &mut rng,
+            );
             let decoded = decode_transport_params(&encoded);
             let decoded_ids: std::collections::BTreeSet<u64> =
                 decoded.iter().map(|(id, _)| *id).collect();
@@ -606,19 +656,52 @@ mod tests {
     fn engines_produce_distinct_parameter_sets() {
         let mut rng = rand::rng();
         let scid = [1u8; 8];
-        let chrome: std::collections::BTreeSet<u64> = decode_transport_params(
-            &encode_transport_params(EngineFamily::Chromium, 1350, &scid, &[], &mut rng),
-        )
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-        let firefox: std::collections::BTreeSet<u64> = decode_transport_params(
-            &encode_transport_params(EngineFamily::Firefox, 1350, &scid, &[], &mut rng),
-        )
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
+        let chrome: std::collections::BTreeSet<u64> =
+            decode_transport_params(&encode_transport_params(
+                EngineFamily::Chromium,
+                1350,
+                &HandshakeConnectionIds::client(&scid),
+                &[],
+                &mut rng,
+            ))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let firefox: std::collections::BTreeSet<u64> =
+            decode_transport_params(&encode_transport_params(
+                EngineFamily::Firefox,
+                1350,
+                &HandshakeConnectionIds::client(&scid),
+                &[],
+                &mut rng,
+            ))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert_ne!(chrome, firefox);
+    }
+
+    #[test]
+    fn every_persona_keeps_server_handshake_cids_exactly_once() {
+        let mut rng = rand::rng();
+        let ids =
+            HandshakeConnectionIds::server(b"server-scid", b"original-dcid", Some(b"retry-scid"));
+        for family in [EngineFamily::Chromium, EngineFamily::Firefox, EngineFamily::WebKit] {
+            let encoded = encode_transport_params(family, 1350, &ids, &[], &mut rng);
+            let decoded = decode_transport_params(&encoded);
+            for (id, expected) in [
+                (0x0f, b"server-scid".as_slice()),
+                (0x00, b"original-dcid".as_slice()),
+                (0x10, b"retry-scid".as_slice()),
+            ] {
+                let values: Vec<&[u8]> = decoded
+                    .iter()
+                    .filter(|(parameter_id, _)| *parameter_id == id)
+                    .map(|(_, value)| value.as_slice())
+                    .collect();
+                assert_eq!(values, vec![expected], "{family:?} CID parameter {id:#x}");
+            }
+        }
     }
 
     #[test]
@@ -627,8 +710,13 @@ mod tests {
         let framed =
             [0x11u8, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x6b, 0x33, 0x43, 0xcf];
         let mut rng = rand::rng();
-        let encoded =
-            encode_transport_params(EngineFamily::Firefox, 1350, &[7u8; 8], &framed, &mut rng);
+        let encoded = encode_transport_params(
+            EngineFamily::Firefox,
+            1350,
+            &HandshakeConnectionIds::client(&[7u8; 8]),
+            &framed,
+            &mut rng,
+        );
         let decoded = decode_transport_params(&encoded);
         let vi = decoded.iter().find(|(id, _)| *id == 0x11).expect("version_information present");
         assert_eq!(vi.1, framed[2..].to_vec());

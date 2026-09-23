@@ -509,6 +509,7 @@ impl QuicFuscateConnection {
             scid,
             initial_key_dcid,
             None,
+            None,
             local_addr,
             remote_addr,
             config,
@@ -527,6 +528,7 @@ impl QuicFuscateConnection {
         scid: &crate::transport::ConnectionId,
         initial_key_dcid: Option<&crate::transport::ConnectionId>,
         original_dcid: Option<&crate::transport::ConnectionId>,
+        retry_source_cid: Option<&crate::transport::ConnectionId>,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         config: &mut crate::transport::Config,
@@ -536,6 +538,19 @@ impl QuicFuscateConnection {
         runtime_owner: Option<Arc<StealthRuntimeOwner>>,
         clock: crate::time_source::ProtocolClock,
     ) -> Result<Self, String> {
+        if initial_key_dcid.is_none_or(crate::transport::ConnectionId::is_empty) {
+            return Err("server Initial destination connection ID is unavailable".to_string());
+        }
+        if original_dcid.is_some_and(crate::transport::ConnectionId::is_empty) {
+            return Err("server original destination connection ID is unavailable".to_string());
+        }
+        if retry_source_cid.is_some()
+            && (retry_source_cid.is_some_and(crate::transport::ConnectionId::is_empty)
+                || original_dcid.is_none()
+                || retry_source_cid != initial_key_dcid)
+        {
+            return Err("validated Retry connection ID history is incomplete".to_string());
+        }
         let tunnel_ingress_profile = if !stealth_config.enable_network_fingerprint_normalization
             || matches!(stealth_config.mode, StealthMode::Off)
         {
@@ -568,6 +583,10 @@ impl QuicFuscateConnection {
             clock.clone(),
         )
         .map_err(|e| format!("Failed to accept QUIC connection: {}", e))?;
+
+        if let Some(retry_source_cid) = retry_source_cid {
+            conn.set_retry_source_cid(*retry_source_cid);
+        }
 
         // TODO-1052: the server side of a stealth connection shares the
         // same wire budget discipline - its repairs, padding, and cover

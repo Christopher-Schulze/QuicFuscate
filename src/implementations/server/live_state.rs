@@ -270,6 +270,7 @@ pub(crate) fn build_live_server_client_init(
         opt_params,
         &initial_ctx.initial_key_dcid,
         Some(&initial_ctx.original_dcid),
+        initial_ctx.retry_source_cid.as_ref(),
         request.stealth_runtime.clone(),
         request.clock,
     ) {

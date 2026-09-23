@@ -208,6 +208,7 @@ impl Connection {
             self.requeue_all_crypto(recovery::PacketSpace::Initial);
             // For Retry we do not parse further.
             self.retry_accepted = true;
+            self.retry_source_cid = Some(ConnectionId::from_ref(&retry_hdr.scid));
             self.received_non_vn_packet = true;
             self.stats.recv += 1;
             self.stats.recv_bytes += buf.len() as u64;
@@ -313,6 +314,13 @@ impl Connection {
         // A malformed, truncated, or packet-space-invalid frame must not turn into a successful
         // receive merely because an earlier frame in the same payload was valid.
         Self::preflight_frame_payload(&buf[aad_len..end], pkt_ty)?;
+        if pkt_ty == PacketType::Initial
+            && self
+                .peer_initial_scid
+                .is_some_and(|first_scid| first_scid.as_ref() != hdr_native.scid)
+        {
+            return Ok(end);
+        }
 
         if pkt_ty == PacketType::Short {
             let committed = self
@@ -391,22 +399,14 @@ impl Connection {
             self.on_peer_one_rtt_packet();
         }
 
-        // Learn peer CID from the first long-header packets.
-        // - Server: outgoing DCID must be the client's SCID.
-        // - Client: after receiving a server packet, outgoing DCID becomes the server's SCID.
-        if hdr_native.ty != PacketType::Short && !hdr_native.scid.is_empty() {
-            if self.is_server {
-                if self.dcid.is_empty() {
-                    self.set_destination_cid(ConnectionId::from_ref(&hdr_native.scid));
-                }
-                if self.initial_dcid.is_empty() && !hdr_native.dcid.is_empty() {
-                    self.initial_dcid = ConnectionId::from_ref(&hdr_native.dcid);
-                }
-            } else {
-                // Client: only rotate away from the initial placeholder DCID once we have a peer SCID.
-                if self.dcid.is_empty() || self.dcid == self.initial_dcid {
-                    self.set_destination_cid(ConnectionId::from_ref(&hdr_native.scid));
-                }
+        // The first authenticated Initial sets the peer CID even after Retry.
+        // Subsequent Initials are bound to that first value above.
+        if pkt_ty == PacketType::Initial && self.peer_initial_scid.is_none() {
+            let peer_scid = ConnectionId::from_ref(&hdr_native.scid);
+            self.peer_initial_scid = Some(peer_scid);
+            self.set_destination_cid(peer_scid);
+            if self.is_server && self.initial_dcid.is_empty() && !hdr_native.dcid.is_empty() {
+                self.initial_dcid = ConnectionId::from_ref(&hdr_native.dcid);
             }
         }
         // Observer hook: notify after header processed and payload length known.

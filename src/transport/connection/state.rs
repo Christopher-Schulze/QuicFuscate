@@ -29,6 +29,12 @@ pub struct Connection {
     pub(super) received_non_vn_packet: bool,
     /// An accepted Retry permanently disables 0-RTT for this connection attempt.
     pub(super) retry_accepted: bool,
+    /// Retry SCID from an accepted Retry or validated server token.
+    pub(super) retry_source_cid: Option<ConnectionId>,
+    /// Source CID of the first authenticated peer Initial; presence is distinct from length.
+    pub(super) peer_initial_scid: Option<ConnectionId>,
+    /// Authenticated peer CID parameters match the observed Initial and Retry history.
+    pub(super) peer_cids_validated: bool,
     /// Stream storage. HashMap provides O(1) amortized lookup but poor cache locality
     /// at high stream counts (>10k). Hash table entries scatter across memory, causing
     /// L1/L2 cache misses during iteration and lookup. Consider replacing with a slot map

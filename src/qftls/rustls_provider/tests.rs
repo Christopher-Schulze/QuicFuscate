@@ -1,7 +1,7 @@
 use super::*;
 
 use qf_stealth::transport_params::{
-    decode_transport_params, transport_param_fixture, EngineFamily,
+    decode_transport_params, transport_param_fixture, EngineFamily, HandshakeConnectionIds,
 };
 
 fn decode_varint_value(bytes: &[u8]) -> u64 {
@@ -45,7 +45,7 @@ fn fixture_transport_params_cap_udp_payload_at_path_budget() {
     let params = RustlsProviderImpl::fixture_transport_params(
         EngineFamily::Chromium,
         1413,
-        &scid,
+        &HandshakeConnectionIds::client(&scid),
         TEST_VERSION_INFORMATION,
     )
     .expect("custom UDP payload size must produce valid transport parameters");
@@ -55,10 +55,41 @@ fn fixture_transport_params_cap_udp_payload_at_path_budget() {
     // min(fixture cap 1472, path budget 1413)
     assert_eq!(udp, Some(1413));
 
-    assert!(
-        RustlsProviderImpl::fixture_transport_params(EngineFamily::Chromium, 1199, &scid, &[],)
-            .is_err()
-    );
+    assert!(RustlsProviderImpl::fixture_transport_params(
+        EngineFamily::Chromium,
+        1199,
+        &HandshakeConnectionIds::client(&scid),
+        &[],
+    )
+    .is_err());
+}
+
+#[test]
+fn provider_rejects_role_mismatches_and_oversized_handshake_cids() {
+    let environment = crate::env_utils::EnvSnapshot::capture();
+    let clock = crate::time_source::ProtocolClock::default();
+    for (is_server, ids) in [
+        (false, HandshakeConnectionIds::server(b"server", b"original", None)),
+        (true, HandshakeConnectionIds::client(b"client")),
+        (false, HandshakeConnectionIds::client(&[7; 21])),
+        (true, HandshakeConnectionIds::server(b"server", &[7; 21], None)),
+        (true, HandshakeConnectionIds::server(b"server", b"original", Some(&[7; 21]))),
+    ] {
+        assert!(RustlsProviderImpl::new_with_ca_with_snapshot_and_clock_and_max_udp_payload(
+            is_server,
+            false,
+            PROTOCOL_VERSION,
+            &[],
+            None,
+            &environment,
+            &clock,
+            1350,
+            &ids,
+            None,
+            false,
+        )
+        .is_err());
+    }
 }
 
 #[test]
@@ -68,7 +99,7 @@ fn chromium_transport_params_match_capture_fixture() {
     let params = RustlsProviderImpl::fixture_transport_params(
         EngineFamily::Chromium,
         1350,
-        &scid,
+        &HandshakeConnectionIds::client(&scid),
         TEST_VERSION_INFORMATION,
     )
     .expect("chromium fixture params");
@@ -109,7 +140,7 @@ fn firefox_transport_params_match_neqo_fixture_order_and_values() {
     let params = RustlsProviderImpl::fixture_transport_params(
         EngineFamily::Firefox,
         1350,
-        &scid,
+        &HandshakeConnectionIds::client(&scid),
         TEST_VERSION_INFORMATION,
     )
     .expect("firefox fixture params");
@@ -144,7 +175,7 @@ fn personas_do_not_share_parameter_structure() {
         &RustlsProviderImpl::fixture_transport_params(
             EngineFamily::Chromium,
             1350,
-            &scid,
+            &HandshakeConnectionIds::client(&scid),
             TEST_VERSION_INFORMATION,
         )
         .expect("chromium"),
@@ -156,7 +187,7 @@ fn personas_do_not_share_parameter_structure() {
         &RustlsProviderImpl::fixture_transport_params(
             EngineFamily::Firefox,
             1350,
-            &scid,
+            &HandshakeConnectionIds::client(&scid),
             TEST_VERSION_INFORMATION,
         )
         .expect("firefox"),
@@ -170,12 +201,20 @@ fn personas_do_not_share_parameter_structure() {
 #[test]
 fn grease_values_differ_per_connection() {
     let scid = [0xabu8; 8];
-    let first =
-        RustlsProviderImpl::fixture_transport_params(EngineFamily::Chromium, 1350, &scid, &[])
-            .expect("first");
-    let second =
-        RustlsProviderImpl::fixture_transport_params(EngineFamily::Chromium, 1350, &scid, &[])
-            .expect("second");
+    let first = RustlsProviderImpl::fixture_transport_params(
+        EngineFamily::Chromium,
+        1350,
+        &HandshakeConnectionIds::client(&scid),
+        &[],
+    )
+    .expect("first");
+    let second = RustlsProviderImpl::fixture_transport_params(
+        EngineFamily::Chromium,
+        1350,
+        &HandshakeConnectionIds::client(&scid),
+        &[],
+    )
+    .expect("second");
     let grease = |encoded: &[u8]| -> Vec<(u64, Vec<u8>)> {
         decode_transport_params(encoded)
             .into_iter()
@@ -203,7 +242,7 @@ fn apply_profile_rebuilds_transport_params_from_persona_fixture() {
         &environment,
         &clock,
         1350,
-        &scid,
+        &HandshakeConnectionIds::client(&scid),
         None,
         false,
     )

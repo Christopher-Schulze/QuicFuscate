@@ -44,6 +44,42 @@ fn wrap_test_connection(
     })
 }
 
+#[test]
+fn server_constructor_rejects_missing_or_inconsistent_handshake_cids() {
+    let scid = crate::transport::ConnectionId::from_ref(b"server-cid");
+    let initial = crate::transport::ConnectionId::from_ref(b"initial-cid");
+    let original = crate::transport::ConnectionId::from_ref(b"original-cid");
+    let other_retry = crate::transport::ConnectionId::from_ref(b"other-retry");
+    let empty = crate::transport::ConnectionId::default();
+    let local = "127.0.0.1:29102".parse().unwrap();
+    let peer = "127.0.0.1:29101".parse().unwrap();
+    for (key, original, retry) in [
+        (None, None, None),
+        (Some(&initial), Some(&empty), None),
+        (Some(&initial), None, Some(&initial)),
+        (Some(&initial), Some(&original), Some(&other_retry)),
+        (Some(&initial), Some(&original), Some(&empty)),
+    ] {
+        let mut config =
+            crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION).unwrap();
+        assert!(QuicFuscateConnection::new_server_with_runtime_and_clock_and_original(
+            &scid,
+            key,
+            original,
+            retry,
+            local,
+            peer,
+            &mut config,
+            StealthConfig::default(),
+            FecConfig::default(),
+            OptimizeConfig::default(),
+            None,
+            crate::time_source::ProtocolClock::default(),
+        )
+        .is_err());
+    }
+}
+
 fn test_tls_connection_pair(
     client_stealth: StealthConfig,
     server_stealth: StealthConfig,
