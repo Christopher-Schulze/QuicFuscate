@@ -64,3 +64,9 @@ Of the 327 files, 133 are Git tracked and 194 are local, ignored task files.
   The 19 board links now point to the archive. Local validation found 993/993
   board links resolving and zero `DONE`/`COMPLETED`/`CLOSED` frontmatter files
   directly under `docs/todo/`.
+- TODO-884 was inspected but not archived. Its recorded bakeoff decision
+  does not satisfy its original promotion criteria, whose decision rule
+  explicitly requires a blocked disposition when neither family qualifies.
+  Its board and detail now both read `BLOCKED`; the remaining platform and
+  security gates retain their separate owners. No missing board detail link
+  was found in the local checkout.

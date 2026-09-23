@@ -242,7 +242,7 @@
 - Detail: `docs/todo/done/todo-904-ci-lane-consolidation.md`
 
 ### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
-- DONE for the bakeoff decision. No advanced family is the ship default. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refuses the old ARM freeze. Ship default stays TODO-1033 rustls AES-GCM. TODO-1029 wire proof is done on Omega.
+- BLOCKED on its original advanced-family promotion criteria. The bakeoff decision selected no advanced ship default; TODO-1044 separately picked opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refused the old ARM freeze. Ship default remains TODO-1033 rustls AES-GCM; TODO-1029 wire proof is done on Omega. The remaining security and platform gates are not cleared by that decision.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
@@ -774,7 +774,7 @@
 
 ### TODO-1119 - Archive completed task details and repair their links
 - DONE. All 327 clearly completed active details were moved to `docs/todo/done/` with matching SHA-256 before reference repair; 133 retained Git tracking and 194 were ignored local files at archival time. Eight moved details needed exact internal link updates. All 987 board detail links and 1,094 task paths resolved at archival time. TODO-720 through TODO-723 had stale archived `OPEN` metadata, reconciled against their completed board records. Open and ambiguous details stayed in place.
-- Follow-up (2026-09-23): 19 further closed details archived, 15 stale `OPEN` metadata values corrected to `DONE`, and all 993 current board detail links resolve locally. No implementation claim was re-audited.
+- Follow-up (2026-09-23): 19 further closed details archived and 15 stale `OPEN` metadata values corrected to `DONE`. TODO-884 stays active as `BLOCKED` because its original promotion criteria remain unmet despite the recorded bakeoff decision. All current board detail links resolve locally. No implementation claim was re-audited.
 - Detail: `docs/todo/done/todo-1119-archive-completed-task-details.md`
 
 ### TODO-1120 - Bind QUIC handshake transport parameters to observed connection IDs and Retry

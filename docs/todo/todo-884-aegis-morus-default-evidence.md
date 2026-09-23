@@ -4,7 +4,7 @@ title: Produce decision-grade AEGIS versus MORUS default evidence
 severity: CRITICAL
 phase: S
 priority: P0
-status: ACTIVE
+status: BLOCKED
 created: 2026-08-11
 depends_on: [TODO-883]
 ---
@@ -284,3 +284,9 @@ This fills the aarch64 cell. Cross-platform matrix now has ARM64 data; remaining
 - TODO-885 packet-capture wire evidence is TODO-1029.
 - Product default is rustls AES-GCM (TODO-1033), independent of the bakeoff.
 - TODO-1028 refuse is recorded. TODO-1044 picks opt-in S-AEGIS behind `advanced-aead` and does not promote a universal default from these cells.
+
+The bakeoff decision is recorded, but the original promotion criteria above
+remain unmet. Per the winner decision rule, this task stays `BLOCKED` with
+standard AES-GCM as the ship default. TODO-1044 owns the separate opt-in
+family decision; TODO-1029 owns wire evidence; TODO-681 and the remaining
+platform gates retain their independent owners.
