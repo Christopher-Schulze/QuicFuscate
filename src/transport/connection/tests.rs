@@ -474,6 +474,61 @@ fn peer_transport_limit_rejects_malformed_duplicate_and_out_of_range_parameters(
 }
 
 #[test]
+fn initial_crypto_retention_limit_pauses_send_until_ack_without_losing_bytes() {
+    use crate::crypto::aead::{Algorithm, KeyScheduleHooks, Level};
+
+    let mut client = make_conn();
+    let secret = [0x5Au8; 32];
+    let limit = qf_transport_crypto_stream::MAX_CRYPTO_BUFFERED_BYTES;
+    {
+        let mut crypto = client.crypto.write();
+        crypto
+            .set_write_secret(Level::Initial, Algorithm::AES128_GCM, &secret)
+            .expect("install Initial keys");
+        crypto.crypto_initial.send(&vec![0xA5; limit]).expect("queue full CRYPTO range");
+        crypto
+            .crypto_initial
+            .next_crypto_frame(limit)
+            .expect("retain sent CRYPTO range")
+            .expect("range available");
+        crypto.crypto_initial.send(b"tail").expect("queue following range");
+    }
+
+    let mut packet = [0u8; 1500];
+    for _ in 0..3 {
+        assert!(matches!(client.send(&mut packet), Err(ConnectionError::Done)));
+    }
+    assert_eq!(client.next_send_pn_by_space[0], 0);
+    assert_eq!(client.stats.sent, 0);
+    assert_eq!(client.crypto.read().crypto_initial.unacked_bytes(), limit);
+    assert!(client.crypto.read().crypto_initial.has_pending_send());
+
+    client.crypto.write().crypto_initial.ack_crypto(0, limit as u64).expect("release capacity");
+    let (length, _) = client.send(&mut packet).expect("send following CRYPTO range");
+    assert_eq!(client.next_send_pn_by_space[0], 1);
+    let (header, pn_offset) = packet::parse_header(&packet[..length], 0).expect("parse Initial");
+    assert_eq!(header.ty, PacketType::Initial);
+    let mut peer = packet::CryptoContext::default();
+    peer.set_read_secret(Level::Initial, Algorithm::AES128_GCM, &secret)
+        .expect("install peer Initial keys");
+    let (_, pn_len) = packet::remove_hp(
+        &mut packet[..length],
+        peer.hp_initial_open.as_deref().expect("peer HP"),
+        pn_offset,
+    )
+    .expect("remove Initial HP");
+    let plaintext_end = packet::decrypt_payload(
+        &mut packet[..length],
+        0,
+        pn_len,
+        pn_offset + pn_len,
+        peer.open_initial.as_deref().expect("peer AEAD"),
+    )
+    .expect("open resumed Initial");
+    assert!(packet[pn_offset + pn_len..plaintext_end].windows(4).any(|bytes| bytes == b"tail"));
+}
+
+#[test]
 fn valid_retry_adopts_cid_and_token_without_reusing_packet_numbers() {
     let mut client = make_conn();
     let original_dcid = ConnectionId::from_ref(b"original-dcid");

@@ -24,7 +24,8 @@ pub struct CryptoStream {
     recv_max: u64,
 }
 
-const MAX_CRYPTO_UNACKED_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum unsent or sent-but-unacknowledged CRYPTO bytes per encryption level.
+pub const MAX_CRYPTO_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 
 #[inline]
 fn checked_u64_add_offset(offset: u64, length: usize) -> Result<u64, ConnectionError> {
@@ -40,7 +41,14 @@ impl CryptoStream {
 
     /// Queues data to be sent in CRYPTO frames.
     pub fn send(&mut self, data: &[u8]) -> Result<(), ConnectionError> {
-        self.send_buf.len().checked_add(data.len()).ok_or(ConnectionError::CryptoBufferExceeded)?;
+        let queued = self
+            .send_buf
+            .len()
+            .checked_add(data.len())
+            .ok_or(ConnectionError::CryptoBufferExceeded)?;
+        if queued > MAX_CRYPTO_BUFFERED_BYTES {
+            return Err(ConnectionError::CryptoBufferExceeded);
+        }
         self.send_buf.extend_from_slice(data);
         Ok(())
     }
@@ -50,6 +58,9 @@ impl CryptoStream {
         &mut self,
         max_len: usize,
     ) -> Result<Option<(u64, Vec<u8>)>, ConnectionError> {
+        if max_len == 0 {
+            return Ok(None);
+        }
         while let Some(&offset) = self.retx.front() {
             let Some(data) = self.unacked.get(&offset) else {
                 self.retx.pop_front();
@@ -78,7 +89,13 @@ impl CryptoStream {
             return Ok(None);
         }
 
-        let len = max_len.min(self.send_buf.len());
+        let available = MAX_CRYPTO_BUFFERED_BYTES
+            .checked_sub(self.unacked_bytes)
+            .ok_or(ConnectionError::InvalidState)?;
+        let len = max_len.min(self.send_buf.len()).min(available);
+        if len == 0 {
+            return Ok(None);
+        }
         let offset = self.send_off;
         let next_offset = checked_u64_add_offset(offset, len)?;
         let retained_bytes =
@@ -87,7 +104,6 @@ impl CryptoStream {
         self.send_off = next_offset;
         self.unacked_bytes = retained_bytes;
         self.unacked.insert(offset, data.clone());
-        self.evict_unacked_overflow();
         Ok(Some((offset, data)))
     }
 
@@ -205,18 +221,6 @@ impl CryptoStream {
         self.unacked_bytes
     }
 
-    fn evict_unacked_overflow(&mut self) {
-        while self.unacked_bytes > MAX_CRYPTO_UNACKED_BYTES {
-            let Some((&oldest, _)) = self.unacked.iter().next() else {
-                break;
-            };
-            if let Some(data) = self.unacked.remove(&oldest) {
-                self.unacked_bytes -= data.len();
-                log::warn!("CRYPTO unacked overflow: evicted range at offset {oldest}");
-            }
-        }
-    }
-
     /// Returns true while unsent CRYPTO bytes remain at this encryption level.
     pub fn has_pending_send(&self) -> bool {
         !self.send_buf.is_empty()
@@ -275,7 +279,7 @@ impl CryptoStream {
 
 #[cfg(test)]
 mod tests {
-    use super::CryptoStream;
+    use super::{CryptoStream, MAX_CRYPTO_BUFFERED_BYTES};
     use qf_error::ConnectionError;
 
     #[test]
@@ -311,5 +315,93 @@ mod tests {
         assert_eq!(stream.send_off, 0);
         assert_eq!(stream.recv_off, 0);
         assert_eq!(stream.recv_max, 0);
+    }
+
+    #[test]
+    fn unsent_capacity_rejects_overflow_without_changing_existing_bytes() {
+        let mut stream = CryptoStream::new();
+        assert_eq!(
+            stream.send(&vec![0xA5; MAX_CRYPTO_BUFFERED_BYTES + 1]),
+            Err(ConnectionError::CryptoBufferExceeded)
+        );
+        assert!(stream.send_buf.is_empty());
+        let full = vec![0x5A; MAX_CRYPTO_BUFFERED_BYTES];
+        stream.send(&full).expect("admit exact-cap flight");
+        assert_eq!(stream.send(b"extra"), Err(ConnectionError::CryptoBufferExceeded));
+        assert_eq!(stream.send_buf, full);
+        assert_eq!(stream.send_off, 0);
+    }
+
+    #[test]
+    fn retained_capacity_blocks_fresh_bytes_until_ack_without_eviction() {
+        let mut stream = CryptoStream::new();
+        let full = vec![0xA5; MAX_CRYPTO_BUFFERED_BYTES];
+        stream.send(&full).expect("queue full flight");
+        let (offset, sent) = stream
+            .next_crypto_frame(MAX_CRYPTO_BUFFERED_BYTES)
+            .expect("take full flight")
+            .expect("full flight available");
+        assert_eq!((offset, sent.len()), (0, MAX_CRYPTO_BUFFERED_BYTES));
+        stream.send(b"tail").expect("queue following flight");
+        assert_eq!(stream.next_crypto_frame(4), Ok(None));
+        assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES);
+        assert_eq!(stream.send_buf, b"tail");
+        for _ in 0..32 {
+            assert_eq!(stream.next_crypto_frame(4), Ok(None));
+        }
+        assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES);
+        assert_eq!(stream.send_buf, b"tail");
+        stream.requeue_all_unacked();
+        let (retry_offset, retry) = stream
+            .next_crypto_frame(MAX_CRYPTO_BUFFERED_BYTES)
+            .expect("take retransmission")
+            .expect("oldest flight retained");
+        assert_eq!((retry_offset, retry), (0, full));
+        stream.ack_crypto(0, MAX_CRYPTO_BUFFERED_BYTES as u64).expect("ACK full flight");
+        assert_eq!(
+            stream.next_crypto_frame(4),
+            Ok(Some((MAX_CRYPTO_BUFFERED_BYTES as u64, b"tail".to_vec())))
+        );
+    }
+
+    #[test]
+    fn zero_frame_budget_does_not_create_an_empty_retained_range() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"pending").expect("queue bytes");
+        assert_eq!(stream.next_crypto_frame(0), Ok(None));
+        assert_eq!(stream.send_buf, b"pending");
+        assert_eq!(stream.send_off, 0);
+        assert_eq!(stream.unacked_bytes(), 0);
+    }
+
+    #[test]
+    fn partial_ack_releases_only_its_bytes_and_retransmission_precedes_fresh_data() {
+        let mut stream = CryptoStream::new();
+        stream.send(b"abcd").expect("queue first range");
+        stream.next_crypto_frame(4).expect("send first range").expect("first range available");
+        let remaining = vec![0xA5; MAX_CRYPTO_BUFFERED_BYTES - 4];
+        stream.send(&remaining).expect("queue remaining flight");
+        stream
+            .next_crypto_frame(MAX_CRYPTO_BUFFERED_BYTES)
+            .expect("send remaining flight")
+            .expect("remaining flight available");
+        stream.send(b"next").expect("queue next flight");
+        stream.ack_crypto(0, 2).expect("ACK two bytes");
+        assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES - 2);
+        stream.requeue_crypto(2, 2).expect("queue loss before fresh data");
+        assert_eq!(stream.next_crypto_frame(2), Ok(Some((2, b"cd".to_vec()))));
+        assert_eq!(
+            stream.next_crypto_frame(4),
+            Ok(Some((MAX_CRYPTO_BUFFERED_BYTES as u64, b"ne".to_vec())))
+        );
+        assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES);
+        assert_eq!(stream.next_crypto_frame(2), Ok(None));
+        assert_eq!(stream.send_buf, b"xt");
+        stream.ack_crypto(2, 2).expect("ACK another retained pair");
+        assert_eq!(
+            stream.next_crypto_frame(2),
+            Ok(Some(((MAX_CRYPTO_BUFFERED_BYTES + 2) as u64, b"xt".to_vec())))
+        );
+        assert_eq!(stream.unacked_bytes(), MAX_CRYPTO_BUFFERED_BYTES);
     }
 }

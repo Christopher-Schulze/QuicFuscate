@@ -288,6 +288,12 @@ pub struct RustlsProviderImpl {
     pub crypto_handshake: qf_transport_crypto_stream::CryptoStream,
     /// Outgoing application-level CRYPTO stream owned by this TLS transcript.
     pub crypto_application: qf_transport_crypto_stream::CryptoStream,
+    /// rustls output retained when its encryption-level CRYPTO queue is full.
+    pending_crypto_level: Option<super::Level>,
+    /// Key transition that must follow the retained output, if any.
+    pending_crypto_key_change: Option<rustls::quic::KeyChange>,
+    /// Oversized rustls output is terminal for this transcript once consumed.
+    crypto_output_overflowed: bool,
     /// Packet-key changes awaiting synchronous transport installation.
     pending_key_changes: VecDeque<PendingKeyChange>,
     /// Whether the transport must discard keys from a replaced TLS transcript.
@@ -558,6 +564,9 @@ impl RustlsProviderImpl {
             crypto_initial: qf_transport_crypto_stream::CryptoStream::new(),
             crypto_handshake: qf_transport_crypto_stream::CryptoStream::new(),
             crypto_application: qf_transport_crypto_stream::CryptoStream::new(),
+            pending_crypto_level: None,
+            pending_crypto_key_change: None,
+            crypto_output_overflowed: false,
             pending_key_changes: VecDeque::new(),
             reset_packet_keys: false,
             is_server,
@@ -662,11 +671,33 @@ impl RustlsProviderImpl {
     }
 
     fn flush_handshake_io(&mut self) -> Result<(), ConnectionError> {
+        if self.crypto_output_overflowed {
+            return Err(ConnectionError::CryptoBufferExceeded);
+        }
         if let Some(ready_at) = self.profile_ready_at {
             if self.clock.now() < ready_at {
                 return Ok(());
             }
             self.profile_ready_at = None;
+        }
+        if let Some(level) = self.pending_crypto_level {
+            let pending = std::mem::take(&mut self.crypto_buffer);
+            match self.queue_crypto_bytes(level, &pending) {
+                Ok(()) => {
+                    self.pending_crypto_level = None;
+                    if let Some(change) = self.pending_crypto_key_change.take() {
+                        self.queue_key_change(change)?;
+                    }
+                }
+                Err(ConnectionError::CryptoBufferExceeded) => {
+                    self.crypto_buffer = pending;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.crypto_buffer = pending;
+                    return Err(error);
+                }
+            }
         }
         // Emit handshake bytes; rustls signals key transitions via KeyChange.
         // When KeyChange is returned, the keys must be used for future handshake data,
@@ -678,7 +709,20 @@ impl RustlsProviderImpl {
             if produced {
                 let level = self.write_level;
                 let pending = std::mem::take(&mut self.crypto_buffer);
-                self.queue_crypto_bytes(level, &pending)?;
+                if pending.len() > qf_transport_crypto_stream::MAX_CRYPTO_BUFFERED_BYTES {
+                    self.crypto_output_overflowed = true;
+                    return Err(ConnectionError::CryptoBufferExceeded);
+                }
+                match self.queue_crypto_bytes(level, &pending) {
+                    Ok(()) => {}
+                    Err(ConnectionError::CryptoBufferExceeded) => {
+                        self.crypto_buffer = pending;
+                        self.pending_crypto_level = Some(level);
+                        self.pending_crypto_key_change = kc;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if let Some(kc) = kc {
                 self.queue_key_change(kc)?;
@@ -1221,6 +1265,10 @@ impl RustlsProviderImpl {
         self.crypto_initial.reset();
         self.crypto_handshake.reset();
         self.crypto_application.reset();
+        self.crypto_buffer.clear();
+        self.pending_crypto_level = None;
+        self.pending_crypto_key_change = None;
+        self.crypto_output_overflowed = false;
         self.pending_key_changes.clear();
         self.reset_packet_keys = true;
         self.next_1rtt_secrets = None;
@@ -1430,7 +1478,12 @@ impl super::QuicTlsProvider for RustlsProviderImpl {
         self.crypto_stream_mut(level).requeue_all_unacked();
     }
     fn has_pending_handshake_send(&self) -> bool {
-        self.crypto_initial.has_pending_send() || self.crypto_handshake.has_pending_send()
+        self.crypto_initial.has_pending_send()
+            || self.crypto_handshake.has_pending_send()
+            || matches!(
+                self.pending_crypto_level,
+                Some(super::Level::Initial | super::Level::Handshake)
+            )
     }
     fn handshake_send_ready_at(&self) -> Option<Instant> {
         // An elapsed deadline no longer gates anything: the next flush emits

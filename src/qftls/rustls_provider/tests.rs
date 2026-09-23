@@ -383,6 +383,89 @@ mod profile_delay_tests {
             .expect("probe retired range")
             .is_none());
     }
+
+    #[test]
+    fn rustls_output_waits_for_crypto_queue_and_retention_capacity() {
+        let mut provider = provider_with_manual_clock();
+        let limit = qf_transport_crypto_stream::MAX_CRYPTO_BUFFERED_BYTES;
+        let filler = vec![0xA5; limit];
+        provider.crypto_initial.send(&filler).expect("fill unsent CRYPTO queue");
+
+        provider.flush_handshake_io().expect("defer rustls output without losing it");
+        assert_eq!(provider.pending_crypto_level, Some(Level::Initial));
+        assert!(provider.has_pending_handshake_send());
+        let held_client_hello = provider.crypto_buffer.clone();
+        assert!(!held_client_hello.is_empty());
+        for _ in 0..3 {
+            provider.flush_handshake_io().expect("retain blocked rustls output");
+            assert_eq!(provider.crypto_buffer, held_client_hello);
+            assert_eq!(provider.pending_crypto_level, Some(Level::Initial));
+            assert_eq!(provider.bytes_sent, 0);
+        }
+
+        let (offset, sent) = provider
+            .crypto_initial
+            .next_crypto_frame(limit)
+            .expect("take filler")
+            .expect("filler available");
+        assert_eq!((offset, sent), (0, filler));
+        provider.flush_handshake_io().expect("transfer held rustls output");
+        assert_eq!(provider.pending_crypto_level, None);
+        assert_eq!(provider.crypto_initial.next_crypto_frame(1200), Ok(None));
+        provider
+            .crypto_initial
+            .ack_crypto(0, limit as u64)
+            .expect("ACK filler to release retention capacity");
+        let mut recovered = Vec::new();
+        while let Some((offset, bytes)) =
+            provider.next_crypto_frame(Level::Initial, 1200).expect("send held ClientHello")
+        {
+            assert_eq!(offset, limit as u64 + recovered.len() as u64);
+            recovered.extend_from_slice(&bytes);
+        }
+        assert_eq!(recovered, held_client_hello);
+        assert_eq!(provider.bytes_sent, recovered.len());
+    }
+
+    #[test]
+    fn blocked_server_hello_keeps_handshake_key_change_with_its_output() {
+        let mut client = provider_with_manual_clock();
+        let (_, client_hello) = client
+            .next_crypto_frame(Level::Initial, usize::MAX)
+            .expect("read ClientHello")
+            .expect("ClientHello available");
+        let environment = crate::env_utils::EnvSnapshot::capture();
+        let clock = crate::time_source::ProtocolClock::default();
+        let mut server = RustlsProviderImpl::new_with_ca_with_snapshot_and_clock(
+            true,
+            false,
+            PROTOCOL_VERSION,
+            &[],
+            None,
+            &environment,
+            &clock,
+        )
+        .expect("server provider");
+        let limit = qf_transport_crypto_stream::MAX_CRYPTO_BUFFERED_BYTES;
+        server.crypto_initial.send(&vec![0xA5; limit]).expect("fill Initial queue");
+        server.provide_quic_data(Level::Initial, &client_hello).expect("consume real ClientHello");
+        assert_eq!(server.pending_crypto_level, Some(Level::Initial));
+        assert!(server.pending_crypto_key_change.is_some());
+        let keys = parking_lot::RwLock::new(crate::transport::packet::CryptoContext::default());
+        server.poll_secrets_and_install(&keys).expect("poll blocked server keys");
+        assert!(keys.read().seal_handshake.is_none());
+
+        server
+            .crypto_initial
+            .next_crypto_frame(limit)
+            .expect("drain filler")
+            .expect("filler available");
+        server.flush_handshake_io().expect("transfer held ServerHello");
+        assert_eq!(server.pending_crypto_level, None);
+        assert!(server.pending_crypto_key_change.is_none());
+        server.poll_secrets_and_install(&keys).expect("install retained Handshake keys");
+        assert!(keys.read().seal_handshake.is_some());
+    }
 }
 
 mod ca_scope_tests {

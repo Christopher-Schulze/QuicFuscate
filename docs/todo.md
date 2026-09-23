@@ -802,8 +802,16 @@
 - Detail: `docs/todo/todo-1125-transactional-handshake-send.md`
 
 ### TODO-1126 - Bound CRYPTO retention without dropping unacknowledged bytes
-- OPEN. `CryptoStream::next_crypto_frame` evicts the oldest unacknowledged ranges after 4 MiB, making later loss/PTO retransmission impossible; its unsent queue is also unbounded. Replace eviction with bounded admission/backpressure, preserve queued bytes and offsets at capacity, and prove exact ACK-release/loss/retry behavior for the transport and QFTLS owners. TODO-1125 consumes this contract.
-- Detail: `docs/todo/todo-1126-crypto-retention-backpressure.md`
+- DONE. Each level now caps unsent and retained CRYPTO bytes at 4 MiB without evicting unacknowledged ranges; fresh bytes pause until ACK while retransmissions remain eligible. QFTLS retains blocked rustls output and its key change, with persistent typed failure for an oversized single chunk. Leaf `6/6`, default root `1,864 passed, 1 ignored`, feature root `1,869 passed, 1 ignored`, strict leaf/root Clippy and formatting pass. Receive reassembly and retransmit-index work remain TODO-1127/1128; TODO-1125 consumes this send contract.
+- Detail: `docs/todo/done/todo-1126-crypto-retention-backpressure.md`
+
+### TODO-1127 - Bound inbound CRYPTO reassembly by the unread offset
+- OPEN. `CryptoStream::recv` advances its nominal 64 KiB window from the highest received offset, so stepped out-of-order Initial/Handshake input can grow unauthenticated memory without bound; stale and overlapping ranges are not normalized. Anchor the window to `recv_off`, cap retained bytes and intervals, validate overlap byte identity, and prove reordered real TLS completion.
+- Detail: `docs/todo/todo-1127-bounded-crypto-reassembly.md`
+
+### TODO-1128 - Remove quadratic CRYPTO retransmission requeue scans
+- OPEN. `CryptoStream::requeue_all_unacked` and `requeue_crypto` call linear `VecDeque::contains` for each retained range and sort already ordered offsets. Measure realistic PTO range counts and replace the queue with one ordered deduplicating index if that improves end-to-end latency without changing retransmission priority or exact ACK/loss behavior.
+- Detail: `docs/todo/todo-1128-crypto-retransmit-index.md`
 
 ## Completed
 
