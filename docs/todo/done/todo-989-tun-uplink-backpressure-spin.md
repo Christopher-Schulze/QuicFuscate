@@ -1,7 +1,7 @@
 ---
 id: TODO-989
 title: TODO-989 — TUN uplink backpressure self-notify spin
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 

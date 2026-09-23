@@ -1,7 +1,7 @@
 ---
 id: TODO-980
 title: FEC transport feedback dead in production: callbacks lost on recovery rebuild
-status: OPEN
+status: DONE
 created: 2026-09-18
 ---
 

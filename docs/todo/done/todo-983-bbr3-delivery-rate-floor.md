@@ -1,7 +1,7 @@
 ---
 id: TODO-983
 title: BBR3 delivery-rate floor caps throughput at ~frame_bytes/ms on fast paths
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 

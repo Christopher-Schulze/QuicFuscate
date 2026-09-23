@@ -50,3 +50,17 @@ Of the 327 files, 133 are Git tracked and 194 are local, ignored task files.
   directory. Already archived TODO-720, TODO-721, TODO-722 and TODO-723 had
   `OPEN` metadata despite completed board records; their statuses and
   completed steps are reconciled without a new implementation audit.
+
+## Follow-up: 2026-09-23
+
+- Archived 19 further closed details: TODO-980 through TODO-994, TODO-1028,
+  TODO-1042, TODO-1043 and TODO-1045. TODO-980 through TODO-994 had stale
+  `OPEN` frontmatter despite completed implementation/proof in their details
+  and board; their status now reads `DONE`. The refused and skipped decisions
+  keep their original `REFUSED`/`SKIP` dispositions. This move does not
+  re-audit their implementation or close any stated follow-up.
+- Each source existed and each archive destination was absent before its
+  move. Tracked sources used `git mv`; the ignored local TODO-988 used `mv`.
+  The 19 board links now point to the archive. Local validation found 993/993
+  board links resolving and zero `DONE`/`COMPLETED`/`CLOSED` frontmatter files
+  directly under `docs/todo/`.

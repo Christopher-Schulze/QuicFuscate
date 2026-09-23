@@ -1,7 +1,7 @@
 ---
 id: TODO-987
 title: TODO-987 — Standalone client RX: per-packet recvmsg + UDP GSO cap off-by-header
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 

@@ -1,7 +1,7 @@
 ---
 id: TODO-982
 title: systemd-resolved DNS leak: tunnel link DNS lacked the `~.` routing domain
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 

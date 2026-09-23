@@ -1,7 +1,7 @@
 ---
 id: TODO-984
 title: `--cleanup-firewall` unusable after config drift and unimplemented for the server
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 

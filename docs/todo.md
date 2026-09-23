@@ -389,7 +389,7 @@
 
 ### TODO-1028 - Freeze TODO-884 advanced-family winner from existing ARM evidence
 - REFUSED. Old ARM cells are not same-API and do not freeze a family. `aead_preference="auto"` stays `None`. The opt-in owner is TODO-1044.
-- Detail: `docs/todo/todo-1028-freeze-884-arm-winner.md`
+- Detail: `docs/todo/done/todo-1028-freeze-884-arm-winner.md`
 
 ### TODO-1029 - Omega pcap/wire proof for private AEAD upgrade (TODO-885)
 - DONE. Both peers `mode=off`: initial/handshake open rustls AES-GCM, 9 standard 1-RTT below boundary, 50 private AEGIS 1-RTT above boundary, zero unopened, zero standard above boundary. Control run (client off + server stealth): 69/69 rustls-only, no private install. Coalesced GSO datagrams split by trial open in `src/bin/qf-aead-wire-proof.rs`.
@@ -446,11 +446,11 @@
 
 ### TODO-1042 - Next-gen custom AEGIS/MORUS design (gated)
 - SKIP. No unique hook. In-place NEON AESENC is in the existing update and still loses to libaegis. No new permutation.
-- Detail: `docs/todo/todo-1042-nextgen-custom-aead-design.md`
+- Detail: `docs/todo/done/todo-1042-nextgen-custom-aead-design.md`
 
 ### TODO-1043 - Next-gen custom impl and re-bench (gated)
 - SKIP. TODO-1042 did not proceed. No N-* row.
-- Detail: `docs/todo/todo-1043-nextgen-custom-aead-impl-rebench.md`
+- Detail: `docs/todo/done/todo-1043-nextgen-custom-aead-impl-rebench.md`
 
 ### TODO-1044 - Post-auth AEAD owner decision
 - DONE. Pick: opt-in S-AEGIS. Ship default stays `packet_protection_mode=standard`. `auto` does not upgrade. Production enable still waits on TODO-1029. The removal of homemade AEGIS/MORUS is TODO-1045.
@@ -458,7 +458,7 @@
 
 ### TODO-1045 - Drop homemade AEGIS/MORUS, keep rustls AES-GCM-128 and libaegis
 - DONE. Homemade AEGIS, MORUS, and `CryptoAeadPlan` are removed. `PrivateAeadFamily` has only `Aegis128L`; `force_aead` accepts only `auto`/`aegis`. `off`/`performance` pin post-auth payload to libaegis AEGIS-128L; stealth modes and `dynamic` pin AES-GCM-128. qf-crypto 104/104 at close.
-- Detail: `docs/todo/todo-1045-drop-homemade-aead-keep-libaegis.md`
+- Detail: `docs/todo/done/todo-1045-drop-homemade-aead-keep-libaegis.md`
 
 ### TODO-1046 - FEC repairs as normal QUIC packets in stealth modes
 - DONE. `stealth`, `Stealth MAX`, `dynamic`, and `manual` use `FecFraming::QuicFrame`: repairs ride a sealed DATAGRAM (`0xFE` + symbol, no UDP `0xF1 0xEC`). Those modes drop a cleartext wrapper. `off` and `performance` keep `write_packet`. A symbol from an older epoch is rejected. Repair packets can be padded to the source sealed length. qf-fec 110/110.
@@ -774,6 +774,7 @@
 
 ### TODO-1119 - Archive completed task details and repair their links
 - DONE. All 327 clearly completed active details were moved to `docs/todo/done/` with matching SHA-256 before reference repair; 133 retained Git tracking and 194 were ignored local files at archival time. Eight moved details needed exact internal link updates. All 987 board detail links and 1,094 task paths resolved at archival time. TODO-720 through TODO-723 had stale archived `OPEN` metadata, reconciled against their completed board records. Open and ambiguous details stayed in place.
+- Follow-up (2026-09-23): 19 further closed details archived, 15 stale `OPEN` metadata values corrected to `DONE`, and all 993 current board detail links resolve locally. No implementation claim was re-audited.
 - Detail: `docs/todo/done/todo-1119-archive-completed-task-details.md`
 
 ### TODO-1120 - Bind QUIC handshake transport parameters to observed connection IDs and Retry
@@ -4232,13 +4233,13 @@
 - Local proof: qftls 35/35 (new deferral regression), qf-fec 85/85, clippy/fmt clean.
 
 ### TODO-980 - FEC transport feedback dead in production: callbacks lost on recovery rebuild
-- Detail: `docs/todo/todo-980-fec-callbacks-lost-on-env-snapshot.md`
+- Detail: `docs/todo/done/todo-980-fec-callbacks-lost-on-env-snapshot.md`
 - `QuicFuscateConnection::new` calls `conn.set_environment_snapshot`, which rebuilt `self.recovery` with a fresh congestion controller and silently dropped the FEC send/loss callbacks installed at construction. `fec_cb_sent/lost` stayed 0 forever, so `observed`/`lost`/`repairs`/`switches` were all zero and FEC never left `mode=zero` even under 20% netem loss (~40% tunnel loss, Omega-verified). The VN-restart path already reinstalled them; `set_environment_snapshot` now does too.
 - Regression: `fec_callbacks_survive_environment_snapshot_replacement` fails without the fix, passes with it.
 - Local proof: lib 1725/1725, clippy/fmt clean.
 
 ### TODO-981 - Adaptive FEC: single lossy batch escalates to Fountain; Kalman freeze pins stale estimate
-- Detail: `docs/todo/todo-981-fountain-single-batch-escalation.md`
+- Detail: `docs/todo/done/todo-981-fountain-single-batch-escalation.md`
 - On Omega the transition test ended `mode=fountain` on a recovered link (0% loss, clean_streak=231, estimate=0): a single lossy batch latched `fountain_ready` via cumulative `total_seen` and flooded the recent window in one report; a starved Kalman `q` floor kept the stale estimate ready to re-emerge. `fountain_ready` now needs 3 consecutive qualifying reports plus a saturated recent window; per-report injection is capped at `burst_capacity/8` slots with an unbiased fractional carry; Kalman `q` recovers via a sustained-innovation boost.
 - Second defect layer: the Zero downshift was gated by last-10-average + 4-sample stability while datagram-dominated links emit feedback at ~0.3-1/s, so de-escalation outlived the bounded recovery (~36s). `ModeManager::update_with_clean_proof` now lets the transport's clean-link proof (32+ consecutive ACKs) select Zero immediately; all non-Zero hysteresis is unchanged.
 - Regressions: 4 estimator tests + 3 controller tests (incl. `test_clean_proof_deescalates_on_sparse_feedback`, fails without the bypass) + the real-path trajectory test (`test_transport_feedback_mode_trajectory_recovers`, incl. settle-gap burst).
@@ -4246,12 +4247,12 @@
 - Omega proof on `4433a48`: transition E2E **PASS** — 0%/2%/0% tunnel loss across clean/lossy/recovered, `streaming -> zero` committed mid-recovery, no fountain, no latch.
 
 ### TODO-982 - systemd-resolved DNS leak: tunnel link DNS lacked the `~.` routing domain
-- Detail: `docs/todo/todo-982-systemd-resolved-dns-leak.md`
+- Detail: `docs/todo/done/todo-982-systemd-resolved-dns-leak.md`
 - Linux `set_dns` ran `resolvectl dns <tun> <servers>` but never set a routing domain, so systemd-resolved kept the physical link's DHCP DNS eligible for unmatched names — queries leaked to the LAN/ISP resolver while the tunnel was up, and the client DoH proxy never saw them. `set_dns` now always emits `resolvectl domain <tun> <search...> "~."` (catch-all route-only domain); `revert` on restore covers it. Legacy resolv.conf, macOS, and Windows paths were never affected.
 - Regression: `systemd_domain_args_always_route_all_lookups_through_the_tunnel` (Linux-only, runs on Omega/CI).
 
 ### TODO-983 - BBR3 delivery-rate floor capped throughput at ~23 Mbit/s on sub-ms-RTT paths
-- Detail: `docs/todo/todo-983-bbr3-delivery-rate-floor.md`
+- Detail: `docs/todo/done/todo-983-bbr3-delivery-rate-floor.md`
 - `bbr3_on_ack` sampled `acked_bytes / max(elapsed_since_last_ack, 1ms)` per ACK frame; at the default 2-packet ACK threshold that pinned `btlbw` (and thus `pacing_rate`) at ~2.9 MB/s whenever ACKs arrived faster than 1 kHz — a stable self-referential fixed point verified live on Omega (948k qtun0 TX drops at 98% loss under a 1.67 Gbit/s flood; `bytes_in_flight=0`, `send_zero_results`=68%). Bytes now accumulate into a window until it spans >=1 ms (`DELIVERY_RATE_WINDOW`), so the estimate measures a real interval; anchor/accumulator reset on `NewAddress`.
 - Regressions: `delivery_rate_not_capped_by_ack_frame_spacing` (fails on old estimator), `delivery_window_accumulates_across_dense_acks`.
 - Local proof: qf-transport-cc 96/96, fmt/clippy clean.
@@ -4259,70 +4260,70 @@
 
 ### TODO-984 - `--cleanup-firewall` unusable after config drift and unimplemented for the server
 
-- Detail: `docs/todo/todo-984-cleanup-firewall-record-driven.md`
+- Detail: `docs/todo/done/todo-984-cleanup-firewall-record-driven.md`
 - DONE. `Commands::Server` never forwarded the flag, `--cert/--key` were unconditionally required, and `cleanup_stale_routing_records` rebuilt the `RoutingManager` from the *current* `ServerConfig` — so any post-crash drift (renamed/vanished WAN interface, different backend) hit the exact-identity check in `validate_persisted_ownership` and refused forever, leaving stale nftables state unremovable.
 - The maintenance path is now record-driven: `cleanup_persisted_routing_records()` rebuilds each manager from the persisted identity (`from_persisted_state` / `from_persisted_firewall_owner` for owner-record orphans), runs before cert loading and privilege drop, and exits without a listener. `cleanup_stale_explicit` additionally tears down firewall-only orphans whose resource is still present — verified via the durable `owner_generation` marker, not guessed. Active-owner, cross-TUN, and foreign-resource rejections are unchanged, and implicit startup cleanup keeps the strict current-config identity check.
 - Omega-verified on the release binary: drift case (record `wan_interface=eth1` vs autodetected `enp0s6`) cleaned after `kill -9` + namespace deletion; live-resource case removed `inet quicfuscate_rt` plus both durable records; cleanup against a running server refused with exit 1; graceful shutdown unaffected.
 
 ### TODO-985 - FecObserver RwLock write storm starves the telemetry tick (82% server CPU)
 
-- Detail: `docs/todo/todo-985-fec-observer-lock-free.md`
+- Detail: `docs/todo/done/todo-985-fec-observer-lock-free.md`
 - DONE. `on_ack` took `state.write()` per emitted ACK frame; at multi-Gbit/s rates the write storm starved the streaming-interval tick's `read()` — symbolized perf showed `compute_streaming_interval` at 82% server CPU plus 7.7% aarch64 lock atomics. `FecObserverState` is now all-atomics (`on_ack` is the single writer; EWMA races are benign), RwLock removed. Commit `8a690a7`.
 - Omega verification (scenario g, cpu-clock profile, PASS + flamegraph): **67.9 Mbit/s** vs 46.3 Mbit/s right after the BBR3 fix on the same single-core testbed — freed observer CPU feeds the dataplane.
 
 ### TODO-986 - Standalone client TX: per-packet sendmsg instead of UDP_SEGMENT batching
 
-- Detail: `docs/todo/todo-986-client-tx-gso.md`
+- Detail: `docs/todo/done/todo-986-client-tx-gso.md`
 - DONE. `flush_connected_outgoing` issued one `sendmsg` per QUIC datagram through tokio's `async_io` wrapper while the server path already coalesced via `UDP_SEGMENT`. The Linux client flush now stages the burst into one flat buffer + span table and emits contiguous same-length runs through `send_udp_segment` (up to 64 datagrams/64 KiB per syscall); singletons and post-`WouldBlock` tails keep the async per-packet path. Capability probed once process-wide.
 - Omega-verified: strace shows `cmsg_type=0x67` (UDP_SEGMENT) with `seg_size=1457` and `iov_len=4371` — three wire datagrams per syscall — on every send during scenario g; three consecutive PASS runs at 60.7-70.1 Mbit/s (single-core ceiling unchanged; ~2/3 of TX syscalls removed).
 - Follow-up fix (TODO-987): the run planner's byte cap was `u16::MAX`, but the kernel encodes payload+8 into the UDP length field — runs in `(65527, 65535]` failed with `EMSGSIZE`. All three planners now share `qf_transport_udp::UDP_GSO_MAX_PAYLOAD` (65527).
 
 ### TODO-987 - Standalone client RX: per-packet recvmsg + UDP GSO cap off-by-header
 
-- Detail: `docs/todo/todo-987-client-rx-gro.md`
+- Detail: `docs/todo/done/todo-987-client-rx-gro.md`
 - DONE. Client recv arm now uses `recv_connected_segments` (`recvmsg` + `UDP_GRO` ancillary parse on Linux, per-datagram fallback elsewhere); GRO super-buffers are split into `gso_size`-aligned datagrams before `conn.recv`, and H3/MASQUE drain + TX flush run once per batch. `UDP_GRO` is enabled only after handshake/assignment so the pre-loop plain-`recvmsg` paths keep single-datagram semantics.
 - Two verification bugs fixed: `gso_size==0` (no cmsg) must mean one whole-buffer datagram, not 1-byte slices; and every GSO run planner now caps at 65527 payload bytes (kernel UDP length field includes the 8-byte header) — the live `EMSGSIZE` seen on Omega is gone.
 - Omega-verified: scenario g PASS (44.5 Mbit/s single-core-contended), zero EMSGSIZE and zero len=1 parse flood in strace/logs; 4/4 `gso_plan_tests` green on aarch64.
 
 ### TODO-988 - Zero-copy FEC delivery + GSO segment-MTU gate
 
-- Detail: `docs/todo/todo-988-zero-copy-fec-delivery.md`
+- Detail: `docs/todo/done/todo-988-zero-copy-fec-delivery.md`
 - DONE. Every received datagram paid a pool-block checkout+copy+free; framed systematic FEC payloads were materialized into pooled `FecPacket`s before `conn.recv` even though QUIC decrypts in place. New `WireDelivery::{Borrowed{seq,start,len}, Owned}` in `qf-fec` reports systematic payloads as ranges into the original datagram; `QuicFuscateConnection::recv_mut`/`recv_on_path_mut` deliver those slices in place and send raw datagrams to `conn.recv` with no copy at all. `recv_pooled_block_on_path` drains borrowed ranges off the block too (freed post-drain). All production callers converted: standalone client (incl. GRO-split loop), embedded io_driver (incl. io_uring flat-RX + completions), server ingress batch, multi-hop inner-ingress, e2e bins. Owned `receive`/`receive_source_only` wrappers preserved for immutable callers/tests.
 - Bug found via strace on Omega: recurring startup `EMSGSIZE` was a **segment size** above the route's UDP payload ceiling (`gso_size=1500` on a 1500-MTU link → kernel cap 1472), not the super-buffer byte cap from TODO-987. New `udp_gso_segment_mtu` probes `IP_MTU`/`IPV6_MTU`; `plan_gso_run` takes `max_seg` and skips runs that cannot fit one wire datagram; `UDP_GSO_MAX_PAYLOAD` tightened to 65507 (IPv4 total-length bound).
 - Omega-verified: scenario g PASS at 71.4 Mbit/s, **zero EMSGSIZE** in a full-tree strace (14,619 GSO super-buffers), 29/29 receiver + 5/5 gso_plan + 42/42 connection tests green.
 
 ### TODO-989 - TUN uplink backpressure self-notify spin
 
-- Detail: `docs/todo/todo-989-tun-uplink-backpressure-spin.md`
+- Detail: `docs/todo/done/todo-989-tun-uplink-backpressure-spin.md`
 - DONE. `drain_client_tun_uplink` returned `Ok(true)` on QUIC-DATAGRAM-queue backpressure → every caller ran `tun_notify.notify_one()` → immediate re-drain → `Backpressure` → notify — a busy wakeup loop while the send queue was full (each cycle also flushed outgoing). Backpressure now returns `Ok(false)`; retry is paced by the 5ms active housekeeping tick (`tun_backpressure_pending`), inbound-driven drains, and reader notifies. The drain-limit `Ok(true)` (more channel work) is preserved for full-speed bursts.
 - Omega A/B (`QF_PROFILE_IPERF_UDP_RATE=1G` flood): 29.7 → ~31-33 Mbit/s; residual wall is single-core contention (iperf generator ≈40% CPU, quicfuscate ≈25-30%, no hotspot) — multi-core hardware needed for a meaningful flood ceiling.
 
 ### TODO-990 - Tokio worker count defaults to available_parallelism
 
-- Detail: `docs/todo/todo-990-worker-threads-available-parallelism.md`
+- Detail: `docs/todo/done/todo-990-worker-threads-available-parallelism.md`
 - DONE. `optimization.num_worker_threads = 0` (unset) fell back to a hardcoded `worker_threads(8)` — seven idle workers on single-core VMs. Now `worker_threads()` is only called when configured >0; unset uses Tokio's own default (`available_parallelism`). Omega A/B: auto(1) ≈ 57-58 Mbit/s vs forced 8 ≈ 56 Mbit/s — same throughput, 7 fewer workers.
 
 ### TODO-991 - MASQUE datagram send without staged concatenation copy
 
-- Detail: `docs/todo/todo-991-masque-dgram-two-part-send.md`
+- Detail: `docs/todo/done/todo-991-masque-dgram-two-part-send.md`
 - DONE. `send_masque_datagram` copied each packet into `masque_send_scratch` to prepend the flow-id varint, then `dgram_send` copied again into the queue entry. New `dgram_send_parts(prefix, payload)` writes both slices into the queue entry directly (freelist + `zero_copy_dgram` paths); the varint is encoded on the stack and `masque_send_scratch` removed. Covers uplink, downlink and relay sends.
 - Verified: 47/47 MASQUE tests green, both dgram feature variants compile, Omega scenario g PASS.
 
 ### TODO-992 - MASQUE receive dispatches from the owned queue entry
 
-- Detail: `docs/todo/todo-992-masque-recv-owned-entry.md`
+- Detail: `docs/todo/done/todo-992-masque-recv-owned-entry.md`
 - DONE. Inbound MASQUE datagrams were copied out of the QUIC recv queue into a permanent `masque_recv_buffer` scratch solely for `MASQUE_RECV_HEADROOM` normalization tail space. `dgram_recv_take`/`dgram_recv_return` now hand the owned queue entry (`Vec` freelist / pooled `DatagramBuffer`) to the H3 layer; flow-id decode, in-place normalization and dispatch run inside the entry's own allocation — zero hot-path copies and no permanent scratch. Oversized entries are dropped rather than truncated-dispatched.
 - Verified: 49/49 masque tests + 2 new recv-take tests green on default and `zero_copy_dgram`; Omega scenario g PASS (52.3 Mbit/s, 0% loss, no EMSGSIZE/panic).
 
 ### TODO-993 - Per-record allocations in the production logger
 
-- Detail: `docs/todo/todo-993-log-record-allocations.md`
+- Detail: `docs/todo/done/todo-993-log-record-allocations.md`
 - DONE. `ProductionLogger::log` allocated 3 `String`s per enabled record (target, message, file). `OwnedRecord` now uses `Cow<'static, str>` fed by `record.module_path_static()`/`file_static()` — standard `log!` sites borrow, only the formatted message still allocates. 3 allocs → 1 per record; custom `target:` strings keep exact semantics via the owned fallback.
 - Verified: qf-logging 22/22 tests, clippy/fmt clean.
 
 ### TODO-994 - GSO EMSGSIZE marks the peer path permanently
 
-- Detail: `docs/todo/todo-994-gso-emsgsize-path-block.md`
+- Detail: `docs/todo/done/todo-994-gso-emsgsize-path-block.md`
 - DONE. Server GSO emission had no memory across flushes — on a route with a payload ceiling below the segment cap (IPv6 MTU 1280 vs 1472 fallback), every flush paid a doomed `sendmsg`+EMSGSIZE for the connection's life. New `udp_gso_path_blocked` flag on `QuicFuscateConnection` (path MTU is a stable route property) gates `plan_gso_run` per peer in both `live_auth` and TUN fanout; set on EMSGSIZE only, transient errors unaffected. Failed runs still fall through to per-packet tail — no drops.
 - Verified: `cargo check` macOS + Omega Linux release check clean.
 

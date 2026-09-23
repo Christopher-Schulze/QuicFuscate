@@ -1,7 +1,7 @@
 ---
 id: TODO-992
 title: TODO-992 — MASQUE receive: dispatch directly from the owned queue entry
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 

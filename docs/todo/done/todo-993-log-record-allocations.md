@@ -1,7 +1,7 @@
 ---
 id: TODO-993
 title: TODO-993 — Per-record allocations in the production logger
-status: OPEN
+status: DONE
 created: 2026-09-19
 ---
 
