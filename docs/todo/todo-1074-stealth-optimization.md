@@ -37,16 +37,23 @@ buys. This cluster builds the cost/effect table and cuts waste.
 
 - Omega pcaps + `tun-e2e-traffic-analysis-netns.sh` (byte-exact payload
   analysis) + the maybenot simulator harness.
-- Cost/effect table per defense: bytes/s, CPU share, detection surface claim
-  with its evidence class (measured / plausible / speculative).
+- Freeze the trace corpus, train/test split, classifier, run count, and
+  network impairment before evaluating any defense. Cost/effect cells record
+  bytes/s, CPU per application byte, application p99 latency, and classifier
+  accuracy/false-positive rate with spread. Mark an untested detection claim
+  as unproven, not as a benefit.
 
 ## Acceptance
 
-- [ ] Per-defense cost/effect table committed.
+- [ ] Per-defense cost/effect table names the exact baseline/candidate
+      configs, trace corpus, commit, packet parser, and at least five paired
+      runs. Preserve the single wire-budget ledger and persona invariants.
 - [ ] Maybenot overhead/accuracy measured on real traffic, not just the smoke
       trace.
-- [ ] At least one quantified waste reduction landed, or per-item verdicts
-      explaining why the current spend is optimal.
+- [ ] At least one quantified waste reduction lands without worse detection
+      results outside the predeclared test variance, or each candidate gets a
+      measured no-change/reject verdict. A selected implementation gets its
+      own linked task and wire proof.
 
 ## Risks
 

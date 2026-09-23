@@ -1,19 +1,54 @@
 ---
 id: TODO-885
-title: Implement authenticated private AEAD negotiation and promote the proven default
+title: Complete opt-in authenticated private AEAD and prove promotion gates
 severity: CRITICAL
 phase: S
 priority: P0
 status: IN_PROGRESS
 created: 2026-08-11
-depends_on: [TODO-883, TODO-884, TODO-681]
+depends_on: [TODO-883]
 ---
 
-# TODO-885: Implement Authenticated Private AEAD Negotiation and Promote the Proven Default
+# TODO-885: Complete Opt-In Authenticated Private AEAD and Prove Promotion Gates
+
+## Current execution gate (2026-09-23)
+
+`config/quicfuscate.toml` and `CryptoConfig::default()` in
+`crates/qf-crypto/src/lib.rs` ship `packet_protection_mode = "standard"` and
+`aead_preference = "auto"`; `private_family()` is `None` for this pair. The
+implemented private path is opt-in with `packet_protection_mode = "auto"` and
+an explicit `aegis` preference. TODO-1044 selected S-AEGIS for opt-in use;
+it did not approve an automatic product default. The older default-promotion
+sentences below are historical design, not authorization to change the ship
+default. Keep the standard default until TODO-883, TODO-884, and TODO-681
+prove their stated security, interoperability, and native performance gates
+and a separate measured promotion decision is recorded. TODO-884 and TODO-681
+are default-promotion evidence owners, not prerequisites to continue opt-in
+protocol verification; TODO-883's corrected standard-wire baseline is a
+closure dependency, not a prohibition on parallel opt-in tests. The remaining
+work here is to reconcile the implemented state machine and live wire proof with
+the full verification matrix, close any real defect found, and retain exact
+native x86_64, side-channel, lifecycle, and rollback evidence. If a required
+platform or prerequisite is unavailable, record that gate as BLOCKED; do not
+claim completion from the existing ARM64 opt-in capture.
+
+One concrete implementation remainder is `src/engine/engine.rs::new`: it
+unconditionally rejects the valid `advanced-required` configuration with a
+message naming TODO-883/884/681, although
+`src/qftls/private_protocol.rs::fallback_or_fail` already has terminal
+fail-closed semantics. After the standard-wire boundary is repaired, remove
+that unconditional constructor gate for a validated explicit AEGIS choice,
+preserve `standard` as the shipped default, and prove a real authenticated
+advanced-required success plus unsupported-peer, missing-family, timeout,
+downgrade, and malformed-control terminal failures with no standard fallback.
+Replace the current `advanced_required_private_packet_policy_fails_closed_until_promotion_gates`
+test with these failable runtime outcomes; do not merely invert its assertion.
+Default promotion remains TODO-884's separate decision and cannot be used to
+block an explicitly requested fail-closed mode indefinitely.
 
 ## Objective
 
-Make the single TODO-884 winner the automatic post-authentication packet AEAD between updated QuicFuscate peers while preserving a standards-only QUIC/TLS handshake, passive wire shape, unauthenticated probe behavior, explicit standard fallback, and a fail-closed advanced-required mode.
+Complete the opt-in authenticated post-handshake private packet AEAD between updated QuicFuscate peers while preserving a standards-only QUIC/TLS handshake, passive wire shape, unauthenticated probe behavior, the shipped standard default, and a fail-closed advanced-required mode. Any later default promotion requires the independent TODO-883/884/681 gates and a recorded product decision.
 
 The protocol must be private, versioned, authenticated, downgrade-resistant, independently keyed, and easy to audit. It must not pretend that AEGIS or MORUS is a registered TLS or QUIC cipher suite.
 
@@ -27,7 +62,7 @@ The protocol must be private, versioned, authenticated, downgrade-resistant, ind
 | `auto` | Standard handshake and initial 1-RTT, then authenticated private upgrade when both peers support the frozen winner; otherwise remain standard |
 | `advanced-required` | Standard handshake and authentication, then require the private upgrade; close generically if negotiation or proof fails |
 
-`auto` becomes the product default. This makes the TODO-884 winner the effective QuicFuscate-to-QuicFuscate data-plane default after authentication while keeping ordinary standard QUIC as the universal fallback and rollback path.
+The shipped product default remains `standard`; `auto` with explicit `aegis` is opt-in. A later default promotion requires the measured and documented gates above. Ordinary standard QUIC remains the fallback and rollback path before private activation.
 
 ### Standards Boundary
 
@@ -141,7 +176,7 @@ Numeric message and algorithm identifiers must be centrally owned and collision-
 
 ## Implementation Plan
 
-1. Freeze the TODO-884 decision record, identifier, provider policy, parameter sizes, hardware fallback, and mandatory gates.
+1. Reconcile the already selected opt-in AEGIS identifier, provider policy, parameter sizes, hardware fallback, and current code against the authenticated protocol contract. Keep any default-promotion choice with TODO-884.
 2. Read the complete QFTLS exporter, QKey auth, H3/MASQUE control, packet-key installer, key-update, packet open/seal, FEC, migration, reconnect, telemetry, and config signatures.
 3. Write the private protocol state machine and field contract into the existing canonical documentation before wire identifiers are implemented.
 4. Add typed negotiation messages, strict bounded parsing, transcript hashing, and negative fixtures.
@@ -156,11 +191,10 @@ Numeric message and algorithm identifiers must be centrally owned and collision-
 
 ## Acceptance Criteria
 
-- TODO-883 standard-path truth and TODO-884 winner evidence are complete.
-- TODO-681 has no promotion blocker for the selected implementation.
+- TODO-883's corrected standard-wire baseline is complete before this protocol is closed; TODO-884/681 remain separate default-promotion gates.
 - Standard mode remains fully functional and interoperable.
 - Initial, Handshake, unauthenticated, and pre-auth 1-RTT packets always use standard rustls protection.
-- `auto` upgrades updated authenticated peers to exactly the TODO-884 winner.
+- Opt-in `auto` with explicit `aegis` upgrades authenticated peers to the selected family; the shipped default remains `standard` until a separately approved promotion.
 - Unsupported peers remain standard in `auto` without visible capability advertising.
 - `advanced-required` fails closed on any mismatch or failed proof.
 - Negotiation is versioned, bounded, replay-resistant, cross-connection-resistant, downgrade-resistant, and transcript-bound.

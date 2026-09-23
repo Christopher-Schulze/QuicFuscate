@@ -6,7 +6,7 @@ phase: S
 priority: P1
 status: OPEN
 created: 2026-09-23
-depends_on: [TODO-1075, TODO-1080, TODO-1081, TODO-1083, TODO-1092, TODO-1093, TODO-1094, TODO-1095]
+depends_on: [TODO-1075, TODO-1080, TODO-1081, TODO-1083, TODO-1092, TODO-1093, TODO-1094, TODO-1095, TODO-1107]
 ---
 
 # TODO-1096: Unified Reality and shared-front entry

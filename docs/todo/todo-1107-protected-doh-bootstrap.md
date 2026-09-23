@@ -6,7 +6,7 @@ phase: S
 priority: P1
 status: OPEN
 created: 2026-09-23
-depends_on: [TODO-1058, TODO-1096]
+depends_on: [TODO-1058, TODO-1075]
 ---
 
 # TODO-1107: Protected DoH endpoint bootstrap
@@ -36,6 +36,10 @@ exception for an optional feature.
 The HTTPS endpoint's hostname remains the certificate/SNI identity even
 when its socket address is pinned. The current pre-pin design solves local
 proxy recursion but does not define a protected bootstrap transport.
+TODO-1075 establishes the typed entry identity. This bounded bootstrap
+contract precedes TODO-1081's ECH service selection and TODO-1096's common
+runtime rollout; waiting for TODO-1096 would leave its mandatory pre-dial
+discovery without an implemented protected path.
 
 ## Target contract
 

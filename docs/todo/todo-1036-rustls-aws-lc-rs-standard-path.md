@@ -33,7 +33,9 @@ Legal speed on the stealth default is a rustls backend swap, not a new AES. Curr
 
 ## Notes
 
-Do not start until explicitly requested. Disk check before any extra native build. This task must not wait for next-gen custom work.
+The operator has authorized work through the open task queue. This native
+x86_64 measurement still requires a real host and the repository disk/build
+gate; absence of that host is an explicit blocker, not an ARM substitute.
 
 ## Result (2026-09-21)
 
@@ -59,9 +61,16 @@ ARM does not decide VAES. aws-lc can still win on x86_64 because that ISA issues
 Rules:
 
 - Same API as TODO-1038. Owners R-RING and R-LC only. No AEGIS, no first-party AES.
-- Sizes 1200 and 1400 bytes. P1 median. Record host, CPU flags (`vaes`, `avx512f`), rustc, and aws-lc-rs version.
+- Sizes 1200 and 1400 bytes. P1 median and spread over at least five paired
+  same-host runs per provider. Record host, CPU flags (`vaes`, `avx512f`),
+  rustc, lockfile provider versions, exact features, and revision.
 - Feature stays `rustls-aws-lc`. Default features stay ring for the build under test and for the product.
-- Switch the rustls default only if R-LC is strictly faster than R-RING at 1400 B on that host and `cargo test` with the feature still installs rustls `PacketKey` for handshake and 1-RTT.
+- Consider a default switch only if R-LC improves the 1400 B packet cell by
+  at least 10% on the target x86_64 host, does not regress 1200 B or the
+  supported ARM deployment path beyond measurement noise, and focused QUIC
+  handshake/1-RTT tests pass with that provider. If the benefit is x86-only,
+  retain the portable ring default and document an explicit x86 package or
+  feature policy before adding platform-dependent provider selection.
 - If R-LC is equal or slower, close this section as "keep ring" and set status back to DONE.
 - Disk check before the native aws-lc cmake build. Do not run this on the Mac ARM laptop as a substitute for x86.
 

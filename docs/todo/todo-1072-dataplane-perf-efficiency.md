@@ -14,15 +14,16 @@ depends_on: [TODO-1071]
 ## Why
 
 Efficiency is the product: throughput per CPU cycle and per wire byte. The
-`## Active` section already lists dozens of verified micro-costs (TODO-913 to
-TODO-964: per-datagram allocs, Arc clones, lock re-acquisition, copy paths,
-syscall granularity). They were identified but never executed as a series.
-This cluster works them in measurement-priority order.
+historical TODO-913..TODO-964 series has already landed except TODO-927's
+native x86_64 io_uring decision. Replaying that series would duplicate closed
+work. TODO-1071 must first establish a trustworthy current baseline; this
+cluster then owns only newly measured dataplane bottlenecks.
 
 ## Scope
 
-- Absorb the open Active micro-items into an ordered work list, ranked by
-  measured cost share from TODO-1071 (not by guess).
+- Inventory the remaining dataplane costs from TODO-1071 and current source;
+  exclude archived work and preserve TODO-927 as the io_uring decision owner.
+  Rank candidates by measured cost share and plausible net benefit.
 - Allocation elimination: per-datagram `Vec`/`String`/`Arc::clone` removals,
   flat staging buffers, pooled packet handles.
 - Syscall/batching: `sendmmsg`/GSO/GRO coverage, io_uring paths, drain caps.
@@ -41,13 +42,19 @@ This cluster works them in measurement-priority order.
 - Omega release builds + criterion benches + targeted `perf`-style counters
   where available (single-core is fine for relative before/after).
 - macOS benches allowed for iteration speed; only Omega numbers close an item.
-- Each micro-item lands as its own commit with its measurement delta.
+- Give each independently verifiable new fix its own task detail and commit;
+  this cluster owns the ranking and aggregate verdict, not duplicate fixes.
 
 ## Acceptance
 
-- [ ] Ordered work list committed to this file's Sub-Tasks with measured cost
-      share next to each item.
-- [ ] Each completed item has a before/after number in its todo.md entry.
+- [ ] Current TODO-1071 baseline, profiler samples, and source owner map
+      produce a ranked list of remaining bottlenecks, with exact measurement
+      cells and a named owner for each; closed TODO-913..TODO-964 items are
+      listed only as historical baseline changes.
+- [ ] Each new fix has a separate linked task with the same-host before/after
+      delivered throughput, CPU per delivered packet, p99 latency, wire bytes,
+      and loss where applicable; include repeated-run spread and the unchanged
+      correctness/security gates.
 - [ ] Net dataplane improvement vs the TODO-1071 baseline: reported honestly,
       including items that measured negative and were reverted.
 
@@ -58,10 +65,15 @@ This cluster works them in measurement-priority order.
 
 ## Rollback
 
-Each optimization is an independent commit; a negative measurement reverts
-that commit only, with the reason recorded in the item's entry.
+Each new optimization has its own task and commit. A negative measurement
+keeps the measured baseline and records the rejected change in that task.
 
-## Sub-Tasks (ordered, to be populated from TODO-1071 data)
+## Sub-Tasks
 
-- [ ] Ingest Active items TODO-913..TODO-964 into this list with cost rank.
-- [ ] Work top-down; close each Active item's entry when its fix lands here.
+- [ ] Confirm TODO-1071's current measurement gates and reconcile the
+      TODO-913..TODO-964 archive against any still-open owner such as TODO-927.
+- [ ] Profile the production dataplane on the target host and record a ranked
+      candidate table with source path, call site, workload, cost share,
+      expected effect, proof gate, and new task ID for every selected fix.
+- [ ] Execute the selected linked tasks in measured-value order; update the
+      aggregate same-host result only after each independent gate passes.

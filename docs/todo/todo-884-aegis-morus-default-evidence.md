@@ -1,15 +1,62 @@
 ---
 id: TODO-884
-title: Produce decision-grade AEGIS versus MORUS default evidence
+title: Decide private packet-protection default from current provider evidence
 severity: CRITICAL
 phase: S
 priority: P0
 status: BLOCKED
 created: 2026-08-11
-depends_on: [TODO-883]
+depends_on: [TODO-883, TODO-681]
 ---
 
-# TODO-884: Produce Decision-Grade AEGIS Versus MORUS Default Evidence
+# TODO-884: Decide the Private Packet-Protection Default from Current Provider Evidence
+
+## Current execution gate (2026-09-23)
+
+The AEGIS-versus-MORUS bakeoff and custom-backend paths below are historical.
+Current `crates/qf-crypto/src/lib.rs` exposes only the libaegis AEGIS-128L
+private family; the former MORUS wire identifier is rejected. `ring` is the
+standard packet provider, and `config/quicfuscate.toml` ships
+`packet_protection_mode = "standard"`. TODO-1044 selected opt-in S-AEGIS,
+not a new automatic default. Do not resurrect MORUS or the retired custom
+AEGIS SIMD implementations simply to repeat the original two-family contest.
+
+The live decision is whether the **current opt-in libaegis provider** merits
+automatic promotion over the standard rustls/ring path. First complete
+TODO-1095 and TODO-883's correct standard-wire/native baseline and TODO-681's
+current local-provider audit. Pin libaegis source/version, independent vectors,
+license, build provenance, portability, timing/side-channel posture, key and
+nonce ownership, and native negative-path behavior. Compare the same packet
+API and end-to-end VPN workload on each supported Tier-1 architecture with
+predeclared repeat counts, confidence intervals, CPU/latency/goodput and
+rollback thresholds; include authenticated switch and standard fallback.
+Reuse the 10% cross-platform gain and maximum 5% platform-regression rule
+below only where both paths and measurements are comparable. If any mandatory
+security, correctness, native, or reproducibility gate fails or remains
+unavailable, the recorded verdict is **keep standard default** with opt-in
+AEGIS retained only where its own gates allow it. Record a new candidate
+assessment as a separate task if genuinely warranted; this task cannot infer
+universal superiority from retired MORUS benchmark rows. The original
+candidate table and measurements below remain historical evidence.
+
+### Current acceptance
+
+- At one recorded source revision, TODO-1095/883's corrected standard-wire
+  proof and TODO-681's active-provider audit are complete; exact native target
+  and compiler versions, packet API, workload, sample counts, confidence
+  intervals, and raw artifacts are retained for each requested cell.
+- LibAegis passes independent vectors, tamper/replay/nonce-boundary and
+  zeroization-owner checks, supported native target tests, timing review, and
+  dependency/license/reproducibility gates with no open Critical/High
+  selected-path finding.
+- The same-path cross-platform VPN comparison meets the predeclared >=10%
+  aggregate gain, <=5% per-platform regression, and standard-path rollback
+  gates before any automatic promotion. Missing cells remain BLOCKED, not
+  inferred from ARM64 primitive or packet captures.
+- One decision record names the current provider, effective default,
+  limitations, rejected-alternative rationale, rollback trigger, and the
+  exact TODO-885 config/runtime propagation. If the gates are unmet, the
+  decision explicitly keeps `standard` and closes no promotion claim.
 
 ## Objective
 
@@ -209,8 +256,8 @@ Cross-compilation proves compilation only. It never substitutes for native corre
 ## Primary Files and Owners
 
 - `crates/qf-crypto/src/lib.rs`
-- `crates/qf-crypto/src/aegis.rs`
-- `crates/qf-crypto/src/morus.rs`
+- `crates/qf-crypto/src/libaegis_aead.rs` (current private packet owner)
+- `crates/qf-crypto/src/ring_aead.rs` (current standard comparator)
 - `crates/qf-crypto/src/aead.rs`
 - `crates/qf-crypto/src/tests.rs`
 - `crates/qf-cpu/src/planner.rs`

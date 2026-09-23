@@ -12,17 +12,41 @@ depends_on: []
 # TODO-901: Server RX Batching Drain and Sharding
 
 ## Objective
-Shard server data path from single Tokio task (`runtime_loop.rs:155-523` all clients + TUN + admin serial) to N shards via `SO_REUSEPORT` + per-shard `recvmmsg`/`io_uring` RX with full drain.
+Close the remaining native performance gate for the already implemented server
+RX batching and `SO_REUSEPORT` sharding. Do not add an io_uring RX variant or
+change shard topology without measured evidence that the current path is the
+bottleneck.
 
 ## Verified Evidence
-- `src/implementations/server/runtime_loop.rs:155-523` single task.
-- `src/dns_signals.rs:1016-1033` single `recvmsg` per wakeup, no drain.
-- `crates/qf-transport-udp/src/fastpath.rs:30` `MAX_BATCH_SIZE=64` already exists but not used on server RX.
+- `src/implementations/server/runtime_impl/runtime_loop.rs` owns the
+  coordinator loop; `src/implementations/server/sharding.rs::run_shard_worker`
+  owns per-shard receive and bounded message draining.
+- `src/implementations/server/dns_signals.rs::recv_datagram_batch` waits for
+  the first datagram, then uses `recv_batch_gro`/`recvmmsg` on Linux for the
+  rest of a bounded burst. Server RX does not use io_uring.
+- `src/implementations/server/runtime_impl.rs::resolve_rx_shards` selects up
+  to four Linux shards by default; the existing Omega N=1/N=4 live evidence
+  below proves functionality, not multicore scaling.
 
 ## Acceptance
-- N shards per client hash, each `recvmmsg` drains until `EAGAIN`.
-- Ceiling linear scaling (150k -> 1M pps with 4 shards) via bench `bench-linux-send-path-decision.sh`.
-- `cargo test` server tests green.
+- On a named multicore Linux host, record commit, kernel, CPU topology, NIC,
+  IRQ/RSS and affinity policy, offered load, packet sizes, concurrent client
+  count, shard count, and the observed per-shard distribution. Compare N=1,
+  N=2, and N=4 on the same server RX/TUN workload with at least five trials
+  each. Report median and spread of delivered application pps, ingress/drop
+  counters, CPU per delivered packet, p99 latency, and forwarding-channel
+  drops. Verify the actual socket/shard count and preserve identical security
+  and QUIC migration behavior under load.
+- Freeze the workload and the regression tolerance before the runs. Accept
+  N>1 as a default only where measured delivered pps or CPU efficiency
+  improves without a material loss/latency regression. A claimed numeric
+  speedup requires a paired N=1 baseline and repeated-run spread. If it does
+  not improve, select the measured best shard count for that environment and
+  open a separate source-grounded bottleneck task; do not invent a universal
+  1M pps or 3x threshold.
+- Relevant server tests and Linux N=1/N=4 live ingress, migration, teardown,
+  and default-deny gates pass at the reviewed revision. A send-only or
+  `udpfast` microbenchmark is not server RX evidence.
 
 ## Out of Scope
 - No QUIC migration yet.
@@ -212,11 +236,10 @@ Deviations from the earlier sketch, all deliberate:
   missed the `runtime_generation=N` field added in TODO-889 (fails
   identically at N=1 — repaired, not sharding-related);
   `udp-socket-evidence.py` now aggregates SO_REUSEPORT siblings.
-- [ ] pps scaling: requires multicore x86_64; Omega (1 core) cannot
-  evidence the >=3x pps criterion — remains open by hardware, not by
-  implementation. Worker io_uring/affinity tuning may also matter there.
+- [ ] Multicore native RX scaling and default-shard verdict under the
+  Acceptance workload above. Omega's single core cannot supply this proof.
+  Profile any bottleneck before changing worker scheduling or affinity.
 
 ### Risks
 - Kernel hash skew: uneven client distribution across shards under few-NAT-gateway test setups (mitigation: measure per-shard counts in the bench; document skew, do not add application rebalancing).
 - QUIC path migration across shards: a migrating client changes ports -> may land on a different shard. Migration handling must consult the global migration registry first (existing `reconcile_incoming_path_update`) and forward to the owning shard if found - implemented as shard-local check then global fallback lookup.
-

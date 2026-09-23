@@ -39,13 +39,17 @@ path never verify it. The July 2026 draft requires a browser client to send
 Origin and requires the server to verify any supplied Origin before accepting
 the session. An arbitrary Origin currently reaches the same generic `200`.
 
-The current WebTransport-over-HTTP/3 draft requires H3 DATAGRAM, QUIC
-DATAGRAM and `reset_stream_at` on both endpoints and permits the
-`webtransport-h3` CONNECT only after the server advertises support:
-https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/.
-The pinned codepoint `0x2c7cf000` matches that draft snapshot. This is a
-versioned draft contract, not an RFC or proof that public browsers/edges
-interoperate with the current private service.
+The current WebTransport-over-HTTP/3 draft snapshot, revision 16 dated
+2026-07-06, requires H3 DATAGRAM, QUIC DATAGRAM and `reset_stream_at` on
+both endpoints and permits the `webtransport-h3` CONNECT only after the
+server advertises support:
+https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3-16.
+The related reliable-reset snapshot is revision 11 dated 2026-09-06:
+https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-11.
+The pinned WebTransport setting codepoint `0x2c7cf000` matches revision 16.
+These are versioned draft contracts, not RFCs or proof that public
+browsers/edges interoperate with the current private service. Recheck the
+latest revisions immediately before implementation or wire claims.
 
 ## Target contract
 

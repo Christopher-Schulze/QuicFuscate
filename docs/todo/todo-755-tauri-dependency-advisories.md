@@ -4,12 +4,28 @@ title: Remediate Tauri dependency advisories and lockfile drift
 severity: CRITICAL
 phase: S
 priority: P0
-status: BLOCKED
+status: OPEN
 created: 2026-08-01
 depends_on: [TODO-270, TODO-749]
 ---
 
 # TODO-755: Remediate Tauri Dependency Advisories and Lockfile Drift
+
+## Current execution gate (2026-09-23)
+
+The initial ten-vulnerability and twenty-two-warning inventory below is a
+historical finding. The later local remediation reported zero vulnerabilities
+and a reviewed transitive-warning set. Before closure, refresh the advisory
+database and the exact root/Tauri lockfile hashes, run the current
+`scripts/audits/verify-tauri-dependencies.sh` plus locked metadata, audit,
+deny, check, Clippy, and host tests at one revision, then obtain the matching
+hosted macOS/Linux/Windows packaging-security results where those packages
+are shipped. A newly reported or newly reachable advisory becomes a separate
+exact package/path/fix gate; do not blindly preserve the old warning count.
+Tagged publication and updater signing are release operations, not required
+to establish this task's dependency-security contract. The local advisory and
+lockfile refresh can start now; applicable hosted/native cells block closure
+if they remain unavailable.
 
 ## Why
 
@@ -67,8 +83,8 @@ The root server dependency graph and the separately excluded Tauri desktop graph
 ## Acceptance
 
 - The committed Tauri lockfile is regenerated intentionally, reviewed, and accepted by `cargo metadata`, `cargo check`, Clippy, `cargo deny`, and `cargo audit` with locked/non-mutating commands.
-- All 10 reported vulnerabilities are upgraded away or have a source-grounded, reviewed mitigation with an explicit bounded exception; no advisory is silenced only to make a gate pass.
-- The 22 warning-level advisories are classified by reachability and release impact, with unmaintained/unsound dependencies upgraded, isolated, or explicitly documented.
+- Every vulnerability in the current root and Tauri locked graphs is upgraded away or has a source-grounded, reviewed mitigation with an explicit bounded exception; no advisory is silenced only to make a gate pass. The original ten findings are historical.
+- Every warning in the current advisory database is classified by reachability and release impact, with unmaintained/unsound dependencies upgraded, isolated, or explicitly documented. The original 22-warning count is historical.
 - CI and release run root and Tauri dependency checks against the exact lockfiles used for packaging, and any lockfile drift fails closed.
 - Root zero-advisory evidence and Tauri desktop evidence are reported separately in the canonical documentation and TODO ownership register.
 
@@ -79,6 +95,8 @@ The root server dependency graph and the separately excluded Tauri desktop graph
 - [x] Upgrade or isolate vulnerable and unsound Tauri transitive dependencies.
 - [x] Add locked Tauri metadata, build, lint, deny, and audit gates to CI/release.
 - [x] Refresh documentation claims that currently describe the Tauri audit as informational-only or clean.
+- [ ] Refresh current advisory and lockfile evidence, then prove the exact
+      hosted/native package dependency graph and warning disposition.
 
 ## Notes
 
@@ -86,8 +104,8 @@ The root server dependency graph and the separately excluded Tauri desktop graph
 - TODO-749 owns general lockfile/toolchain reproducibility; this task owns the security content and Tauri-specific gate closure.
 - The initial audit did not modify either lockfile; this task intentionally changed only the separately owned Tauri lockfile and its audit policy/gates.
 - The final local Tauri lock SHA-256 is `3234b8fa29c5c5ee10211d6b3fc0a461e197f41ab1140420155f46be1f11148a`. The verification runner proves that locked metadata and Cargo Deny do not mutate it.
-- The local native check/test evidence is not a Linux/Windows packaging proof. Hosted CI, native GTK/WebKit packaging, Windows packaging, updater signing, and tagged publication remain external release gates.
-- Local implementation and verification are committed and pushed in `1048f7eef21f68398c43d062112432aa534c9f96`; the task remains blocked only at the external release-evidence boundary above.
+- The local native check/test evidence is not a Linux/Windows packaging proof. Hosted CI and applicable native GTK/WebKit and Windows package dependency graphs remain closure gates; updater signing and tagged publication are separate release tasks.
+- Local implementation and verification were committed and pushed in `1048f7eef21f68398c43d062112432aa534c9f96`. This task is OPEN for a current local refresh; later unavailable hosted/native cells may block closure.
 
 ## Deviations
 

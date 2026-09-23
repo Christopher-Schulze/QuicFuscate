@@ -6,7 +6,7 @@ phase: S
 priority: P1
 status: OPEN
 created: 2026-09-23
-depends_on: [TODO-1064]
+depends_on: [TODO-1064, TODO-1107]
 ---
 
 # TODO-1081: ECH service binding and default policy

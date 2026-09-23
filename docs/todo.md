@@ -1,5 +1,15 @@
 # QuicFuscate Task Tracker
 
+Use each linked detail's frontmatter status and newest current execution gate
+as task truth; the legacy board sections also contain historical DONE entries.
+Start independent local work in an OPEN or IN_PROGRESS task even when its final
+acceptance needs hosted or native evidence. A BLOCKED task may resume only at
+its named prerequisite or environment gate. Historical measurements, source
+paths, and unchecked migration checklists are not instructions to repeat
+superseded work. Re-read current signatures and tests before implementation,
+record exact-revision proof, and keep SCRAP and the user-stopped Devin audit
+out of the execution queue.
+
 ## Active
 
 ### TODO-913 - Server RX: per-datagram heap alloc + double copy on every ingress packet
@@ -61,8 +71,8 @@
 - DONE via TODO-913's restructure: `while batch.len() < cap` checks the cap before each receive and slot alloc; the batch is bounded at 64 and the drain loop returns to `select!` housekeeping each wakeup.
 - Detail: `docs/todo/done/todo-926-recv-batch-cap-unreachable.md`
 
-### TODO-927 - io_uring TX: triple-copy, channel(1) depth, 1ms sleep poll - x86 evidence missing
-- PARTIAL (larger share done): flat payload storage end-to-end (`payload_flat`+`payload_spans`+`packet_addrs`; worker adopts the flat buffer in place - zero payload copies on the channel handoff); `submit_and_poll` spin->yield->capped-sleep backoff replaces the fixed 1 ms sleep; `channel(1)` kept deliberately as bounded backpressure (analysis documented); `UringRecvBatch` arms per-slot `UDP_GRO` cmsg storage and splits coalesced super-buffers - client GRO now works under io_uring (`with_defaults_gro`, safe `disable_udp_gro_fd` fallback). Still open: x86_64 native evidence (Omega covers aarch64 only), optional `IORING_ENTER_GETEVENTS` blocking wait.
+### TODO-927 - Verify current io_uring TX performance on native x86_64
+- PARTIAL. Owned flat payload adoption, bounded completion backoff, and GRO cmsg handling are implemented and verified on Omega aarch64. The remaining gate is a repeated native x86_64 comparison against `sendmmsg` with actual io_uring selection and a predeclared workload. Change the completion wait only if measured CPU or tail-latency benefit justifies its shutdown/deadline complexity. TODO-902 is archived as the completed historical copy fix.
 - Detail: `docs/todo/todo-927-io-uring-x86.md`
 
 ### TODO-928 - Server TX staging: N Vec allocs per flush -> flat buffer + spans
@@ -241,8 +251,8 @@
 - The floating-stable toolchain moved CI to Clippy/rustfmt 1.98.0, whose new `chunks_exact_to_as_chunks` and `manual_slice_fill` lints broke the macOS build-test and Clippy Matrix lanes: 22 sites across qf-crypto, qf-cpu, qf-engine-types, qf-stealth, qf-transport-version, and the root crate now use `as_chunks`/`as_chunks_mut` (and volatile `zeroize` for AES round-key words), plus canonical rustfmt reformat. The admin auth test helper read timeout rose from 10s to 30s so Argon2 under full-suite parallel load cannot starve the response read. CI lanes were consolidated onto the developer platform: macOS `build-test` remains the lean Rust push gate; the macOS simd-selfcheck matrix entry stays removed; `windows-core-checks` proves only Windows-gated surfaces (Wintun/WFP filters) with full test compilation still enforced via `cargo test --no-run`, which also structurally removes the 83-minute Windows suite deadlock observed in run `32614855375`. Frontend/Tauri host jobs were restored after that consolidation so Admin/Desktop check+unit, Shared UI unit, bundle budget, Playwright (including visual/axe), dependency security, and Tauri host tests run on push. Hosted run `32740406262` then exposed four stale contracts: `smol-toml` 1.6.0 advisory (now 1.6.1), Admin `svelte-check` missing `node:fs`/`node:url` types (now `@types/node` 22.20.1), Cargo feature taxonomy missing the live `specta` feature, and Tauri `generate_context!` requiring `apps/svelte-desktop/build` before Clippy. The required GitHub set is now only macOS `build-test`, frontend security/check/e2e, and Tauri host. Parked lanes were removed from the push workflow so skipped jobs cannot pad the check rollup. Hosted `frontend-e2e` installs Playwright Chromium and ignores visual screenshot specs until baselines exist. Local verification: strict rust-tests Clippy, all 22 clippy-matrix feature profiles, all-features check/clippy/lib tests (1759/1759 twice), fuzz contract plus 7/7 fuzz suite, and `cargo fmt --check` all pass.
 - Detail: `docs/todo/done/todo-904-ci-lane-consolidation.md`
 
-### TODO-884 - Produce decision-grade AEGIS versus MORUS default evidence
-- BLOCKED on its original advanced-family promotion criteria. The bakeoff decision selected no advanced ship default; TODO-1044 separately picked opt-in S-AEGIS behind `advanced-aead`. TODO-1028 refused the old ARM freeze. Ship default remains TODO-1033 rustls AES-GCM; TODO-1029 wire proof is done on Omega. The remaining security and platform gates are not cleared by that decision.
+### TODO-884 - Decide private packet-protection default from current provider evidence
+- BLOCKED on TODO-1095/883 standard-wire and native baseline, TODO-681 current-provider audit, and comparable security/performance gates. The old AEGIS/MORUS custom-backend bakeoff is historical: current private owner is opt-in libaegis AEGIS-128L, MORUS is removed, and rustls/ring remains the ship default. Promote only on decision-grade same-path evidence; otherwise retain standard default.
 - Detail: `docs/todo/todo-884-aegis-morus-default-evidence.md`
 
 ### TODO-906 - Migrate fuzz lane to stable Rust and fix netem-impaired circuit transport errors
@@ -255,7 +265,7 @@
 
 
 ### TODO-883 - Prove and reconcile the live standard QUIC packet-protection baseline
-- The local runtime baseline is implemented and verified: typed per-level owners, actual rustls suite capture, persona-ordered provider projection, fail-closed 0-RTT, low-cardinality telemetry, diagnostics, live ClientHello/handshake coverage, and ring benchmarks. Final acceptance is blocked only by native hosted Linux x86_64 and Windows execution plus packet-capture evidence unavailable on this macOS host. No advanced family is promoted by TODO-883; authenticated private activation is separately owned by TODO-885 and is locally covered after its control-boundary gates.
+- Historical local standard-path implementation is complete: typed per-level owners, actual rustls suite capture, persona-ordered provider projection, telemetry, diagnostics, live ClientHello/handshake coverage, and ring benchmarks. Current closure also depends on TODO-1095's RFC long-header framing fix, then standard-only capture and native x86_64/Windows proof at the corrected revision. Rustls 0-RTT is now opt-in and default-off; private AEGIS activation remains opt-in under TODO-885.
 - Detail: `docs/todo/todo-883-live-quic-packet-protection-baseline.md`
 
 ### TODO-886 - Implement bounded N-hop MASQUE VPN circuits
@@ -263,14 +273,14 @@
 - Detail: `docs/todo/todo-886-n-hop-masque-vpn-circuits.md`
 
 ### TODO-804 - Make Omega proof checkout ownership singular and inspectable
-- Read-only preflight infrastructure is complete in commit `47905c3`. Historical evidence `scripts/out/audits/omega-proof-ownership-20260808T195315Z/ownership.json` was fail-closed `UNAVAILABLE`: two checkouts, 43,722 untracked paths in SOFTWARE, 20 tracked mods + missing object `c7831a90bd47c77be57fb345fdf4a47a6022d3e1` in CODE, PID `1363976`. **2026-08-20 authorized cleanup (user: nur auf Omega):** service `quicfuscate-todo528-dc72c84` stopped, TUN `qf528srv` removed, `candidate-*`/`runtime-*`/`*.tar.gz`/`QuicFuscate-verify-dc4de71` deleted (6.5G freed), `CODE/QuicFuscate` re-cloned as singular `~/TESTING/QuicFuscate` `main 2afac5ca` clean, no backups. Current `ownership.json` is stale; fresh proof requires re-running `verify-omega-proof-ownership` against new TESTING path. No local doc history rewritten.
+- OPEN for a fresh read-only proof-root preflight against `~/TESTING/QuicFuscate`; TODO-730's local audit runner is not a prerequisite. Commit `47905c3` added the fail-closed verifier. The 2026-08-08 two-checkout/PID report is historical; an authorized 2026-08-20 Omega-only cleanup established the TESTING root, which must now be rechecked before any exact-revision runtime proof. A non-pass root or missing proof authorization blocks that runtime cell, never the read-only inspection.
 - Detail: `docs/todo/todo-804-omega-proof-checkout-ownership.md`
 ### TODO-548 - Install and prove the managed macOS PF kill-switch anchor
 - Source implementation, installer ownership, hermetic fixture gates, local Rust gates, and docs are complete. Authorized root packet-level proof on macOS ARM64 (2026-08-24): IPv4/IPv6 block-out-all with loopback pass, endpoint-only block, Apple-anchor coexistence, and clean flush/disable. Remaining unclaimed gates: connected TUN, selected DNS, crash/restart/uninstall residue, and hosted CI. Frontend paths remain untouched.
 - Detail: `docs/todo/todo-548-macos-pf-killswitch-native-proof.md`
 
 ### TODO-562 - Refactor single-crate monolith into Cargo workspace sub-crates
-- Blocked only for final acceptance and external platform/CI gates. The original 16-module SCC is fully eliminated: QFTLS owns outgoing CRYPTO streams, transport installs complete TLS packet-key bundles through `QuicTlsKeyInstaller`, and the only TLS module direction is `transport -> qftls`. The workspace contains thirty-five independently buildable backend leaves plus the root package. Published post-push evidence at `c379057f7e9b63a5254c3a40b72c87a56664e0b0` records `36` packages, `336` Rust files, `207,678` source lines, `106` module edges, `123` workspace dependency edges, zero strongly connected components, and no protected frontend/Tauri changes; the complete serial root all-feature library passes `1,657/1,657`.
+- OPEN for a fresh local workspace/seam, feature, release, and protected-path reconciliation; native-platform and hosted CI evidence block closure only. The current workspace manifest contains 36 backend leaf crates plus the root package; the historical post-push evidence at `c379057f7e9b63a5254c3a40b72c87a56664e0b0` recorded 36 packages, 336 Rust files, 207,678 source lines, 106 module edges, 123 workspace dependency edges, zero strongly connected components, and no protected frontend/Tauri changes. Revalidate that topology and the old 1,657/1,657 result at the current revision.
 - Current CI acceptance repair clears all eight qf-cpu x86_64 diagnostics and the separate root `CompressionStrategy::BtOpt` feature-ownership warning. The exact workspace `unsafe_rust` all-target Clippy lane now passes; qf-cpu passes `87/87`, the root fallback suite `1,646/1,646`, and the root all-feature suite `1,657/1,657`.
 - The Linux TUN provisioning negative harness combines its network namespace with a private mount namespace and isolated `/run`. After the owned nftables verifier was corrected, both ordinary setup failure and the adversarial missing-interface race now prove complete rollback with no durable firewall-owner residue; private runtime isolation still prevents a failed proof from contaminating later native traffic checks.
 - The ChaCha20 x16 AVX-512 parity target now iterates returned blocks directly while preserving wrapping counter coverage. The exact workspace all-target `rust-tests` Clippy lane passes with warnings denied, closing hosted Clippy job `93609917539` without suppressions.
@@ -313,24 +323,24 @@
 - The Linux installer service and disposable nspawn proof now retain `CAP_IPC_LOCK` through both outer bounding sets while `LimitMEMLOCK=infinity` authorizes the deferred post-drop `mlockall`. A static contract rejects either missing boundary, generated systemd defaults stay aligned with the shipped unit, and focused systemd tests pass `8/8`; the native AlmaLinux/Debian lifecycle remains hosted Linux evidence.
 - Detail: `docs/todo/todo-562-workspace-crate-refactoring.md`
 
-### TODO-681 - Audit all unsafe code in crypto primitives
-- Local lifecycle implementation, 101-function safety inventory, static guardrails, checked seal lengths, the primitive QUIC 62-bit packet-number boundary, release-safe MORUS loader, and the AEGIS non-Copy/Drop state boundary are complete. Blocked only on compiler-level erasure, release/native GHASH proof, native cross-ISA/sanitizer/Miri lanes, and external platform evidence. The current continuation passes qf-crypto `137/137` under `--all-features`, strict qf-crypto Clippy, the AEAD property suite `12/12`, the workspace `rust-tests` matrix, strict check/Clippy, and release verification; no storage-floor blocker remains on this host. Historical commit `3ebb84d96eb6f050682ca6a513704d2c1ac14f5f` remains the prior pushed checkpoint.
+### TODO-681 - Reconcile the retired custom-crypto unsafe audit with current packet providers
+- OPEN. The seven audited custom-crypto source files were retired. Current `src/crypto/mod.rs` re-exports `qf_crypto`, whose packet owners use pinned `ring` and `aegis` dependencies and contain no local `unsafe` or `target_feature` text. Prove the active key, nonce, packet-number, error, and erasure contracts; retire old ISA claims. Provider-native security/performance and promotion evidence stays with TODO-884/885.
 - Detail: `docs/todo/todo-681-crypto-unsafe-audit.md`
 
 ### TODO-680 - Audit unsafe blocks in optimize/brain, optimize/transport, optimize/stealth, and related hot paths
-- Source remediation and static guardrail wiring are complete for bitmap ranges, pattern positions and lengths, SVE2 Base64 bounds, packet-number lengths, VNNI chunking, percentile validation, test-only Linux RPS inputs, and local safety contracts. The guarded Optimize release suite now passes `5/5` suite records with `43` executed tests and `0` failures in `scripts/out/tests/test-optimization-20260810T-backend-continuation-fast/results.json`; the previous storage-floor gap is closed. TODO-837, TODO-836, and TODO-689 are archived; native x86/BMI2, AVX10/VNNI, SVE2, Linux, sanitizer, and Miri evidence remains unavailable and unclaimed.
+- OPEN for a current local dispatched-path and feature-predicate inventory; historical source fixes and the guarded 5/5-suite, 43-test Optimize result need no replay. TODO-837/836/689 are archived. Native x86/BMI2, AVX10/VNNI, SVE2, Linux, sanitizer, and Miri evidence remains a closure gate.
 - Detail: `docs/todo/todo-680-optimize-brain-transport-stealth-unsafe.md`
 
-### TODO-678 - Audit and harden all unsafe code in optimize/unsafe.rs and optimize/parts/memory_pool.rs
-- All implementation boundaries are closed by TODO-826 through TODO-833 on ARM64 macOS, with their focused tests, library checks, strict Clippy, formatting, and diff evidence recorded in completed details. The umbrella parent remains blocked only because the pinned Rust `1.97.1-aarch64-apple-darwin` toolchain has no Miri component and native Linux/Windows/ISA evidence is unavailable; no external proof is inferred. Boundary documentation is pushed as `15838f9f1c06706debf87dae183e59145998b062` with exact local/remote parity.
+### TODO-678 - Prove remaining unsafe memory-pool and platform gates
+- OPEN for a current-nightly Miri feasibility and owned-test run after the disk preflight. TODO-826..TODO-833 closed the implementation boundaries; `qf-memory-pool` owns production and `src/optimize/unsafe.rs` is test/feature gated. Native Linux/Windows/ISA proof remains a closure gate. The old `src/optimize/parts/memory_pool.rs` inventory is historical.
 - Detail: `docs/todo/todo-678-optimize-unsafe-memory-pool-audit.md`
 
 ### TODO-759 - Make Graphify extraction and relationship evidence complete or fail closed
-- Audit tooling and evidence contract are implemented and locally verified, but the result is explicitly `BLOCKED`: semantic extraction is unavailable, raw AST identity has dangling/duplicate relationships, 6 detected files have no AST nodes, normalized evidence retains 350 ambiguous and 1,465 unresolved endpoints, and the legacy client-scoped Graphify output is stale. The latest post-push fail-closed manifest is `scripts/out/audits/graphify-20260805T080752Z/graphify-evidence.json`; the completeness validator reports `graphify=BLOCKED` and the current detection scope is 728 files / 1,263,324 words. Commit `a5f1896` and the subsequent scope-refresh commit `940e252` remain pushed to `origin/main`; the current audit refresh is evidence-only and does not close TODO-759.
+- OPEN for a current-revision local Graphify evidence refresh. Prove authorized semantic/cache availability, parser coverage, resolved endpoints and provenance; otherwise retain exact `BLOCKED`/`UNAVAILABLE` counts in the manifest. TODO-754 consumes this result and is not a prerequisite.
 - Detail: `docs/todo/todo-759-graphify-extraction-relationship-contract.md`
 
 ### TODO-756 - Make frontend E2E browser prerequisites explicit and fail closed
-- Local implementation is complete and pushed in commit `9a5e3c6`: exact Playwright `1.58.2` ownership, shared fail-fast preflight, package-owned install path, CI alignment, and full Admin/Desktop browser execution pass 70/70 plus 23/23. Empty-cache entrypoints return one actionable `UNAVAILABLE` result before preview-server startup. Hosted CI execution and the normal installer path on this Node 26.6 host remain external/open evidence.
+- OPEN for current-version browser preflight and real Admin/Desktop E2E runs. Historical Playwright `1.58.2` proof passed 70/70 and 23/23; recheck manifest/lock and discovered inventory. Hosted proof is a closure gate; TODO-754's whole-repo register does not block browser testing.
 - Detail: `docs/todo/todo-756-frontend-e2e-browser-prerequisites.md`
 
 ### TODO-805 - Reconcile frontend dependency security advisories
@@ -338,15 +348,15 @@
 - Detail: `docs/todo/done/todo-805-frontend-dependency-advisories.md`
 
 ### TODO-755 - Remediate Tauri dependency advisories and lockfile drift
-- Local implementation is complete and pushed in commit `1048f7e`: the separately locked Tauri graph has zero vulnerabilities, an exact 19-warning reverse-path inventory, a dedicated locked Cargo Deny policy, CI/release gates, and ARM64 macOS Tauri check/Clippy/tests pass with 41/41 tests. Hosted CI, Linux/Windows packaging, updater signing, and tagged publication remain external release gates.
+- OPEN for a current advisory-database and locked root/Tauri refresh. The local 2026-09-19 remediation reported zero vulnerabilities and a reviewed warning set; recheck present lockfiles. Hosted and applicable native package-graph evidence remains a closure gate; updater signing and tagged publication belong to release execution.
 - Detail: `docs/todo/todo-755-tauri-dependency-advisories.md`
 
 ### TODO-749 - Make CI and release dependency resolution reproducible
-- Local implementation is complete in pushed commit `cba058e`: source-owned Bun/Rust/tool versions, frozen Bun installs, locked Cargo/Tauri operations, exact release-tool versions, reconciled Tauri lockfile, and a passing two-run dependency reproducibility gate. Local ARM64 macOS Tauri check/Clippy/tests pass with 41/41 tests. GitHub-hosted CI, Linux/Windows packaging, updater signing, and tagged publication remain external gates.
+- OPEN for the local two-run dependency-resolution refresh. Frozen Bun, locked Cargo/Tauri operations and exact tool versions were implemented historically; recheck versions and hashes now. Same-revision hosted and applicable native packaging proof remains a closure gate. A tagged release or updater signature is outside this task.
 - Detail: `docs/todo/todo-749-reproducible-dependency-resolution.md`
 
 ### TODO-734 - Make feature-gated test targets prove the requested feature lane
-- Local implementation is complete and pushed in commit `562c2ca`: all 64 crate-level feature-gated test sources have exact Cargo requirements, target-specific runner propagation, named non-vacuity checks, explicit Linux-only and architecture skips, and negative missing-feature fixtures. Native Linux io_uring/kernel-hotpath, AF_XDP, and CI-hosted matrix evidence remain open, so the task is blocked at the external gate.
+- OPEN for a current local target/feature inventory and negative fixtures. Historical commit `562c2ca` added exact requirements for 64 crate-level gated test sources, target-specific runner propagation, non-vacuity checks and explicit skips. Native Linux io_uring/kernel-hotpath, AF_XDP and hosted matrix evidence remain closure gates.
 - Detail: `docs/todo/todo-734-feature-gated-test-target-contract.md`
 
 ### TODO-624 - macOS pf anchor activation and kill-switch rollback contract
@@ -354,37 +364,32 @@
 - Detail: `docs/todo/todo-624-macos-pf-anchor-never-referenced.md`
 
 ### TODO-623 - Linux DNS restore leaves written resolv.conf behind when no original file existed
-- Blocked after the local implementation, focused tests, all-target check, and strict Clippy passed; the native Linux platform gate cannot run because the macOS host lacks a Linux C sysroot and the configured Omega SSH path is unavailable.
+- BLOCKED after local implementation and focused tests. Recheck privileged Linux access and run the exact-revision absent/present resolver, crash/restart, owner-conflict and zero-residue matrix; the August Omega SSH failure is historical.
 - Detail: `docs/todo/todo-623-linux-dns-restore-leaves-resolv-conf.md`
 
-### TODO-516 - Implement mlock/mlockall for key material and memory pools
-- Local MemoryPool lock ownership, zeroization, and munlock release paths are implemented and focused gates pass; the post-change native Omega proof, complete workspace gates, and remote push remain blocked by the recorded external and baseline failures.
+### TODO-516 - Prove current process and pool memory-lock lifecycle
+- BLOCKED on fresh privileged post-extraction proof at one revision. `qf-memory-lock` owns process locking and `qf-memory-pool` owns block lock/zeroize/unlock; the historical `src/optimize/parts/memory_pool.rs` path is obsolete. Verify `VmLck`, balanced block lifecycle and zero residual locked pages, then run current focused/workspace gates. Do not treat the old SSH/DNS/push symptoms as a current code or proof result without rechecking them.
 - Detail: `docs/todo/todo-516-memory-locking-mlock-mlockall.md`
 
 ### TODO-607 - Routing teardown leaves host forwarding state and platform-owned routing state behind
-- Paused after TODO-687's build prerequisite: commit `cec9c9c` reached the native Linux lifecycle gate, but graceful `RoutingManager::teardown()` reuses stale-owner recovery and rejects its own active PID `3272`, leaving `/run/quicfuscate/routing/7174756e30.json`. The harness now adds direct forwarding, TUN-link, durable-owner, and selected-firewall residue assertions before namespace cleanup; execution of the privileged Linux lifecycle gate remains open.
+- BLOCKED on a fresh privileged Linux lifecycle run at one revision. The historical self-owner rejection was repaired by the current-owner recovery split; prove setup rollback, graceful stop, crash/restart, active-owner refusal and exact forwarding/TUN/firewall/durable-record restoration before namespace deletion.
 - Detail: `docs/todo/todo-607-routing-teardown-incomplete.md`
 
 ### TODO-754 - Make exhaustive audit coverage and TODO register truth machine-checkable
-- Current detail-corpus reconciliation refreshed 2026-08-07: the post-push validator at `ea528d9` accounts for 777 tracker entries, 371/371 current details, 441 archived details, 36 explicit archive exceptions, 991 tracked paths, 35,527 ignored paths, and zero unexpected untracked paths. Graphify remains explicitly BLOCKED; native, live, Omega, and strict non-pass findings remain open. The legacy `audit-todo-consistency.sh` scanned all 371 details but returned 75 obsolete-status violations; the canonical completeness validator is the passing structural gate.
-- Paused for TODO-730 and TODO-759: the final register/path validator passes structural integrity with tracker `776`, current details `375/375`, archived details `436`, `991` tracked, `26,183` ignored, `0` unexpected untracked, and `27,174` accounted paths; Graphify is retained as explicit `BLOCKED`, not promoted to green. The strict comprehensive runner at `/tmp/quicfuscate-audit-current-20260806.8UshkJ` completed all 38 result objects but returned `FAIL` with 5 critical classifications, 10 warnings, 3 failed checks, and 2 unavailable checks. Strict runtime Clippy, all-target quality Clippy, runtime guardrails, native PowerShell parsing, and the AMX host lane remain explicit non-pass boundaries. The broader target, feature, Graphify, native, frontend, external-evidence, and Omega boundaries remain open.
+- BLOCKED on TODO-730/734/749. Historical 2026-08 register and source counts are retained in the detail but are not current acceptance. At one revision, the canonical validator must classify every tracked/ignored/generated/sensitive/archive/current-detail path, prove zero missing or duplicate IDs, and fail on negative missing-detail, stale-graph, unavailable-parser and omitted-feature fixtures. TODO-759 Graphify and TODO-804 Omega outcomes remain typed non-pass inputs if unavailable; closure proves register/result integrity, not a green whole-product audit.
 - Detail: `docs/todo/todo-754-exhaustive-audit-coverage-register.md`
 
 ### TODO-730 - Make the comprehensive audit runner fail closed and measure real scope
-- Blocked after local implementation and commit `92a05ac`; the remaining Omega checkout attribution gate is unavailable because the local SSH client fails with `No user exists for uid 501`, and GitHub push currently fails DNS resolution.
+- OPEN. The local result-integrity implementation exists. Re-run strict/advisory, negative-fixture, scope/dialect, suite-matrix and one bounded comprehensive report at one revision; prove truthful status, exit and artifact propagation even when separately owned checks fail or are unavailable. TODO-804 owns Omega checkout attribution, so the old reciprocal closure gate and historical SSH/DNS symptoms no longer block this task.
 - Detail: `docs/todo/todo-730-comprehensive-audit-fail-closed.md`
-
-### TODO-902 - io_uring TX triple-copy and channel1 fix
-- PARTIAL (2026-09-19): stale claims corrected - `Sleep(1ms)` polling never existed (worker uses `blocking_recv`, sender uses `submit_and_wait`) and `channel(1)` is deliberate single-owner backpressure. The real defect (double flatten: caller staging + worker-side re-flatten of `&[(addr,&[u8])]`) is fixed via `WorkerRequest::ToFlat` + `send_batch_to_flat_with_disposition`: owned buffers are adopted in place and returned intact in `FlatToReply` for fallback resend/reuse; `submit_request` is generic with a `recover` callback so queue-full/unavailable returns the buffers too. Client io_driver follow-up: `WorkerRequest::ConnectedFlat` + `send_batch_flat_with_disposition` adopt the persistent `batch_flat` slab by value (extent-validated because slab length exceeds used bytes; `flat_spans_extent` now bounds-checks all caller spans before unchecked iovec indexing); the per-flush `batch_refs` SmallVec and second flatten are gone. Verified on Omega: io_uring clippy/check clean, flat-adoption + connected-slab tests green, `tun-e2e-netns.sh` PASS with live `io_uring batch worker` evidence. Still open: 2x-throughput acceptance needs x86_64 bench hardware.
-- Detail: `docs/todo/todo-902-iouring-tx-triple-copy.md`
 
 ## Queue
 ### TODO-901 - Server RX batching drain and sharding
-- PARTIAL. Step 1 DONE (`456edf7`): batch drain until `WouldBlock` (cap 64, one wakeup per burst). Design pass complete (`71e11c9`). **Sharding implemented + Omega-validated (2026-09-19):** dedicated coordinator + N `SO_REUSEPORT` dataplane shards, `ShardRouter` ownership (addr/SCID/profile), bounded per-shard channels, routed TUN downlink/fanout/admin/expiry/shutdown, `rx_shards` config (`0`=auto `min(cores,4)`, `1`=legacy identical path, `N>1`=Linux shards, sibling-bind-failure → graceful single-socket fallback), `QUICFUSCATE_RX_SHARDS` env, `shard_forward_dropped` metric, transport-reload propagation via `ReloadTransport`. Verified: 563/563 Linux server tests, N=1 `tun-e2e-netns.sh` PASS, N=4 PASS with live `spawned 4 dataplane shard workers` evidence (normal + restart), multi-client dual-stack data plane green under N=4, clean worker join/teardown. The >=3x pps criterion stays open pending multicore x86_64 hardware (Omega is single-core).
+- PARTIAL. GRO-aware Linux `recvmmsg` batching and `SO_REUSEPORT` shards with coordinator, routed TUN/admin/expiry, and bounded channels are implemented. Historical Omega evidence covers 563/563 server tests, N=1/N=4 TUN E2E, dual-stack ingress, lifecycle and teardown. Remaining gate: repeated multicore server RX/TUN workload at N=1/2/4 with delivered pps, CPU, latency, drops, and shard distribution; select the measured default. The older 1M pps/3x claim and send-only benchmark are not acceptance evidence.
 - Detail: `docs/todo/todo-901-server-rx-sharding.md`
 
-### TODO-885 - Implement authenticated private AEAD negotiation and promote the proven default
-- IN_PROGRESS. Core implemented. TODO-1044 recorded the family as opt-in S-AEGIS, not the ship default, and `auto` still installs no family. TODO-1029 wire proof is DONE on Omega: boundary-exact private activation, standard-only control, zero unopened packets.
+### TODO-885 - Complete opt-in authenticated private AEAD and prove promotion gates
+- IN_PROGRESS. Opt-in AEGIS activation and TODO-1029's historical Omega wire proof exist; `standard` remains the ship default. Current `advanced-required` config is rejected unconditionally at engine construction despite a fail-closed protocol state machine. After TODO-883's corrected standard-wire baseline, enable and prove that explicit mode with real success and negative terminal paths; TODO-884/681 govern separate default promotion, not this work.
 - Detail: `docs/todo/todo-885-authenticated-private-aead-default.md`
 
 ### TODO-1028 - Freeze TODO-884 advanced-family winner from existing ARM evidence
@@ -421,7 +426,7 @@
 
 ### TODO-1036 - Evaluate rustls aws-lc-rs for the standard AES-GCM path
 - ARM verdict DONE: keep ring. `rustls-aws-lc` stays a non-default feature. Omega P1 1400 R-LC 1360 ns vs R-RING 1280 ns. macOS P1 1400 R-LC 583 ns vs R-RING 667 ns, inside timer noise.
-- OPEN: x86_64 VAES remeasure. Do not flip the default until that cell exists. Same harness as TODO-1038, owners R-RING and R-LC, sizes 1200 and 1400, P1 median.
+- OPEN: native x86_64 VAES remeasure. Run at least five paired 1200/1400-byte P1 trials for R-RING and R-LC at one revision. Switch the portable default only after a meaningful 1400-byte win, no supported ARM/1200-byte regression, and QUIC handshake/1-RTT provider proof; an x86-only win keeps an explicit feature/package verdict.
 - Detail: `docs/todo/todo-1036-rustls-aws-lc-rs-standard-path.md`
 
 ### TODO-1037 - Pin standard AEGIS/MORUS/rustls owners
@@ -585,15 +590,15 @@
 - Detail: `docs/todo/todo-1071-perf-rebench-baselines.md`
 
 ### TODO-1072 - Dataplane performance and efficiency optimization cluster
-- OPEN. Cluster parent. Systematic optimization driven by TODO-1071 evidence: CPU cost per packet, allocation rate, syscall count, batching coverage, io_uring paths, memory-pool/pool-checkout costs, congestion/recovery hot loops, GSO/GRO coverage. The open `## Active` micro-items (TODO-913 through TODO-964 and siblings) are absorbed into this cluster's ordered execution list — worked in measurement-priority order, each with a before/after cell. Wire shape, auditability, and fail-closed behavior are non-negotiable: no optimization may change packet form, weaken the crypto-owner contract, or hide errors.
+- OPEN. Cluster parent. TODO-913..TODO-964 are already done except TODO-927's native io_uring gate. Use TODO-1071's current source and measurements to rank only remaining dataplane bottlenecks; give each selected fix a separate task, same-host before/after proof and security/correctness gate. Keep wire shape, crypto ownership, auditability and fail-closed behavior intact.
 - Detail: `docs/todo/todo-1072-dataplane-perf-efficiency.md`
 
 ### TODO-1073 - FEC optimization cluster
-- OPEN. Cluster parent. Sliding-window/streaming GF(2^8) encode and decode paths, decoder matrix costs (multi-RHS landed in TODO-899 — measure what remains), repair-ratio cost/benefit under netem loss profiles, block-size selection, decode-under-load stability. Omega netem-impaired runs are the evidence; macOS numbers are secondary. No correctness regression: every optimization keeps the 82/82 qf-fec suite and the e2e recovery proofs green.
+- OPEN. Cluster parent. Measure remaining GF(2^8) encode/decode, matrix, repair-ratio and window costs after TODO-899. Same-host repeated throughput/CPU cells plus impaired-link recovery/goodput/latency/repair-byte matrix decide selected fixes; each fix gets a linked task. The current qf-fec suite and live recovery gates must pass without a historical test-count assumption.
 - Detail: `docs/todo/todo-1073-fec-optimization.md`
 
 ### TODO-1074 - Stealth optimization cluster
-- OPEN. Cluster parent. Measure and reduce the cost of the wire defenses: wire-image/persona-trace byte overhead, Maybenot pad share vs machine quality, ChameleonFlow/Adaptive-Tamaraw/UPGen candidates, timing/reorder/padding/cover budgets under the TODO-1052 ledger, persona fidelity per byte spent. Each defense gets a measured cost/effect table; unmeasured claims are not allowed. TODO-1060's sensor/actuator split stays: packet shape is never a runtime actuator.
+- OPEN. Cluster parent. Measure wire-image/persona byte and CPU cost, Maybenot and candidate defense effects under one frozen trace/classifier corpus and the TODO-1052 ledger. Every selected fix needs a linked task and repeated wire/cost proof without worsening detection outside declared variance. TODO-1060's sensor/actuator split stays: packet shape is never a runtime actuator.
 - Detail: `docs/todo/todo-1074-stealth-optimization.md`
 
 ### TODO-1075 - Unified Reality, shared-front, and stealth entry architecture
@@ -601,11 +606,11 @@
 - Detail: `docs/todo/todo-1075-reality-core-stack-adoption.md`
 
 ### TODO-1076 - Stability and robustness cluster
-- OPEN. Cluster parent. Reconnect and fallback chains (outer-hop, UDP-blocked, standby promotion), FEC/stealth mode transitions, multi-hop circuit lifecycle, TUN/MASQUE lifecycle, resource release under error paths, error classification quality. Evidence: repeated Omega netns e2e runs including crash/restart, impaired-link runs, and session churn; plus targeted fault-injection tests. Every found leak/deadlock/misclassification gets its own fix commit.
+- OPEN. Cluster parent. Reconnect/fallback, FEC/stealth transitions, multi-hop and TUN/MASQUE lifecycle, resource release and error classification. Each supported scenario needs at least ten native runs; churn needs at least 100 cycles with zero residual owned resources and no warmup-adjusted upward memory trend. Unsupported carriers remain blocked by their own gates. Every confirmed defect gets a linked task and real-path reproducer.
 - Detail: `docs/todo/todo-1076-stability-robustness.md`
 
 ### TODO-1077 - Frontend technical refresh (dependencies only)
-- OPEN. Refresh the Svelte admin + Tauri workspace to current stable dependencies: npm/cargo version bumps, lockfile regeneration, breaking-change fixes, advisory remediation where applicable (TODO-805/749 history). Existing tests, request-coordinator and generation checks must stay green. Explicitly out of scope: new features, redesign, UX changes — update only.
+- OPEN. Refresh both Svelte apps and shared packages through the root Bun workspace and its one `bun.lock`; update the Tauri 2 Rust app and its `Cargo.lock` as a compatible plugin set. Use current upstream versions and advisory evidence, then run both frontend unit/check/build gates, relevant browser E2E, Tauri Rust gates and the frozen-lock/security checks. Dependency work only, with no npm lockfile or redesign.
 - Detail: `docs/todo/todo-1077-frontend-deps-refresh.md`
 
 ### TODO-1078 - Documentation and test synchronization standing task
@@ -854,6 +859,14 @@
 - Detail: `docs/todo/todo-1138-live-successful-assignment-e2e.md`
 
 ## Completed
+
+### TODO-1139 - Verify every actionable TODO has an executable plan
+- DONE. The 72 remaining non-SCRAP, non-STOPPED details have executable target or decision gates, owning paths, dependency order, and measurable acceptance in this checkout at source revision `7dfba0fe`. Structural, link, status, and dependency checks pass; native and product proofs remain task-specific. The stopped Devin audit remains outside this claim.
+- Detail: `docs/todo/done/todo-1139-luna-task-handoff-readiness.md`
+
+### TODO-902 - io_uring TX triple-copy and channel1 fix
+- DONE (scope reconciled). The duplicate flatten in both server and client TX paths is fixed with owned flat-buffer adoption and intact fallback return, verified on Omega. `channel(1)` remains intentional backpressure for one pointer-backed ring owner; `submit_and_poll` uses bounded spin/yield/sleep, distinct from the worker's `blocking_recv`. The original 2x target had no comparable baseline. TODO-927 is the sole open native x86_64 performance and completion-wait decision owner.
+- Detail: `docs/todo/done/todo-902-iouring-tx-triple-copy.md`
 
 ### TODO-899 - Multi-RHS Gauss for FEC decode under loss
 - DONE. decoder8 true multi-RHS (`O(u^2*m + B*u*m)`, commit `5588f6d`); decoder16 word-domain multi-RHS with one augmented `yb[m][words]` matrix replacing the per-word rebuild + re-solve (`7dc0dc9`), pivot-row clone hoisted per column (`c7f4f11`). Correctness: qf-fec `82/82`, e2e `14/14`, root `1717/1717`. New permanent regression gate `fec_decode16_elimination/loss10_k16` (K=16, 10% loss, full recovery path): **1.36 ms median / 128 payloads, ~94 Kelem/s**. The original "10x" figure was never measurable and is replaced by this baseline; historical pre-899 comparison optional.

@@ -37,14 +37,21 @@ unmeasured since the rebuild.
   patterns, not anecdotes.
 - Criterion cells: encode MB/s, decode MB/s, elimination ms at K=8/16,
   recovery success rate per loss profile.
-- Every change keeps `qf-fec` 82/82 and the e2e recovery proofs green.
+- Run the current `qf-fec` suite and the relevant live recovery gates at the
+  same revision; never use a historical test count as a current pass claim.
 
 ## Acceptance
 
-- [ ] Encode/decode throughput table vs baseline committed.
-- [ ] Netem recovery matrix (loss% × repair-ratio) committed.
+- [ ] Record same-host encode/decode throughput and CPU per recovered byte at
+      K=8/16 with at least five repetitions, exact features, payload sizes,
+      commit, and median/spread against TODO-1071.
+- [ ] Record recovery success, p99 decode latency, application goodput, and
+      repair bytes for 1/5/10/25% loss crossed with the current configured
+      repair ratios. Keep the current wire-budget cap and fail-closed decoder
+      behavior under every candidate.
 - [ ] At least one measured encode or decode win landed, or a documented
-      "already optimal here" verdict per inspected path.
+      no-change verdict tied to a measured cost/effect cell for every inspected
+      path. Give each selected fix a linked task and its own proof.
 
 ## Risks
 
