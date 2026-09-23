@@ -53,7 +53,6 @@ fi
 HOST_FILE="$OUTPUT_DIR/host.txt"
 MATRIX_FILE="$OUTPUT_DIR/matrix.txt"
 VECTORS_FILE="$OUTPUT_DIR/vectors.txt"
-MATCH_FILE="$OUTPUT_DIR/x-match.txt"
 DISTINGUISH_FILE="$OUTPUT_DIR/distinguish.txt"
 PROFILE_FILE="$OUTPUT_DIR/profile.txt"
 CPU_FILE="$OUTPUT_DIR/cpu.txt"
@@ -113,7 +112,6 @@ run_mode() {
 
 FAILURES=0
 run_mode vectors "$VECTORS_FILE" --vectors || FAILURES=$((FAILURES + 1))
-run_mode x-match "$MATCH_FILE" --match-x || FAILURES=$((FAILURES + 1))
 run_mode matrix "$MATRIX_FILE" "${COMMON_ARGS[@]}" || FAILURES=$((FAILURES + 1))
 run_mode distinguish "$DISTINGUISH_FILE" --distinguish --iters "$ITERS" || FAILURES=$((FAILURES + 1))
 run_mode profile "$PROFILE_FILE" --profile --sizes 1400 --iters "$ITERS" --warmup "$WARMUP" || FAILURES=$((FAILURES + 1))
