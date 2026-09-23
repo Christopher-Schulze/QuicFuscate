@@ -21,10 +21,10 @@ impl Connection {
                 self._peer_control_stream_id = Some(stream_id);
                 Ok(StreamType::Control)
             }
-            // Push streams (0x01) are never permitted: this implementation
-            // never advertises MAX_PUSH_ID, so any push stream is a protocol
-            // violation (RFC 9114 §6.2.2).
-            0x01 => Err(Error::StreamCreationError),
+            // A server cannot receive a client push stream. A client that has
+            // not sent MAX_PUSH_ID rejects a server push with H3_ID_ERROR.
+            0x01 if conn.is_server() => Err(Error::StreamCreationError),
+            0x01 => Err(Error::IdError),
             0x02 => {
                 if self.peer_qpack_encoder_stream_id.is_some() {
                     return Err(Error::StreamCreationError);

@@ -34,6 +34,8 @@ const MAX_PENDING_WEBTRANSPORT_STREAMS: usize = 16;
 const WEBTRANSPORT_INITIAL_MAX_STREAMS_UNI: u64 = 4;
 const WEBTRANSPORT_INITIAL_MAX_STREAMS_BIDI: u64 = 4;
 const WEBTRANSPORT_INITIAL_MAX_DATA: u64 = 1024 * 1024;
+const H3_STREAM_CREATION_ERROR: u64 = 0x103;
+const H3_ID_ERROR: u64 = 0x108;
 
 /// HTTP/3 connection with enhanced stream state management
 pub struct Connection {
@@ -709,7 +711,17 @@ impl Connection {
             let mut recv_buffer = std::mem::take(&mut self.stream_recv_buffer);
             let result = self.process_stream(conn, stream_id, &mut recv_buffer);
             self.stream_recv_buffer = recv_buffer;
-            result?;
+            if let Err(error) = result {
+                let close_code = match error {
+                    Error::StreamCreationError => Some(H3_STREAM_CREATION_ERROR),
+                    Error::IdError => Some(H3_ID_ERROR),
+                    _ => None,
+                };
+                if let Some(code) = close_code {
+                    conn.close(true, code, &[]).map_err(|_| Error::InternalError)?;
+                }
+                return Err(error);
+            }
         }
         loop {
             let ready = self.decoder.take_unblocked_streams();

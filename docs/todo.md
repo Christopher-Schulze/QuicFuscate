@@ -737,7 +737,7 @@
 - Detail: `docs/todo/todo-1109-in-quic-fec-datagram-demux.md`
 
 ### TODO-1110 - Return the RFC HTTP/3 error for an unauthorized push stream
-- OPEN. The client never sends `MAX_PUSH_ID`, yet it rejected a server push stream with `H3_STREAM_CREATION_ERROR` instead of RFC 9114 Section 4.6 `H3_ID_ERROR`. The server already classified a client-initiated push as `H3_STREAM_CREATION_ERROR`; the prior contrary audit claim was false. Neither local H3 error queued an application close. Correct the client code, emit both wire errors, keep synthetic push disabled, and prove received close codes.
+- DONE. A server push stream and ungranted `PUSH_PROMISE` now close the client with wire `H3_ID_ERROR` (0x108); a client-initiated push stream closes the server with wire `H3_STREAM_CREATION_ERROR` (0x103). Paired 1-RTT tests assert the peer-received application codes; unknown unidirectional types remain nonfatal. The prior audit claim that the server returned `H3_FRAME_UNEXPECTED` for a correctly initiated client push was false. The remaining H3 error classes and runtime flush proof belong to TODO-1117.
 - Detail: `docs/todo/todo-1110-h3-unauthorized-push-error.md`
 
 ### TODO-1111 - Restore Windows compilation and outer-header socket policy

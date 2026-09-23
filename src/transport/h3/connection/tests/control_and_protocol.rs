@@ -1,5 +1,26 @@
 use super::*;
 
+fn assert_application_close_wire(
+    sender: &mut crate::transport::Connection,
+    receiver: &mut crate::transport::Connection,
+    recv_info: &crate::transport::RecvInfo,
+    expected_code: u64,
+) {
+    assert!(matches!(
+        sender.local_error(),
+        Some(crate::error::ConnectionError::LocalApplicationClosed { error_code, .. })
+            if *error_code == expected_code
+    ));
+    let mut packet = [0u8; 2048];
+    let (len, _) = must_succeed(sender.send(&mut packet));
+    must_succeed(receiver.recv(&mut packet[..len], recv_info));
+    assert!(matches!(
+        receiver.remote_error(),
+        Some(crate::error::ConnectionError::PeerApplicationClosed { error_code, .. })
+            if *error_code == expected_code
+    ));
+}
+
 // ---- Control Stream --------------------------------------------------
 
 #[test]
@@ -214,6 +235,7 @@ fn unknown_unidirectional_stream_discards_every_chunk() {
     client.stream_send(6, &malformed_h3, true).expect("discarded payload");
     assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
     assert!(matches!(server_h3.poll(&mut server), Err(Error::Done)));
+    assert!(!server.is_closed(), "unknown stream types must not close the connection");
 }
 
 #[test]
@@ -395,14 +417,26 @@ fn paired_qpack_capacity_violation_maps_to_encoder_stream_error() {
 
 #[test]
 fn peer_push_streams_are_rejected() {
-    // This endpoint never advertises MAX_PUSH_ID, so any push stream is a
-    // protocol violation (RFC 9114 §6.2.2 → H3_STREAM_CREATION_ERROR).
+    // The client never advertises MAX_PUSH_ID (RFC 9114 §4.6 → H3_ID_ERROR).
     let (mut client, mut server, recv_info, mut client_h3, _server_h3) =
         make_paired_h3_connections();
     let mut packet = [0u8; 2048];
     server.stream_send(7, &[0x01, 0x00], false).expect("push stream");
     assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
-    assert!(matches!(client_h3.poll(&mut client), Err(Error::StreamCreationError)));
+    assert!(matches!(client_h3.poll(&mut client), Err(Error::IdError)));
+    assert_application_close_wire(&mut client, &mut server, &recv_info, H3_ID_ERROR);
+}
+
+#[test]
+fn server_rejects_client_initiated_push_stream_with_stream_creation_error() {
+    let (mut client, mut server, recv_info, _client_h3, mut server_h3) =
+        make_paired_h3_connections();
+    let mut packet = [0u8; 2048];
+    client.stream_send(6, &[0x01, 0x00], false).expect("client push stream");
+    assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
+    assert!(matches!(server_h3.poll(&mut server), Err(Error::StreamCreationError)));
+    let reverse = crate::transport::RecvInfo { from: recv_info.to, to: recv_info.from, ecn: None };
+    assert_application_close_wire(&mut server, &mut client, &reverse, H3_STREAM_CREATION_ERROR);
 }
 
 #[test]
@@ -437,6 +471,7 @@ fn push_promise_without_max_push_id_is_rejected() {
     server.stream_send(request_stream_id, &frame, false).expect("PUSH_PROMISE frame");
     assert!(pump_paired_1rtt_once(&mut client, &mut server, &recv_info, &mut packet));
     assert!(matches!(client_h3.poll(&mut client), Err(Error::IdError)));
+    assert_application_close_wire(&mut client, &mut server, &recv_info, H3_ID_ERROR);
 }
 
 #[test]

@@ -4016,7 +4016,7 @@ TLS Cover is optional and does not replace native TLS security semantics.
 
 2. **Fixed-cell padding** (`WireShape::FixedCell`, legacy `packet_normalize`/`normalize` spellings): all 1-RTT packets are padded to `normalize_target_size` bytes so wire-visible packet sizes are uniform - paid from the shared wire budget like every other stealth byte. Prevents length-based traffic analysis.
 
-3. **Native H3 cover**: `CoverTrafficScheduler` emits persona-shaped H3 request headers. Server Push uses standard H3 `PUSH_PROMISE`, push-stream, `HEADERS`, and `DATA` framing. Escalated WebTransport cover uses the `webtransport-h3` Extended CONNECT shape, remains pending until a 2xx response, and then emits bounded unidirectional and bidirectional streams. Unidirectional streams carry type `0x54` plus the session ID; bidirectional streams carry signal `0x41` plus the session ID. Remaining bytes are opaque application cover rather than nested H3 frames. Fragmented prefixes are retained, unknown or unnegotiated sessions fail closed, and no fixed stream is reserved.
+3. **Native H3 cover**: `CoverTrafficScheduler` emits persona-shaped H3 request headers. Synthetic Server Push cover is disabled. Escalated WebTransport cover uses the `webtransport-h3` Extended CONNECT shape, remains pending until a 2xx response, and then emits bounded unidirectional and bidirectional streams. Unidirectional streams carry type `0x54` plus the session ID; bidirectional streams carry signal `0x41` plus the session ID. Remaining bytes are opaque application cover rather than nested H3 frames. Fragmented prefixes are retained, unknown or unnegotiated sessions fail closed, and no fixed stream is reserved.
 
 To force TLS Cover via the configuration file add:
 
@@ -4040,10 +4040,13 @@ anyway, so they never emit browser headers, QPACK persona behavior, or push traf
   (`try_spend_wire_cover`) before the request is emitted.
 - QPACK: `use_qpack_headers` selects the persona dynamic-table capacity and index policy
   at `init_http3`; disabled means headers are encoded statically.
-- Server Push: removed. This endpoint never advertises `MAX_PUSH_ID`; a peer push stream
-  (0x01) is rejected with `H3_STREAM_CREATION_ERROR`, `PUSH_PROMISE` without a grant is
-  `H3_ID_ERROR`, and received `CANCEL_PUSH`/`MAX_PUSH_ID` frames are parsed and dropped
-  (RFC 9114 §6.2.2, §7.2.5, §7.2.7). The former `enable_server_push_cover`,
+- Server Push: removed. The client never advertises `MAX_PUSH_ID`; a server push stream
+  (0x01) and an unauthorized `PUSH_PROMISE` close with `H3_ID_ERROR` (0x108).
+  A client-initiated push stream closes the server with `H3_STREAM_CREATION_ERROR`
+  (0x103). These peer-stream errors queue QUIC application-close frames; unknown
+  unidirectional stream types remain ignorable. Received `CANCEL_PUSH`/`MAX_PUSH_ID`
+  frames are parsed and dropped (RFC 9114 §4.6, §6.2.2, §7.2.5, §7.2.7).
+  The former `enable_server_push_cover`,
   `server_push_intensity`, `server_push_base_path`, and `server_push_burst_interval`
   configuration keys remain parseable; setting `enable_server_push_cover = true` is a
   configuration error.

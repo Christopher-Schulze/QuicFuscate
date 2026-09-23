@@ -63,6 +63,10 @@ Inside the tunnel those bytes sit under AEAD. A passive observer never reads "Ch
 - Receive side hardened per RFC 9114: no `MAX_PUSH_ID` is ever advertised, push streams
   (0x01) are rejected with `H3_STREAM_CREATION_ERROR`, `PUSH_PROMISE` is `H3_ID_ERROR`,
   and `CANCEL_PUSH`/`MAX_PUSH_ID` frames are parsed and dropped.
+  Correction (2026-09-23): the historical client push-stream code above was
+  wrong under RFC 9114 Section 4.6. TODO-1110 changed it to `H3_ID_ERROR`
+  and proved the peer-received application close. The server's local rejection
+  of a client-initiated push was already `H3_STREAM_CREATION_ERROR`.
 - `enable_server_push_cover = true` in TOML is now a configuration error; the other
   `server_push_*` keys parse and are ignored. `QUICFUSCATE_SERVER_PUSH_COVER=true` warns.
 - WebTransport cover is a one-shot outer-hop session emit claimed atomically per

@@ -4,7 +4,7 @@ title: Return the RFC HTTP/3 error for an unauthorized push stream
 severity: MED
 phase: S
 priority: P2
-status: OPEN
+status: DONE
 created: 2026-09-23
 depends_on: [TODO-1055]
 ---
@@ -19,14 +19,15 @@ TODO-1055 removed synthetic server-push generation and the client's
 server-initiated stream type `0x01` returns `Error::StreamCreationError`.
 A correctly client-initiated `0x01` already returns
 `Error::StreamCreationError` on the server; the earlier audit claim that
-it returned `Error::FrameUnexpected` was incorrect. Neither local result
-queued an HTTP/3 application close frame. RFC 9114 Section 4.6 states that a client
+it returned `Error::FrameUnexpected` was incorrect. Before this task, neither
+local result queued an HTTP/3 application close frame. RFC 9114 Section 4.6
+states that a client
 receiving a push stream when it has not sent `MAX_PUSH_ID` must treat it as
 `H3_ID_ERROR`; Section 6.2.2 requires `H3_STREAM_CREATION_ERROR` when a
 server receives a client-initiated push stream. The code has `Error::IdError`
 for this protocol condition elsewhere, including a `PUSH_PROMISE` without
-a grant. The current test
-`peer_push_streams_are_rejected` accepts the wrong stream error. Source:
+a grant. The former `peer_push_streams_are_rejected` test accepted the wrong
+stream error. Source:
 https://www.rfc-editor.org/rfc/rfc9114.html#section-4.6.
 
 ## Target contract
@@ -44,20 +45,36 @@ https://www.rfc-editor.org/rfc/rfc9114.html#section-4.6.
 
 ## Implementation and proof
 
-- [ ] Trace H3 `Error` to wire application-error mapping and the receive
+- [x] Trace H3 `Error` to wire application-error mapping and the receive
       state machine for stream type `0x01`, `PUSH_PROMISE`, and wrong stream
       initiator; verify no later error replaces the chosen code.
-- [ ] Return `Error::IdError` for a peer server push stream when no
+- [x] Return `Error::IdError` for a peer server push stream when no
       `MAX_PUSH_ID` was granted; preserve the server's existing
       `Error::StreamCreationError` classification. Queue the matching H3
       application close for both errors and retain all push-disabled settings.
-- [ ] Update the existing real H3 connection tests to assert the emitted
+- [x] Update the existing real H3 connection tests to assert the emitted
       wire error code, not just a local enum: unauthorized server push,
       unauthorized `PUSH_PROMISE`, client-initiated push to server, and an
       unrelated unknown unidirectional type.
-- [ ] Run focused H3 tests, the relevant transport suite and the existing
+- [x] Run focused H3 tests, the relevant transport suite and the existing
       HTTP/3 push-disabled guard; reconcile TODO-1055's outcome wording
       without rewriting its historical work log.
+
+## Outcome (2026-09-23)
+
+- `classify_peer_unidirectional_stream` now returns `IdError` for a server
+  push at the client and preserves `StreamCreationError` for a client push
+  at the server. `poll` queues application close 0x108 or 0x103 for those
+  peer STREAM processing errors. `Connection::close` preserves the first
+  local code; other H3 error classes and runtime flush are owned by
+  TODO-1117.
+- Paired authenticated 1-RTT tests assert both the local result and the
+  peer's decoded `PeerApplicationClosed` code for a server push stream,
+  ungranted `PUSH_PROMISE`, and client-initiated push. The unknown-stream
+  test asserts the connection stays open. Synthetic push generation and
+  `MAX_PUSH_ID` advertisement remain disabled.
+- Verification: H3 transport suite 102/102, push-disabled TOML guard 1/1,
+  `cargo clippy --offline --lib -- -D warnings`, and formatting check passed.
 
 ## Acceptance
 
