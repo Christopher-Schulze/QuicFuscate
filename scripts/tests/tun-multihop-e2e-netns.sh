@@ -7,7 +7,10 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BINARY="${QF_E2E_BINARY:-$PROJECT_ROOT/target/release/quicfuscate}"
 THROUGHPUT_PROBE="$SCRIPT_DIR/utils/tcp-throughput-probe.py"
 HOPS="${QF_MULTIHOP_E2E_HOPS:-3}"
-STARTUP_TIMEOUT="${QF_E2E_STARTUP_TIMEOUT:-60}"
+# Startup wait must outlast the per-hop connect timeout: nested handshakes
+# build sequentially, so an impaired entry link needs several timeout
+# windows before assignment can possibly land.
+STARTUP_TIMEOUT="${QF_E2E_STARTUP_TIMEOUT:-}"
 THROUGHPUT_SECONDS="${QF_MULTIHOP_E2E_THROUGHPUT_SECONDS:-5}"
 THROUGHPUT_RATE_BPS="${QF_MULTIHOP_E2E_THROUGHPUT_RATE_BPS:-10000000}"
 MIN_THROUGHPUT_RATIO="${QF_MULTIHOP_E2E_MIN_THROUGHPUT_RATIO:-0.70}"
@@ -40,6 +43,13 @@ if [ "$NETEM_DELAY_MS" != "0" ] || [ "$NETEM_JITTER_MS" != "0" ] \
   || [ "$NETEM_LOSS_PERCENT" != "0" ] || [ "$NETEM_REORDER_PERCENT" != "0" ] \
   || [ "$NETEM_DUPLICATE_PERCENT" != "0" ]; then
   IMPAIRED=1
+fi
+if [ -z "$STARTUP_TIMEOUT" ]; then
+  if [ "$IMPAIRED" = "1" ]; then
+    STARTUP_TIMEOUT=$((CONNECT_TIMEOUT_MS / 1000 * 2))
+  else
+    STARTUP_TIMEOUT=60
+  fi
 fi
 if [ "$IMPAIRED" = "1" ]; then
   MAX_TUNNEL_LOSS_PERCENT="${QF_MULTIHOP_E2E_MAX_TUNNEL_LOSS_PERCENT:-$((NETEM_LOSS_PERCENT * HOPS * 5 + 5))}"
