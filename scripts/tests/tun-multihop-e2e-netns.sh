@@ -321,6 +321,47 @@ if [ "$HOPS" = "3" ]; then
   R2_ID="$(qkey_field "$QKEY_R2" id)"; R2_TOKEN="$(qkey_field "$QKEY_R2" token)"
 fi
 
+start_capture() {
+  local namespace="$1" interface="$2" output="$3"
+  ip netns exec "$namespace" tcpdump --immediate-mode -l -nn -i "$interface" udp \
+    > "$output" 2> "${output}.stderr" &
+  local pid=$!
+  OWNED_PIDS+=("$pid")
+  CAPTURE_PIDS+=("$pid")
+}
+
+finish_captures() {
+  local pid
+  for pid in "${CAPTURE_PIDS[@]}"; do
+    stop_owned_pid "$pid"
+  done
+  CAPTURE_PIDS=()
+}
+
+assert_capture_seen() {
+  local capture="$1" pattern="$2"
+  grep -Eq "$pattern" "$capture" || fail "adjacency capture missing expected traffic: $capture / $pattern"
+}
+
+assert_capture_absent() {
+  local capture="$1" pattern="$2"
+  if grep -Eq "$pattern" "$capture"; then
+    fail "adjacency capture exposed a non-adjacent endpoint: $capture / $pattern"
+  fi
+}
+
+# Captures open before the client launches so circuit bring-up (nested
+# handshakes, MASQUE link responses) stays visible in the underlay logs even
+# when the run fails during startup.
+start_capture qf-mh-cli mh-cli "$WORK_DIR/client-underlay.log"
+start_capture qf-mh-r1 any "$WORK_DIR/r1-underlay.log"
+if [ "$HOPS" -ge 2 ]; then
+  start_capture qf-mh-r2 any "$WORK_DIR/r2-underlay.log"
+fi
+if [ "$HOPS" = "3" ]; then
+  start_capture qf-mh-exit mh-exit "$WORK_DIR/exit-underlay.log"
+fi
+
 CONFIG="$WORK_DIR/client.toml"
 {
   printf '%s\n' '[engine]' 'mode = "client"' 'log_level = "debug"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"' 'dns_servers = ["10.51.0.1"]'
@@ -361,43 +402,6 @@ done
 CLIENT_TUN_IPV6="$(ip netns exec qf-mh-cli ip -o -6 addr show dev qtun0 scope global | awk '{print $4}')"
 [ "$CLIENT_TUN_IPV6" = "fd51::2/64" ] || fail "client IPv6 TUN assignment is missing"
 
-start_capture() {
-  local namespace="$1" interface="$2" output="$3"
-  ip netns exec "$namespace" tcpdump --immediate-mode -l -nn -i "$interface" udp \
-    > "$output" 2> "${output}.stderr" &
-  local pid=$!
-  OWNED_PIDS+=("$pid")
-  CAPTURE_PIDS+=("$pid")
-}
-
-finish_captures() {
-  local pid
-  for pid in "${CAPTURE_PIDS[@]}"; do
-    stop_owned_pid "$pid"
-  done
-  CAPTURE_PIDS=()
-}
-
-assert_capture_seen() {
-  local capture="$1" pattern="$2"
-  grep -Eq "$pattern" "$capture" || fail "adjacency capture missing expected traffic: $capture / $pattern"
-}
-
-assert_capture_absent() {
-  local capture="$1" pattern="$2"
-  if grep -Eq "$pattern" "$capture"; then
-    fail "adjacency capture exposed a non-adjacent endpoint: $capture / $pattern"
-  fi
-}
-
-start_capture qf-mh-cli mh-cli "$WORK_DIR/client-underlay.log"
-start_capture qf-mh-r1 any "$WORK_DIR/r1-underlay.log"
-if [ "$HOPS" -ge 2 ]; then
-  start_capture qf-mh-r2 any "$WORK_DIR/r2-underlay.log"
-fi
-if [ "$HOPS" = "3" ]; then
-  start_capture qf-mh-exit mh-exit "$WORK_DIR/exit-underlay.log"
-fi
 sleep 1
 
 ip netns exec "$EXIT_NS" python3 -c '
