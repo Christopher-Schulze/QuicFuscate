@@ -1216,6 +1216,13 @@ impl IoDriver {
                     if !completions.is_empty() {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
                         crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
+                        if masque_trace_enabled() {
+                            log::info!(
+                                "client uring completions n={} lens={:?}",
+                                completions.len(),
+                                completions.iter().map(|c| c.len()).collect::<Vec<_>>()
+                            );
+                        }
 
                         // Telemetry accumulates into locals and lands as one
                         // atomic batch; early returns flush what was counted.
@@ -1242,12 +1249,22 @@ impl IoDriver {
                                     conn_guard.recv_mut(&mut c.data)
                                 };
                                 if let Err(e) = recv_result {
-                                    log::debug!("Connection recv error: {:?}", e);
+                                    if masque_trace_enabled() {
+                                        log::info!(
+                                            "client uring conn.recv error bytes={} err={:?}",
+                                            c.len(),
+                                            e
+                                        );
+                                    } else {
+                                        log::debug!("Connection recv error: {:?}", e);
+                                    }
                                     flush_batch(batch_bytes, batch_packets);
                                     return Err(self.transport_receive_error(
                                         "client io_uring QUIC receive",
                                         e,
                                     ));
+                                } else if masque_trace_enabled() {
+                                    log::info!("client uring conn.recv ok bytes={}", c.len());
                                 }
                             }
 
