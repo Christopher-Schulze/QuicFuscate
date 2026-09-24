@@ -30,9 +30,26 @@ if [ -z "$CONNECT_TIMEOUT_MS" ]; then
     CONNECT_TIMEOUT_MS=30000
   fi
 fi
-MAX_TUNNEL_LOSS_PERCENT="${QF_MULTIHOP_E2E_MAX_TUNNEL_LOSS_PERCENT:-0}"
-MAX_RTT_MS="${QF_MULTIHOP_E2E_MAX_RTT_MS:-500}"
-MAX_JITTER_MS="${QF_MULTIHOP_E2E_MAX_JITTER_MS:-200}"
+# Tunnel-level ICMP metrics stack every hop's impairment: QUIC DATAGRAM
+# carriers do not retransmit, so nested loss compounds roughly per hop and
+# nested RTT/jitter add each link's delay. Under an impaired entry link the
+# strict unimpaired thresholds are unattainable by construction; scale the
+# defaults with the configured hop count, env overrides still win.
+IMPAIRED=0
+if [ "$NETEM_DELAY_MS" != "0" ] || [ "$NETEM_JITTER_MS" != "0" ] \
+  || [ "$NETEM_LOSS_PERCENT" != "0" ] || [ "$NETEM_REORDER_PERCENT" != "0" ] \
+  || [ "$NETEM_DUPLICATE_PERCENT" != "0" ]; then
+  IMPAIRED=1
+fi
+if [ "$IMPAIRED" = "1" ]; then
+  MAX_TUNNEL_LOSS_PERCENT="${QF_MULTIHOP_E2E_MAX_TUNNEL_LOSS_PERCENT:-$((NETEM_LOSS_PERCENT * HOPS * 5 + 5))}"
+  MAX_RTT_MS="${QF_MULTIHOP_E2E_MAX_RTT_MS:-$((500 + NETEM_DELAY_MS * HOPS * 10 + NETEM_JITTER_MS * HOPS * 20))}"
+  MAX_JITTER_MS="${QF_MULTIHOP_E2E_MAX_JITTER_MS:-$((200 + NETEM_JITTER_MS * HOPS * 10))}"
+else
+  MAX_TUNNEL_LOSS_PERCENT="${QF_MULTIHOP_E2E_MAX_TUNNEL_LOSS_PERCENT:-0}"
+  MAX_RTT_MS="${QF_MULTIHOP_E2E_MAX_RTT_MS:-500}"
+  MAX_JITTER_MS="${QF_MULTIHOP_E2E_MAX_JITTER_MS:-200}"
+fi
 MAX_RUNTIME_RSS_KIB="${QF_MULTIHOP_E2E_MAX_RUNTIME_RSS_KIB:-1048576}"
 MAX_RUNTIME_CPU_PERCENT="${QF_MULTIHOP_E2E_MAX_RUNTIME_CPU_PERCENT:-400}"
 FAILURE_TARGET="${QF_MULTIHOP_E2E_FAILURE_TARGET:-entry}"
