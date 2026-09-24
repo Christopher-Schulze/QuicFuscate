@@ -310,6 +310,7 @@ try {
         "--ca-file", $CaPath,
         "--verify-peer",
         "--no-utls",
+        "--disable-doh",
         "--tun",
         "--tun-name", $AdapterName,
         "--kill-switch",
