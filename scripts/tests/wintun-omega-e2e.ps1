@@ -212,6 +212,99 @@ function Wait-ForTunnelAdapterReady {
     throw "Wintun adapter '$AdapterName' did not become dual-stack ready: $LastDiagnostic"
 }
 
+function Read-TunDatapathSnapshot {
+    # NDIS datapath forensics for the tunnel-echo window. wintun.sys drops
+    # outbound frames inside TunSendNetBufferLists when the miniport
+    # datapath is paused (NDIS_STATUS_PAUSED) or the session is
+    # unregistered (NDIS_STATUS_MEDIA_DISCONNECTED); every such drop lands
+    # in ifOutDiscards on the adapter statistics, so a +5 delta across the
+    # ping window proves the frames died inside the driver gate rather
+    # than upstream in tcpip or WFP. Pure diagnostics - never gates.
+    $Snapshot = [ordered]@{ utc = [DateTime]::UtcNow.ToString("o") }
+    $Adapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden `
+        -ErrorAction SilentlyContinue)
+    if ($Adapters.Count -gt 0) {
+        $Adapter = $Adapters[0]
+        $Snapshot["status"] = [string]$Adapter.Status
+        $Snapshot["media_connect"] = [string]$Adapter.MediaConnectState
+        $Snapshot["admin_status"] = [string]$Adapter.AdminStatus
+        $Snapshot["link_status"] = [string]$Adapter.LinkStatus
+        try {
+            $Stats = Get-NetAdapterStatistics -Name $AdapterName `
+                -IncludeHidden -ErrorAction Stop
+            foreach ($Prop in @(
+                "OutUnicastPackets", "OutDiscardedPackets", "OutPacketErrors",
+                "ReceivedUnicastPackets", "InDiscardedPackets", "InPacketErrors")) {
+                $Snapshot[$Prop] = $Stats.$Prop
+            }
+        }
+        catch {
+            $Snapshot["stats_error"] = $_.Exception.Message
+        }
+    }
+    else {
+        $Snapshot["adapter"] = "absent"
+    }
+    try {
+        $Perf = Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface `
+            -ErrorAction Stop |
+            Where-Object { $_.Name -like "*$AdapterName*" -or $_.Name -like "*wintun*" }
+        if ($Perf) {
+            $Snapshot["perf_out_discarded"] = $Perf.PacketsOutboundDiscarded
+            $Snapshot["perf_out_errors"] = $Perf.PacketsOutboundErrors
+            $Snapshot["perf_out_unicast"] = $Perf.PacketsSentUnicastPersec
+        }
+    }
+    catch {
+        $Snapshot["perf_error"] = $_.Exception.Message
+    }
+    return $Snapshot
+}
+
+function Write-NdisDatapathDiagnostics {
+    # Dumps the datapath snapshots taken around the ping window, the
+    # adapter binding table (a pending protocol/filter bind holds the
+    # miniport datapath paused), and every NDIS ETW event captured during
+    # the window (MiniportPause/MiniportRestart transitions name the
+    # component that suspended the wintun datapath).
+    param(
+        [Parameter(Mandatory = $true)]$Before,
+        [Parameter(Mandatory = $true)]$After,
+        [Parameter(Mandatory = $true)][string]$NdisEtlPath,
+        [Parameter(Mandatory = $true)][string]$DestinationDirectory
+    )
+    $DiagPath = Join-Path $DestinationDirectory "ndis-datapath.txt"
+    $Out = [System.Text.StringBuilder]::new()
+    [void]$Out.AppendLine("=== datapath snapshot before pings ===")
+    [void]$Out.AppendLine(($Before | ConvertTo-Json -Depth 4))
+    [void]$Out.AppendLine("=== datapath snapshot after pings ===")
+    [void]$Out.AppendLine(($After | ConvertTo-Json -Depth 4))
+    [void]$Out.AppendLine("=== bindings on $AdapterName ===")
+    try {
+        [void]$Out.AppendLine((Get-NetAdapterBinding -Name $AdapterName `
+            -IncludeHidden -AllBindings -ErrorAction Stop | Out-String))
+    }
+    catch {
+        [void]$Out.AppendLine("binding dump failed: $($_.Exception.Message)")
+    }
+    [void]$Out.AppendLine("=== NDIS ETW events in window ===")
+    try {
+        $Events = @(Get-WinEvent -Path $NdisEtlPath -Oldest -ErrorAction Stop)
+        [void]$Out.AppendLine("total_events=$($Events.Count)")
+        foreach ($Event in $Events) {
+            $Line = "{0} id={1} level={2} task={3} msg={4}" -f `
+                $Event.TimeCreated.ToString("o"), $Event.Id, `
+                $Event.LevelDisplayName, $Event.TaskDisplayName, `
+                ($Event.Message -replace "\s+", " ").Trim()
+            [void]$Out.AppendLine($Line)
+        }
+    }
+    catch {
+        [void]$Out.AppendLine("etl read failed: $($_.Exception.Message)")
+    }
+    [System.IO.File]::WriteAllText($DiagPath, $Out.ToString())
+}
+
 function Write-WfpDiagnostics {
     # Captures the live WFP state while the connected policy is still
     # installed: the state XML carries every managed filter plus recent net
@@ -445,6 +538,22 @@ try {
     catch {
         Write-Output "pktmon start failed: $($_.Exception.Message)"
     }
+    # NDIS datapath forensics around the same window: the adapter statistics
+    # delta proves whether wintun.sys discarded the echoes at its send gate
+    # (ifOutDiscards += 5), and the NDIS ETW trace records the
+    # pause/restart transitions that explain who suspended the datapath.
+    $NdisEtl = Join-Path $EvidenceDirectory "ndis.etl"
+    $NdisTraceActive = $false
+    $DatapathBefore = Read-TunDatapathSnapshot
+    try {
+        & logman create trace qfndis -ets -o $NdisEtl `
+            -p "Microsoft-Windows-NDIS" 0xffffffffffffffff 0x05 `
+            2>$null | Out-Null
+        $NdisTraceActive = $true
+    }
+    catch {
+        Write-Output "NDIS trace start failed: $($_.Exception.Message)"
+    }
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         $PingResult = Invoke-TunnelPingAttempt `
             -TargetAddress $ServerTunAddress `
@@ -454,6 +563,23 @@ try {
         if ($PingResult.success) {
             $PingSuccesses++
         }
+    }
+    $DatapathAfter = Read-TunDatapathSnapshot
+    if ($NdisTraceActive) {
+        try {
+            & logman stop qfndis -ets 2>$null | Out-Null
+        }
+        catch {
+            Write-Output "NDIS trace stop failed: $($_.Exception.Message)"
+        }
+    }
+    try {
+        Write-NdisDatapathDiagnostics -Before $DatapathBefore `
+            -After $DatapathAfter -NdisEtlPath $NdisEtl `
+            -DestinationDirectory $EvidenceDirectory
+    }
+    catch {
+        Write-Output "NDIS datapath diagnostics failed: $($_.Exception.Message)"
     }
     if ($PktmonActive) {
         try {
