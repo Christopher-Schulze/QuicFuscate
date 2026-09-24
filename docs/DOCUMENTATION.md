@@ -3309,9 +3309,9 @@ bash scripts/build/build-web-admin.sh
 
 Notes:
 - The package-owned Playwright configs in `apps/svelte-admin/` and `apps/svelte-desktop/` are the canonical frontend E2E entrypoints; the actual specs live under `scripts/tests/frontend/`.
-- Unit test suites: `scripts/tests/frontend/web-admin/unit/` (27 files, 391 tests), `scripts/tests/frontend/desktop/unit/` (38 files, 453 tests), `scripts/tests/frontend/shared-ui/unit/` (14 files, 99 tests). Package bounds: Admin `--minimum-files=27 --minimum-tests=391`, Desktop `--minimum-files=38 --minimum-tests=453`.
+- Unit test suites: `scripts/tests/frontend/web-admin/unit/` (27 files, 391 tests), `scripts/tests/frontend/desktop/unit/` (38 files, 442 tests), `scripts/tests/frontend/shared-ui/unit/` (14 files, 99 tests). Package bounds: Admin `--minimum-files=27 --minimum-tests=391`, Desktop `--minimum-files=38 --minimum-tests=442`.
 - Visual/axe specs live at `scripts/tests/frontend/{web-admin,desktop}/e2e/visual-a11y.pw.ts` with tracked snapshots under the same trees. Bundle size is gated by `scripts/audits/verify-frontend-bundle-budget.sh` (4.5 MB each for Admin and Desktop `build/`). Desktop layout-stability E2E uses the shipped window `900x670` from `tauri.conf.json`.
-- Active app unit harnesses run without file-level parallelism (`threads`, one worker). The web-admin and desktop setup hooks clean up Svelte Testing Library state and restore real timers after each test. Local verification: Admin 391/391, Desktop 453/453, Shared UI 99/99, Tauri host 51/51.
+- Active app unit harnesses run without file-level parallelism (`threads`, one worker). The web-admin and desktop setup hooks clean up Svelte Testing Library state and restore real timers after each test. Local verification: Admin 391/391, Desktop 442/442, Shared UI 99/99, Tauri host 51/51.
 - `apps/tauri` is a minimal wrapper package for the native Tauri host and delegates its frontend build/check path to `apps/svelte-desktop`.
 - `packages/ui` uses package `exports` entries with explicit `svelte` conditions so the shared Svelte component package resolves cleanly without `vite-plugin-svelte` packaging warnings.
 - On a fresh machine, install the Playwright browser runtime once before the first E2E run: `cd apps/svelte-admin && bunx playwright install chromium`.
