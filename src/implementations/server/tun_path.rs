@@ -1,6 +1,11 @@
 use super::sharding::{DownlinkKind, ShardMessage, ShardRouter};
 use super::*;
 
+fn masque_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("QUICFUSCATE_MASQUE_TRACE").is_some())
+}
+
 impl Default for LiveServerState {
     // `ServerConfig::default()` is validated by the fallible constructor; the
     // legacy Default API has no error channel, so preserve its infallible
@@ -1292,6 +1297,9 @@ pub(super) fn drain_server_tun_packets(
                 // branch re-fires on the next frame.
                 let packet = match end.try_read_packet() {
                     Ok((block, len)) => {
+                        if masque_trace_enabled() {
+                            log::info!("server TUN ingress read packet bytes={}", len);
+                        }
                         crate::interface::TunPacket::new(block, len).map_err(|error| {
                             DataPlaneFault::ReaderStopped {
                                 component: "server TUN fd".to_string(),
@@ -1299,7 +1307,12 @@ pub(super) fn drain_server_tun_packets(
                             }
                         })?
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if masque_trace_enabled() {
+                            log::info!("server TUN ingress drained (fd WouldBlock)");
+                        }
+                        break;
+                    }
                     Err(error) => {
                         return Err(DataPlaneFault::ReaderStopped {
                             component: "server TUN fd".to_string(),
