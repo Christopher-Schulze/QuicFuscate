@@ -1175,7 +1175,6 @@ impl IoDriver {
             let timeout = self.recv_timeout(&conn);
             let readable = tokio::time::timeout(timeout, event.readable()).await;
 
-            let mut drain_ready = false;
             match readable {
                 Ok(Ok(mut guard)) => {
                     // Clear the eventfd counter (read 8 bytes).
@@ -1208,29 +1207,24 @@ impl IoDriver {
                             .transport_receive_error("client io_uring eventfd short read", error));
                     }
                     guard.clear_ready();
-                    drain_ready = true;
                 }
                 Ok(Err(e)) => {
                     log::warn!("AsyncFd error on uring recv eventfd: {}", e);
                     return Err(self.transport_receive_error("client io_uring eventfd", e));
                 }
-                Err(_) => {
-                    // Timeout wake: drain anyway. CQEs are readable without an
-                    // eventfd signal - the fd only shortens wake latency, and a
-                    // kernel that under-signals it must not stall the path.
-                    drain_ready = true;
-                }
+                // Timeout wake: drain anyway. CQEs are readable without an
+                // eventfd signal - the fd only shortens wake latency, and a
+                // kernel that under-signals it must not stall the path.
+                Err(_) => {}
             }
 
-            if drain_ready {
-                let completions = receiver.drain_completions().map_err(|e| {
-                    self.transport_receive_error("client io_uring completion drain", e)
-                })?;
-                if masque_trace_enabled() {
-                    log::info!("client uring drained completions={}", completions.len());
-                }
-                self.process_uring_completions(&conn, &tun, &ingress, completions)?;
+            let completions = receiver
+                .drain_completions()
+                .map_err(|e| self.transport_receive_error("client io_uring completion drain", e))?;
+            if masque_trace_enabled() && !completions.is_empty() {
+                log::info!("client uring drained completions={}", completions.len());
             }
+            self.process_uring_completions(&conn, &tun, &ingress, completions)?;
 
             if !handshake_signaled {
                 let established = { conn.lock().is_established() };
@@ -1276,9 +1270,7 @@ impl IoDriver {
         // early returns flush what was counted.
         let flush_batch = |batch_bytes: u64, batch_packets: u64| {
             if batch_packets > 0 {
-                self.stats
-                    .udp_packets_received
-                    .fetch_add(batch_packets, Ordering::Relaxed);
+                self.stats.udp_packets_received.fetch_add(batch_packets, Ordering::Relaxed);
                 let global = crate::instrumentation::global();
                 global.transport.record_bytes_in(batch_bytes);
                 global.transport.record_packets_in(batch_packets);

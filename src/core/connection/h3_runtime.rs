@@ -936,11 +936,8 @@ impl QuicFuscateConnection {
             || !matches!(packet.first().map(|byte| byte >> 4), Some(4 | 6))
         {
             if masque_trace_enabled() {
-                let head: Vec<String> = packet
-                    .iter()
-                    .take(16)
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect();
+                let head: Vec<String> =
+                    packet.iter().take(16).map(|byte| format!("{byte:02x}")).collect();
                 log::info!(
                     "tunnel uplink rejected packet: len={} tunnel_mtu={} head={}",
                     packet.len(),

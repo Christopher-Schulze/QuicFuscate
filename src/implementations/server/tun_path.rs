@@ -1063,9 +1063,7 @@ fn classify_server_tun_downlink(
         DownlinkRoute::Local { .. } => return Ok(None),
     }
     if masque_trace_enabled() && targets.is_empty() {
-        log::info!(
-            "server TUN downlink: route resolved to zero targets (no owning session)"
-        );
+        log::info!("server TUN downlink: route resolved to zero targets (no owning session)");
     }
     Ok(Some(ClassifiedDownlink {
         unicast: matches!(route, DownlinkRoute::Unicast { .. }),

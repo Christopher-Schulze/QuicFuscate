@@ -376,23 +376,14 @@ fn recv_eventfd_signals_multishot_completion() {
 
     // SAFETY: eventfd_fd() is a valid fd owned by `recv` for its lifetime;
     // poll only observes it.
-    let mut pfd = libc::pollfd {
-        fd: recv.eventfd_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let mut pfd = libc::pollfd { fd: recv.eventfd_fd(), events: libc::POLLIN, revents: 0 };
     let ret = unsafe { libc::poll(&mut pfd, 1, 3000) };
     assert!(ret > 0, "eventfd was not signalled within 3s of a recv CQE");
     assert!(pfd.revents & libc::POLLIN != 0, "eventfd readable bit missing");
 
     let mut delivered = false;
     for _ in 0..100 {
-        if recv
-            .drain_completions()
-            .expect("drain")
-            .iter()
-            .any(|c| c.as_slice() == b"wake")
-        {
+        if recv.drain_completions().expect("drain").iter().any(|c| c.as_slice() == b"wake") {
             delivered = true;
             break;
         }
