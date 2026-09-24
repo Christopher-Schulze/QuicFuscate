@@ -78,7 +78,7 @@ echo "INFO: tunnel interface up: $UTUN_IF"
 
 ping -c 5 -t 10 10.252.0.1 > "$WORK_DIR/ping4.log" 2>&1 \
   || fail "IPv4 tunnel ping failed: $(tail -3 "$WORK_DIR/ping4.log")"
-ping6 -c 5 10 fd00::1 > "$WORK_DIR/ping6.log" 2>&1 \
+ping6 -c 5 fd00::1 > "$WORK_DIR/ping6.log" 2>&1 \
   || fail "IPv6 tunnel ping failed: $(tail -3 "$WORK_DIR/ping6.log")"
 echo "INFO: IPv4/IPv6 tunnel pings passed"
 

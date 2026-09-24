@@ -76,15 +76,20 @@ impl MacTun {
     }
 
     fn configure(name: &str, cfg: &TunConfig) -> io::Result<u16> {
+        // utun is POINTOPOINT: SIOCAIFADDR requires a destination address or the
+        // kernel answers "Destination address required". CONNECT-IP supplies no
+        // peer address, so the destination is the assigned address itself — the
+        // netmask/prefix still installs the subnet route over the link (the same
+        // convention wg-quick uses on Darwin).
         if let (Some(IpAddr::V4(address)), Some(IpAddr::V4(netmask))) = (cfg.ip, cfg.netmask) {
             let address = address.to_string();
             let netmask = netmask.to_string();
-            Self::run_ifconfig(&[name, "inet", &address, "netmask", &netmask, "up"])?;
+            Self::run_ifconfig(&[name, "inet", &address, &address, "netmask", &netmask, "up"])?;
         }
         if let (Some(address), Some(prefix)) = (cfg.ip6, cfg.prefix6) {
             let address = address.to_string();
             let prefix = prefix.to_string();
-            Self::run_ifconfig(&[name, "inet6", &address, "prefixlen", &prefix, "up"])?;
+            Self::run_ifconfig(&[name, "inet6", &address, &address, "prefixlen", &prefix, "up"])?;
         }
         let mtu = cfg.mtu.to_string();
         Self::run_ifconfig(&[name, "mtu", &mtu, "up"])?;
