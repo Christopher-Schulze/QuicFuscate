@@ -520,12 +520,14 @@ fn test_apply_runtime_stealth_overrides_sets_all_fields() {
 
 #[test]
 fn test_apply_runtime_stealth_overrides_preserves_config_disabled_masquerading() {
-    let mut sc = StealthConfig::default();
-    sc.mode = StealthMode::Manual;
-    sc.enable_http3_masquerading = false;
-    sc.use_qpack_headers = false;
-    sc.use_tls_cover = false;
-    sc.enable_protocol_mimicry = false;
+    let mut sc = StealthConfig {
+        mode: StealthMode::Manual,
+        enable_http3_masquerading: false,
+        use_qpack_headers: false,
+        use_tls_cover: false,
+        enable_protocol_mimicry: false,
+        ..Default::default()
+    };
     apply_runtime_stealth_overrides(
         &mut sc,
         BrowserProfile::Firefox,
@@ -544,12 +546,14 @@ fn test_apply_runtime_stealth_overrides_preserves_config_disabled_masquerading()
 
 #[test]
 fn test_apply_runtime_stealth_overrides_mimicry_bundle_still_expands() {
-    let mut sc = StealthConfig::default();
-    sc.mode = StealthMode::Manual;
-    sc.enable_http3_masquerading = false;
-    sc.use_qpack_headers = false;
-    sc.use_tls_cover = false;
-    sc.enable_protocol_mimicry = true;
+    let mut sc = StealthConfig {
+        mode: StealthMode::Manual,
+        enable_http3_masquerading: false,
+        use_qpack_headers: false,
+        use_tls_cover: false,
+        enable_protocol_mimicry: true,
+        ..Default::default()
+    };
     apply_runtime_stealth_overrides(
         &mut sc,
         BrowserProfile::Firefox,
