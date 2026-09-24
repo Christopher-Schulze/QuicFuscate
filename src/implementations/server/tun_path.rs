@@ -147,6 +147,13 @@ fn handle_local_tun_packet(
                 write_tun_control_packet(tun, &reply, "ICMPv4 echo reply")?;
             }
         }
+        if masque_trace_enabled() {
+            log::info!(
+                "server TUN ingress consumed locally dst={} icmp={:?}",
+                destination,
+                icmp::parse_icmpv4(header_len, packet).map(|header| header.icmp_type)
+            );
+        }
         metrics.record_routing_outcome(RoutingOutcome::Local);
         return Ok(true);
     }
@@ -1298,7 +1305,28 @@ pub(super) fn drain_server_tun_packets(
                 let packet = match end.try_read_packet() {
                     Ok((block, len)) => {
                         if masque_trace_enabled() {
-                            log::info!("server TUN ingress read packet bytes={}", len);
+                            let (src, dst, proto) = if len >= 20 && block[0] >> 4 == 4 {
+                                (
+                                    format!(
+                                        "{}.{}.{}.{}",
+                                        block[12], block[13], block[14], block[15]
+                                    ),
+                                    format!(
+                                        "{}.{}.{}.{}",
+                                        block[16], block[17], block[18], block[19]
+                                    ),
+                                    block[9],
+                                )
+                            } else {
+                                ("?".to_string(), "?".to_string(), 0)
+                            };
+                            log::info!(
+                                "server TUN ingress read packet bytes={} proto={} src={} dst={}",
+                                len,
+                                proto,
+                                src,
+                                dst
+                            );
                         }
                         crate::interface::TunPacket::new(block, len).map_err(|error| {
                             DataPlaneFault::ReaderStopped {
