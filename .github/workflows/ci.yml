@@ -127,6 +127,16 @@ jobs:
           cargo test --locked --features "rust-tests io_uring" \
             --test rt-transport-uring --test rt-io-hotpath-kernel-integration
 
+      - name: Native x86_64 provider/persona baseline
+        shell: bash
+        run: |
+          # TODO-883 native matrix: the same rust-tests filters that prove the
+          # rustls provider order, per-persona live standard-suite handshakes,
+          # packet-protection ownership, 0-RTT default-off, and key update on
+          # ARM64 must also pass on hosted x86_64 at the same revision.
+          cargo test --locked --features "rust-tests io_uring" --lib -- \
+            qftls:: early_data key_update packet_protection
+
   frontend-dependency-security:
     timeout-minutes: 15
     runs-on: macos-latest

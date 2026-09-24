@@ -54,6 +54,12 @@ jobs:
             -BinaryPath "target/debug/quicfuscate.exe" `
             -EvidenceDirectory "scripts/out/tests/wintun-omega-e2e"
 
+      - name: Native Windows provider/persona baseline
+        if: always()
+        run: >-
+          cargo test --locked --lib --features tun-windows,rust-tests
+          -- qftls:: early_data key_update packet_protection
+
       - name: Verify zero Windows WFP object residue
         if: always()
         run: >-
