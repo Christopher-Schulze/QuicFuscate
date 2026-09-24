@@ -734,7 +734,11 @@ fn deliver_tun_downlink_target(
     metrics: &Metrics,
 ) -> Result<bool, DataPlaneFault> {
     let Some(connection) = live_state.clients.get(&target) else {
-        log::debug!("downlink target {} has no local connection", target);
+        if masque_trace_enabled() {
+            log::info!("server TUN downlink target {} has no local connection", target);
+        } else {
+            log::debug!("downlink target {} has no local connection", target);
+        }
         return Ok(false);
     };
     let frame_len = match shared_frame.as_ref() {
@@ -743,6 +747,15 @@ fn deliver_tun_downlink_target(
     };
     let effective_mtu =
         tun_downlink_admit_mtu(tun.map(|tun| tun.mtu()), connection.effective_tunnel_mtu());
+    if masque_trace_enabled() {
+        log::info!(
+            "server TUN downlink deliver target={} frame_len={} effective_mtu={} unicast={}",
+            target,
+            frame_len,
+            effective_mtu,
+            unicast
+        );
+    }
     if frame_len > effective_mtu {
         if unicast {
             if let Some(tun) = tun {
@@ -768,6 +781,12 @@ fn deliver_tun_downlink_target(
     // The sessions guard held by the caller covers the stats lookup and (on
     // the fast path) the token-bucket check.
     let Some(stats) = sessions.bandwidth_stats(session_id) else {
+        if masque_trace_enabled() {
+            log::info!(
+                "server TUN downlink target {} dropped: no bandwidth stats for session",
+                target
+            );
+        }
         return Ok(false);
     };
     let weight = stats.policy.weight;
@@ -797,6 +816,13 @@ fn deliver_tun_downlink_target(
                 match send_result {
                     Some(Ok(())) => {
                         metrics.record_bandwidth_scheduler_delivery(frame_len);
+                        if masque_trace_enabled() {
+                            log::info!(
+                                "server TUN downlink queued for QUIC target={} bytes={}",
+                                target,
+                                frame_len
+                            );
+                        }
                         return Ok(true);
                     }
                     Some(Err(
