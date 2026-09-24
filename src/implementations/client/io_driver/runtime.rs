@@ -1243,6 +1243,7 @@ impl IoDriver {
                             batch_packets += 1;
                             {
                                 let mut conn_guard = conn.lock();
+                                let completion_len = c.len;
                                 let recv_result = if let Some(block) = c.block {
                                     conn_guard.recv_pooled_block(block, c.len)
                                 } else {
@@ -1252,7 +1253,7 @@ impl IoDriver {
                                     if masque_trace_enabled() {
                                         log::info!(
                                             "client uring conn.recv error bytes={} err={:?}",
-                                            c.len(),
+                                            completion_len,
                                             e
                                         );
                                     } else {
@@ -1264,7 +1265,7 @@ impl IoDriver {
                                         e,
                                     ));
                                 } else if masque_trace_enabled() {
-                                    log::info!("client uring conn.recv ok bytes={}", c.len());
+                                    log::info!("client uring conn.recv ok bytes={}", completion_len);
                                 }
                             }
 
