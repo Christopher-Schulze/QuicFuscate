@@ -1424,6 +1424,21 @@ fn drain_client_tun_uplink_fd(
     Ok(backlog.is_some() && sendable && !carrier_full)
 }
 
+/// Non-unix stub: `TunReadSource` is uninhabited there, so no caller can ever
+/// hold a live `end` — the select arm stays compiled but unreachable, same
+/// contract as `TunReadSource::readable`.
+#[cfg(not(unix))]
+fn drain_client_tun_uplink_fd(
+    _conn: &mut QuicFuscateConnection,
+    _tun: &quicfuscate::interface::TunInterface,
+    _sid: Option<u64>,
+    tun_fd: &TunReadSource,
+    _backlog: &mut Option<(Vec<quicfuscate::interface::TunPacket>, usize)>,
+    _diagnostics: Option<&mut ClientIoDiagnostics>,
+) -> Result<bool, quicfuscate::engine::DataPlaneFault> {
+    match *tun_fd {}
+}
+
 /// Uplink drain dispatcher used by every select branch that can make TUN
 /// progress: reactor-fd reads when `tun_read_end` is armed (unix only), the
 /// reader-channel waves otherwise. Returns `true` when more work may be

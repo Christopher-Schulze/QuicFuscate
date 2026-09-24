@@ -30,6 +30,7 @@ jobs:
 
       - name: Build native Wintun client and residue verifier
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo build --locked --bin quicfuscate --features tun-windows
           cargo test --locked --lib --features tun-windows,rust-tests --no-run
 

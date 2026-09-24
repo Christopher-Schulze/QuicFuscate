@@ -222,6 +222,7 @@ fn set_ipv4_df(_fd: SocketFd, _df: bool) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn bound_v4_socket() -> std::net::UdpSocket {
         std::net::UdpSocket::bind("127.0.0.1:0").expect("bind v4")
     }
