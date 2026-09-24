@@ -347,6 +347,60 @@ fn recv_multishot_delivers_and_recycles_buffers() {
     );
 }
 
+/// Regression for the client inbound stall: the registered eventfd must
+/// become readable when a recv CQE lands. `IORING_REGISTER_EVENTFD_ASYNC`
+/// never fires for poll-driven socket completions, so this poll would have
+/// timed out under the old registration.
+#[cfg(target_os = "linux")]
+#[test]
+fn recv_eventfd_signals_multishot_completion() {
+    use std::os::fd::AsRawFd;
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("receiver bind");
+    let receiver_addr = receiver.local_addr().expect("receiver address");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender bind");
+    let mut recv = match crate::optimize::uring_batch::UringRecvMultishot::new(
+        receiver.as_raw_fd(),
+        8,
+        2048,
+    ) {
+        Some(recv) => recv,
+        None => {
+            eprintln!("skipping: io_uring multishot unavailable");
+            return;
+        }
+    };
+    recv.post_initial().expect("arm multishot recv");
+
+    sender.send_to(b"wake", receiver_addr).expect("send datagram");
+
+    // SAFETY: eventfd_fd() is a valid fd owned by `recv` for its lifetime;
+    // poll only observes it.
+    let mut pfd = libc::pollfd {
+        fd: recv.eventfd_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, 3000) };
+    assert!(ret > 0, "eventfd was not signalled within 3s of a recv CQE");
+    assert!(pfd.revents & libc::POLLIN != 0, "eventfd readable bit missing");
+
+    let mut delivered = false;
+    for _ in 0..100 {
+        if recv
+            .drain_completions()
+            .expect("drain")
+            .iter()
+            .any(|c| c.as_slice() == b"wake")
+        {
+            delivered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(delivered, "CQE payload missing after eventfd wake");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn recv_multishot_zero_length_and_rearm() {
