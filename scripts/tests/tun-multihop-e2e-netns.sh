@@ -685,8 +685,14 @@ fi
 
 if [ "$HOPS" -ge 2 ]; then
   FAILURE_PID="$R1_SERVER_PID"
-  [ "$FAILURE_TARGET" != "middle" ] || FAILURE_PID="$R2_SERVER_PID"
-  [ "$FAILURE_TARGET" != "exit" ] || FAILURE_PID="$EXIT_SERVER_PID"
+  FAILED_NS=qf-mh-r1
+  if [ "$FAILURE_TARGET" = "middle" ]; then
+    FAILURE_PID="$R2_SERVER_PID"
+    FAILED_NS=qf-mh-r2
+  elif [ "$FAILURE_TARGET" = "exit" ]; then
+    FAILURE_PID="$EXIT_SERVER_PID"
+    FAILED_NS="$EXIT_NS"
+  fi
   [ -n "$FAILURE_PID" ] || fail "selected circuit failure target has no runtime owner"
   kill -KILL "$FAILURE_PID"
   wait "$FAILURE_PID" 2>/dev/null || true
@@ -715,6 +721,9 @@ done
 OWNED_PIDS=()
 
 for namespace in "${RUNTIME_NAMESPACES[@]}"; do
+  # A SIGKILLed failure target had no graceful shutdown: its nft/TUN state is
+  # expected residue removed by the namespace teardown, not a server leak.
+  [ "${FAILED_NS:-}" = "$namespace" ] && continue
   if ip netns exec "$namespace" ip link show qtun0 >/dev/null 2>&1; then
     fail "TUN residue remains in $namespace after graceful shutdown"
   fi
@@ -727,10 +736,14 @@ for namespace in "${RUNTIME_NAMESPACES[@]}"; do
     fail "nftables residue remains in $namespace after graceful shutdown"
   fi
 done
-[ "$(ip netns exec "$EXIT_NS" cat /proc/sys/net/ipv4/ip_forward)" = "$INITIAL_IPV4_FORWARDING" ] \
-  || fail "IPv4 forwarding was not restored after graceful shutdown"
-[ "$(ip netns exec "$EXIT_NS" cat /proc/sys/net/ipv6/conf/all/forwarding)" = "$INITIAL_IPV6_FORWARDING" ] \
-  || fail "IPv6 forwarding was not restored after graceful shutdown"
+# Forwarding restoration is a graceful-shutdown duty too; a SIGKILLed exit
+# target never had the chance to run it.
+if [ "${FAILED_NS:-}" != "$EXIT_NS" ]; then
+  [ "$(ip netns exec "$EXIT_NS" cat /proc/sys/net/ipv4/ip_forward)" = "$INITIAL_IPV4_FORWARDING" ] \
+    || fail "IPv4 forwarding was not restored after graceful shutdown"
+  [ "$(ip netns exec "$EXIT_NS" cat /proc/sys/net/ipv6/conf/all/forwarding)" = "$INITIAL_IPV6_FORWARDING" ] \
+    || fail "IPv6 forwarding was not restored after graceful shutdown"
+fi
 
 echo "PASS: authenticated ${HOPS}-hop MASQUE circuit carried bidirectional IPv4/IPv6 ICMP, TCP, UDP, and DNS within measured throughput/CPU/RSS/latency/jitter/loss bounds, failed closed on ${FAILURE_TARGET} loss, exposed adjacent-only underlay traffic, and left zero owned runtime residue"
 [ "$PRESERVE_ARTIFACTS" = "0" ] || echo "Artifacts: $WORK_DIR"
