@@ -212,6 +212,60 @@ function Wait-ForTunnelAdapterReady {
     throw "Wintun adapter '$AdapterName' did not become dual-stack ready: $LastDiagnostic"
 }
 
+function Write-WfpDiagnostics {
+    # Captures the live WFP state while the connected policy is still
+    # installed: the state XML carries every managed filter plus recent net
+    # events (classify drops record the responsible filter ID), and the
+    # route/address dump proves where the ping was actually sent. Pure
+    # diagnostics - must never change the gate outcome.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory
+    )
+    try {
+        $StatePath = Join-Path $DestinationDirectory "wfp-state.xml"
+        & netsh wfp show state "file=$StatePath" | Out-Null
+    }
+    catch {
+        Write-Output "WFP state capture failed: $($_.Exception.Message)"
+    }
+    try {
+        $DiagPath = Join-Path $DestinationDirectory "tunnel-route-diagnostics.txt"
+        $Out = [System.Text.StringBuilder]::new()
+        [void]$Out.AppendLine("=== adapter ($AdapterName) ===")
+        $Adapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden `
+            -ErrorAction SilentlyContinue)
+        [void]$Out.AppendLine(($Adapters | Format-List `
+            Name, ifIndex, NetLuid, Status, LinkSpeed, MtuSize | Out-String))
+        foreach ($Adapter in $Adapters) {
+            [void]$Out.AppendLine("=== addresses on ifIndex $($Adapter.ifIndex) ===")
+            [void]$Out.AppendLine((Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex `
+                -ErrorAction SilentlyContinue | Format-List `
+                IPAddress, PrefixLength, AddressFamily, AddressState, SkipAsSource |
+                Out-String))
+            [void]$Out.AppendLine("=== routes on ifIndex $($Adapter.ifIndex) ===")
+            [void]$Out.AppendLine((Get-NetRoute -InterfaceIndex $Adapter.ifIndex `
+                -ErrorAction SilentlyContinue | Format-Table `
+                DestinationPrefix, NextHop, RouteMetric, ifMetric, Protocol -AutoSize |
+                Out-String))
+        }
+        [void]$Out.AppendLine("=== route lookup $ServerTunAddress ===")
+        [void]$Out.AppendLine((Find-NetRoute -RemoteIPAddress $ServerTunAddress `
+            -ErrorAction SilentlyContinue | Format-Table `
+            DestinationPrefix, NextHop, InterfaceAlias, InterfaceIndex, IPAddress -AutoSize |
+            Out-String))
+        [void]$Out.AppendLine("=== route lookup $ServerTunAddress6 ===")
+        [void]$Out.AppendLine((Find-NetRoute -RemoteIPAddress $ServerTunAddress6 `
+            -ErrorAction SilentlyContinue | Format-Table `
+            DestinationPrefix, NextHop, InterfaceAlias, InterfaceIndex, IPAddress -AutoSize |
+            Out-String))
+        [System.IO.File]::WriteAllText($DiagPath, $Out.ToString())
+    }
+    catch {
+        Write-Output "tunnel route diagnostics failed: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-TunnelPingAttempt {
     param(
         [Parameter(Mandatory = $true)]
@@ -505,6 +559,7 @@ finally {
             -LiteralPath (Join-Path $EvidenceDirectory `
                 "windows-omega-e2e-progress.json") `
             -Encoding utf8
+        Write-WfpDiagnostics -DestinationDirectory $EvidenceDirectory
         if ($null -ne $ClientProcess) {
             if (-not $ClientProcess.HasExited) {
                 Stop-Process -Id $ClientProcess.Id -Force -ErrorAction SilentlyContinue
