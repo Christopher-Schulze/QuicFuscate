@@ -225,17 +225,30 @@ function Read-TunDatapathSnapshot {
         -ErrorAction SilentlyContinue)
     if ($Adapters.Count -gt 0) {
         $Adapter = $Adapters[0]
-        $Snapshot["status"] = [string]$Adapter.Status
-        $Snapshot["media_connect"] = [string]$Adapter.MediaConnectState
-        $Snapshot["admin_status"] = [string]$Adapter.AdminStatus
-        $Snapshot["link_status"] = [string]$Adapter.LinkStatus
+        # Property availability varies by Windows build: read each field
+        # through psobject so a missing member can never throw the run.
+        foreach ($Field in @(
+            @{ Key = "status"; Name = "Status" },
+            @{ Key = "media_connect"; Name = "MediaConnectState" },
+            @{ Key = "admin_status"; Name = "AdminStatus" },
+            @{ Key = "connector_present"; Name = "ConnectorPresent" },
+            @{ Key = "media_duplex"; Name = "MediaDuplexState" },
+            @{ Key = "if_oper_status"; Name = "InterfaceOperationalStatus" })) {
+            $Member = $Adapter.psobject.Properties[$Field.Name]
+            if ($null -ne $Member) {
+                $Snapshot[$Field.Key] = [string]$Member.Value
+            }
+        }
         try {
             $Stats = Get-NetAdapterStatistics -Name $AdapterName `
                 -IncludeHidden -ErrorAction Stop
             foreach ($Prop in @(
                 "OutUnicastPackets", "OutDiscardedPackets", "OutPacketErrors",
                 "ReceivedUnicastPackets", "InDiscardedPackets", "InPacketErrors")) {
-                $Snapshot[$Prop] = $Stats.$Prop
+                $Member = $Stats.psobject.Properties[$Prop]
+                if ($null -ne $Member) {
+                    $Snapshot[$Prop] = $Member.Value
+                }
             }
         }
         catch {
@@ -250,9 +263,15 @@ function Read-TunDatapathSnapshot {
             -ErrorAction Stop |
             Where-Object { $_.Name -like "*$AdapterName*" -or $_.Name -like "*wintun*" }
         if ($Perf) {
-            $Snapshot["perf_out_discarded"] = $Perf.PacketsOutboundDiscarded
-            $Snapshot["perf_out_errors"] = $Perf.PacketsOutboundErrors
-            $Snapshot["perf_out_unicast"] = $Perf.PacketsSentUnicastPersec
+            foreach ($Prop in @(
+                @{ Key = "perf_out_discarded"; Name = "PacketsOutboundDiscarded" },
+                @{ Key = "perf_out_errors"; Name = "PacketsOutboundErrors" },
+                @{ Key = "perf_out_unicast"; Name = "PacketsSentUnicastPersec" })) {
+                $Member = $Perf.psobject.Properties[$Prop.Name]
+                if ($null -ne $Member) {
+                    $Snapshot[$Prop.Key] = $Member.Value
+                }
+            }
         }
     }
     catch {
@@ -544,7 +563,13 @@ try {
     # pause/restart transitions that explain who suspended the datapath.
     $NdisEtl = Join-Path $EvidenceDirectory "ndis.etl"
     $NdisTraceActive = $false
-    $DatapathBefore = Read-TunDatapathSnapshot
+    $DatapathBefore = $null
+    try {
+        $DatapathBefore = Read-TunDatapathSnapshot
+    }
+    catch {
+        Write-Output "datapath snapshot failed: $($_.Exception.Message)"
+    }
     try {
         & logman create trace qfndis -ets -o $NdisEtl `
             -p "Microsoft-Windows-NDIS" 0xffffffffffffffff 0x05 `
@@ -564,7 +589,13 @@ try {
             $PingSuccesses++
         }
     }
-    $DatapathAfter = Read-TunDatapathSnapshot
+    $DatapathAfter = $null
+    try {
+        $DatapathAfter = Read-TunDatapathSnapshot
+    }
+    catch {
+        Write-Output "datapath snapshot failed: $($_.Exception.Message)"
+    }
     if ($NdisTraceActive) {
         try {
             & logman stop qfndis -ets 2>$null | Out-Null
