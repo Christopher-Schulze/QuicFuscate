@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "qf-audit"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -2372,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "qf-common"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.2.17",
  "log",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "qf-compress"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-common",
@@ -2393,11 +2393,11 @@ dependencies = [
 
 [[package]]
 name = "qf-control-plane"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "qf-cpu"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "log",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "qf-crypto"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aegis",
  "hex",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "qf-dns"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "parking_lot",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "qf-engine-types"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.21.7",
  "log",
@@ -2469,11 +2469,11 @@ dependencies = [
 
 [[package]]
 name = "qf-error"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "qf-fec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aligned_box",
  "clap",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "qf-firewall"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "serde",
@@ -2502,14 +2502,14 @@ dependencies = [
 
 [[package]]
 name = "qf-harness"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "qf-hpke"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "hpke-rs",
  "hpke-rs-crypto",
@@ -2519,11 +2519,11 @@ dependencies = [
 
 [[package]]
 name = "qf-instrumentation"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "qf-logging"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "qf-memory-lock"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "log",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "qf-memory-pool"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aligned_box",
  "crossbeam-queue",
@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "qf-metrics"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-common",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "qf-pki"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.21.7",
  "libc",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "qf-privilege"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "serde",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "qf-reality"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "parking_lot",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "qf-simd"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "qf-common",
  "qf-cpu",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "qf-stealth"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "log",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "qf-telemetry"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-anti-replay"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "parking_lot",
  "qf-common",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-batch"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "log",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-cc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-common",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-crypto-stream"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-error",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-frames"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "qf-error",
  "qf-transport-pn",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-nat"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-common",
@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-path"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "qf-common",
  "qf-transport-cc",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-pn"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "qf-common",
  "qf-error",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-recovery"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-common",
@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-types"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "qf-common",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-udp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "log",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "qf-transport-version"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "qf-common",
  "qf-error",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "quicfuscate"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aegis",
  "aligned_box",
