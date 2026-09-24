@@ -594,7 +594,7 @@ pub(super) async fn run_client(
         None
     };
     let negotiated_tun_mtu = assignment.as_ref().map_or(1500, |value| value.mtu);
-    let connected_firewall_policy = if let Some(assignment) = assignment.as_ref() {
+    let mut connected_firewall_policy = if let Some(assignment) = assignment.as_ref() {
         quicfuscate::implementations::client::VpnFirewallPolicy::new(
             tun_name_str.clone(),
             server_addr,
@@ -884,6 +884,27 @@ pub(super) async fn run_client(
             .await);
         }
     };
+    // The connected policy must name the interface the kernel actually created:
+    // macOS utun ignores the requested name and self-assigns utunN, so a policy
+    // built from the configured name would reference an interface that does not
+    // exist and pf would keep dropping tunnel traffic. Rebuild it with the real
+    // name once the device exists; on platforms honoring the requested name this
+    // is a no-op rewrite.
+    if let (Some(assignment), Some(tun)) = (assignment.as_ref(), tun_writer.as_ref()) {
+        connected_firewall_policy =
+            quicfuscate::implementations::client::VpnFirewallPolicy::new(
+                tun.name().to_string(),
+                server_addr,
+                alternate_server_ip,
+                assignment.dns_servers.iter().copied(),
+            )
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("server-assigned firewall DNS policy invalid: {error}"),
+                )
+            })?;
+    }
     let tun_activation_ready = client_tun_activation_ready(
         tun_enable,
         tun_rx.is_some() || tun_read_end.is_some(),

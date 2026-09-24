@@ -54,23 +54,15 @@ QUICFUSCATE_MASQUE_TRACE=1 "$BINARY" client \
   -v > "$WORK_DIR/client.log" 2>&1 &
 CLIENT_PID=$!
 
-ready=""
-for ((attempt = 0; attempt < TIMEOUT; attempt++)); do
-  if grep -q 'TUN interface opened from server assignment' "$WORK_DIR/client.log" 2>/dev/null; then
-    ready=1
-    break
-  fi
-  kill -0 "$CLIENT_PID" 2>/dev/null || break
-  sleep 1
-done
-[ -n "$ready" ] || { tail -30 "$WORK_DIR/client.log" >&2; fail "client did not reach TUN assignment"; }
-
+# The standalone client path logs nothing on TUN success — readiness is the
+# interface itself: a new utun carrying the assigned 10.252.0.x address.
 UTUN_IF=""
-for ((attempt = 0; attempt < 10; attempt++)); do
+for ((attempt = 0; attempt < TIMEOUT; attempt++)); do
   UTUN_IF="$(ifconfig -l | tr ' ' '\n' | grep '^utun' | while read -r i; do
     ifconfig "$i" 2>/dev/null | grep -q 'inet 10\.252\.0\.' && echo "$i"
   done | head -1)"
   [ -n "$UTUN_IF" ] && break
+  kill -0 "$CLIENT_PID" 2>/dev/null || break
   sleep 1
 done
 [ -n "$UTUN_IF" ] || { tail -30 "$WORK_DIR/client.log" >&2; fail "no utun with a 10.252.0.x address appeared"; }
