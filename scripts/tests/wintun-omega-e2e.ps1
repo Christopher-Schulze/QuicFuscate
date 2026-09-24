@@ -230,6 +230,16 @@ function Write-WfpDiagnostics {
         Write-Output "WFP state capture failed: $($_.Exception.Message)"
     }
     try {
+        # Classify-drop net events are a separate dump from the filter state:
+        # each record names the responsible filterId, layer, addresses and
+        # protocol - it is the direct verdict on whether WFP ate the echo.
+        $EventsPath = Join-Path $DestinationDirectory "wfp-netevents.xml"
+        & netsh wfp show netevents "file=$EventsPath" | Out-Null
+    }
+    catch {
+        Write-Output "WFP netevents capture failed: $($_.Exception.Message)"
+    }
+    try {
         $DiagPath = Join-Path $DestinationDirectory "tunnel-route-diagnostics.txt"
         $Out = [System.Text.StringBuilder]::new()
         [void]$Out.AppendLine("=== adapter ($AdapterName) ===")
@@ -282,15 +292,22 @@ function Invoke-TunnelPingAttempt {
     $StartedAtUtc = [DateTime]::UtcNow
     $Succeeded = $false
     $ErrorMessage = $null
+    $PingStatus = $null
     try {
-        if ($AddressFamily -eq "IPv4") {
-            $Succeeded = [bool](Test-Connection -TargetName $TargetAddress `
-                -IPv4 -Count 1 -Quiet -TimeoutSeconds 3)
-        }
-        else {
-            $Succeeded = [bool](Test-Connection -TargetName $TargetAddress `
-                -IPv6 -Count 1 -Quiet -TimeoutSeconds 3)
-        }
+        # Non-quiet Test-Connection returns a status record per echo request;
+        # Status distinguishes a local-stack drop ("General failure",
+        # DestinationUnreachable) from a sent-but-unanswered echo ("TimedOut") -
+        # the -Quiet boolean cannot tell a WFP drop from a dead data path.
+        $FamilyArg = if ($AddressFamily -eq "IPv4") { @{ IPv4 = $true } } `
+            else { @{ IPv6 = $true } }
+        $Result = Test-Connection -TargetName $TargetAddress @FamilyArg `
+            -Count 1 -TimeoutSeconds 3 -ErrorAction Stop
+        $Succeeded = [bool]($Result | Where-Object { $_.Status -eq "Success" })
+        $PingStatus = ($Result | ForEach-Object {
+            if ($_.PSObject.Properties["Status"]) { [string]$_.Status }
+            elseif ($_.PSObject.Properties["StatusCode"]) { [string]$_.StatusCode }
+            else { "unknown" }
+        }) -join ","
     }
     catch {
         $ErrorMessage = $_.Exception.Message
@@ -307,6 +324,7 @@ function Invoke-TunnelPingAttempt {
             3
         )
         success = $Succeeded
+        ping_status = $PingStatus
         error = $ErrorMessage
     }
 }
