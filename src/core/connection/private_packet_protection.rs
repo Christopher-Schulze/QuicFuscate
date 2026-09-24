@@ -360,6 +360,19 @@ impl PrivatePacketProtectionRuntime {
         self.owner_activation_attempted = true;
     }
 
+    /// Emergency standards-only rollback (TODO-885): an operator policy flip to
+    /// `standard` retires a still-pending negotiation - the deadline can no
+    /// longer fire, queued control capsules are dropped, and a latched
+    /// negotiation error cannot surface after the rollback. Callers must only
+    /// invoke this before owner activation; an installed private owner requires
+    /// a fresh connection by design.
+    pub(crate) fn rollback_to_standard(&mut self) {
+        self.mode = PacketProtectionMode::Standard;
+        self.machine.force_standard_fallback();
+        self.outbound.clear();
+        self.last_error = None;
+    }
+
     pub(crate) fn take_error(&mut self) -> Option<PrivateProtocolError> {
         self.last_error.take()
     }
@@ -553,5 +566,38 @@ mod tests {
         active.created_at = past;
         active.machine_mut().force_terminal();
         assert!(!active.negotiation_expired(now));
+    }
+
+    #[test]
+    fn rollback_to_standard_retires_pending_negotiation() {
+        let now = std::time::Instant::now();
+        let past = now - PRIVATE_NEGOTIATION_DEADLINE - std::time::Duration::from_secs(1);
+
+        let mut pending = runtime(PrivateNegotiationRole::Client);
+        pending.start_client_proposal();
+        pending.created_at = past;
+        pending.last_error = Some(PrivateProtocolError::NegotiationTimeout);
+        assert!(pending.negotiation_expired(now));
+        assert!(!pending.outbound.is_empty());
+
+        pending.rollback_to_standard();
+
+        assert!(!pending.negotiation_expired(now));
+        assert_eq!(pending.mode(), PacketProtectionMode::Standard);
+        assert_eq!(pending.machine().state(), PrivateNegotiationState::StandardFallback);
+        assert!(pending.take_outbound().is_none());
+        assert!(pending.take_error().is_none());
+    }
+
+    #[test]
+    fn rollback_to_standard_keeps_active_owner_state() {
+        // After owner activation the rollback path must not rewrite the
+        // machine: rolling back across activation requires a fresh
+        // connection, never a quiet owner swap.
+        let mut active = runtime(PrivateNegotiationRole::Client);
+        active.mark_owner_activation_attempted();
+        active.machine_mut().force_terminal();
+        active.rollback_to_standard();
+        assert_eq!(active.machine().state(), PrivateNegotiationState::Terminal);
     }
 }

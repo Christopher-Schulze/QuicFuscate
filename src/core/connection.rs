@@ -258,6 +258,12 @@ impl QuicFuscateConnection {
     /// Configure the authenticated private packet-protection policy for this connection.
     /// No negotiation is started until TLS, QKey authentication, and the accepted MASQUE flow
     /// are all present.
+    ///
+    /// Flipping to `standard` mid-flight is the emergency standards-only rollback
+    /// (TODO-885): a still-pending negotiation is retired so the payload gate opens,
+    /// the negotiation deadline can no longer fire, and no further control capsules
+    /// leave. An already-installed private owner stays; rolling back across
+    /// activation requires a fresh connection by design.
     pub fn set_private_packet_protection_policy(
         &mut self,
         mode: qf_crypto::PacketProtectionMode,
@@ -265,6 +271,15 @@ impl QuicFuscateConnection {
     ) {
         self.private_packet_protection_mode = mode;
         self.private_packet_protection_family = family;
+        if mode == qf_crypto::PacketProtectionMode::Standard {
+            self.private_required_pending_since = None;
+            if let Some(runtime) = self.private_packet_protection_runtime.as_ref() {
+                let mut runtime = runtime.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !runtime.owner_activation_attempted() {
+                    runtime.rollback_to_standard();
+                }
+            }
+        }
     }
 
     /// Install the deployment-seeded private protocol wire layout.

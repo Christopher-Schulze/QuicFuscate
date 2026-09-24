@@ -2677,3 +2677,86 @@ fn payload_gate_stays_open_for_standard_and_auto() {
         "auto keeps its standard fallback: payload must never be gated"
     );
 }
+
+#[test]
+fn emergency_rollback_to_standard_opens_gate_and_retires_negotiation() {
+    let (mut client, _server) =
+        advanced_required_test_client(crate::time_source::ProtocolClock::global());
+    assert!(client.private_required_payload_gate_closed());
+    let ipv4_packet = [
+        0x45, 0x00, 0x00, 0x1c, 0, 0, 0, 0, 64, 1, 0, 0, 10, 0, 0, 2, 10, 0, 0, 1, 0, 0, 0, 0, 0,
+        0, 0,
+    ];
+    assert_eq!(
+        client
+            .send_tunnel_packet(0, &ipv4_packet)
+            .expect_err("required policy gates payload pre-activation"),
+        crate::error::ConnectionError::PrivatePayloadGateClosed
+    );
+
+    // Emergency rollback: the operator flips the policy to standards-only at
+    // runtime - no binary downgrade, no reinstall (TODO-885 rollback gate).
+    client.set_private_packet_protection_policy(qf_crypto::PacketProtectionMode::Standard, None);
+
+    assert!(
+        !client.private_required_payload_gate_closed(),
+        "gate must open once the operator rolls back to standard"
+    );
+    let result = client.send_tunnel_packet(0, &ipv4_packet);
+    assert!(
+        !matches!(result, Err(crate::error::ConnectionError::PrivatePayloadGateClosed)),
+        "payload must no longer be gated after rollback, got {result:?}"
+    );
+    client
+        .private_packet_protection_control_tick()
+        .expect("control tick stays clean after rollback");
+}
+
+#[test]
+fn emergency_rollback_retires_inflight_negotiation_runtime() {
+    let (mut client, _server) =
+        advanced_required_test_client(crate::time_source::ProtocolClock::global());
+    let created_at = client.protocol_clock().now();
+    let mut machine = crate::qftls::PrivateNegotiationMachine::new(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        crate::qftls::PrivateNegotiationRole::Client,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+        7,
+        1,
+        b"h3".to_vec(),
+        vec![1, 2, 3],
+        vec![4, 5, 6],
+        [0x44; crate::qftls::PRIVATE_HASH_LEN],
+        [0x11; crate::qftls::PRIVATE_NONCE_LEN],
+    )
+    .expect("negotiation machine");
+    machine.install_exporter_root(&[0x77; crate::qftls::PRIVATE_HASH_LEN]).expect("exporter root");
+    machine.mark_authenticated().expect("authenticated state");
+    let runtime = private_packet_protection::PrivatePacketProtectionRuntime::new(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        crate::qftls::PrivateNegotiationRole::Client,
+        machine,
+        created_at,
+    );
+    client.private_packet_protection_runtime = Some(Arc::new(std::sync::Mutex::new(runtime)));
+
+    client.set_private_packet_protection_policy(qf_crypto::PacketProtectionMode::Standard, None);
+
+    {
+        let runtime = client
+            .private_packet_protection_runtime
+            .as_ref()
+            .expect("runtime still present")
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            runtime.mode(),
+            qf_crypto::PacketProtectionMode::Standard,
+            "rollback must retire the runtime mode so its deadline can never fire"
+        );
+        assert!(!runtime.negotiation_expired(std::time::Instant::now()));
+    }
+    client
+        .private_packet_protection_control_tick()
+        .expect("control tick stays clean after runtime rollback");
+}
