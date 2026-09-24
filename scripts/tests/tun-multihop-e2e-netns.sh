@@ -17,6 +17,19 @@ NETEM_JITTER_MS="${QF_MULTIHOP_E2E_NETEM_JITTER_MS:-0}"
 NETEM_LOSS_PERCENT="${QF_MULTIHOP_E2E_NETEM_LOSS_PERCENT:-0}"
 NETEM_REORDER_PERCENT="${QF_MULTIHOP_E2E_NETEM_REORDER_PERCENT:-0}"
 NETEM_DUPLICATE_PERCENT="${QF_MULTIHOP_E2E_NETEM_DUPLICATE_PERCENT:-0}"
+# Nested handshakes stack per-hop RTTs, PTO retransmits, and PTB budget
+# discovery: under an impaired entry link the fixed 30s per-hop timeout is
+# measurably too tight, so impairment scales the default unless overridden.
+CONNECT_TIMEOUT_MS="${QF_MULTIHOP_E2E_CONNECT_TIMEOUT_MS:-}"
+if [ -z "$CONNECT_TIMEOUT_MS" ]; then
+  if [ "$NETEM_DELAY_MS" != "0" ] || [ "$NETEM_JITTER_MS" != "0" ] \
+    || [ "$NETEM_LOSS_PERCENT" != "0" ] || [ "$NETEM_REORDER_PERCENT" != "0" ] \
+    || [ "$NETEM_DUPLICATE_PERCENT" != "0" ]; then
+    CONNECT_TIMEOUT_MS=120000
+  else
+    CONNECT_TIMEOUT_MS=30000
+  fi
+fi
 MAX_TUNNEL_LOSS_PERCENT="${QF_MULTIHOP_E2E_MAX_TUNNEL_LOSS_PERCENT:-0}"
 MAX_RTT_MS="${QF_MULTIHOP_E2E_MAX_RTT_MS:-500}"
 MAX_JITTER_MS="${QF_MULTIHOP_E2E_MAX_JITTER_MS:-200}"
@@ -377,10 +390,10 @@ CONFIG="$WORK_DIR/client.toml"
   printf '%s\n' '[stealth]' 'enable_doh = false'
   printf '%s\n' '[security]' 'kill_switch = true' '[circuit]' "max_hops = $HOPS" 'max_parallel_circuits = 2' 'allow_single_hop_fallback = false'
   if [ "$HOPS" -ge 2 ]; then
-    printf '%s\n' '[[circuit.hops]]' 'label = "Entry"' 'endpoint = "10.41.0.1:4433"' 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$R1_ID\"" 'qkey_token_ref = "env:QF_MH_R1_TOKEN"' 'role = "relay"' 'connect_timeout_ms = 30000'
+    printf '%s\n' '[[circuit.hops]]' 'label = "Entry"' 'endpoint = "10.41.0.1:4433"' 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$R1_ID\"" 'qkey_token_ref = "env:QF_MH_R1_TOKEN"' 'role = "relay"' "connect_timeout_ms = $CONNECT_TIMEOUT_MS"
   fi
   if [ "$HOPS" = "3" ]; then
-    printf '%s\n' '[[circuit.hops]]' 'label = "Relay"' 'endpoint = "10.42.0.2:4433"' 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$R2_ID\"" 'qkey_token_ref = "env:QF_MH_R2_TOKEN"' 'role = "relay"' 'connect_timeout_ms = 30000'
+    printf '%s\n' '[[circuit.hops]]' 'label = "Relay"' 'endpoint = "10.42.0.2:4433"' 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$R2_ID\"" 'qkey_token_ref = "env:QF_MH_R2_TOKEN"' 'role = "relay"' "connect_timeout_ms = $CONNECT_TIMEOUT_MS"
     exit_endpoint=10.43.0.2:4433
   else
     if [ "$HOPS" = "2" ]; then
@@ -389,7 +402,7 @@ CONFIG="$WORK_DIR/client.toml"
       exit_endpoint=10.41.0.1:4433
     fi
   fi
-  printf '%s\n' '[[circuit.hops]]' 'label = "Exit"' "endpoint = \"$exit_endpoint\"" 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$EXIT_ID\"" 'qkey_token_ref = "env:QF_MH_EXIT_TOKEN"' 'role = "exit"' 'connect_timeout_ms = 30000'
+  printf '%s\n' '[[circuit.hops]]' 'label = "Exit"' "endpoint = \"$exit_endpoint\"" 'sni = "circuit.test"' 'verify_peer = true' "ca_file = \"$CA\"" "qkey_id = \"$EXIT_ID\"" 'qkey_token_ref = "env:QF_MH_EXIT_TOKEN"' 'role = "exit"' "connect_timeout_ms = $CONNECT_TIMEOUT_MS"
 } > "$CONFIG"
 
 ip netns exec qf-mh-cli env QUICFUSCATE_MASQUE_TRACE=1 \
