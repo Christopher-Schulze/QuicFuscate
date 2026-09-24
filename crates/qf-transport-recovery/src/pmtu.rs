@@ -272,7 +272,6 @@ mod tests {
     #[test]
     fn relax_ptb_reopens_measured_probe_growth() {
         let policy = PmtuPolicy { min_mtu: 1280, max_mtu: 1500, ..PmtuPolicy::default() };
-        let start = Instant::now();
         let mut state = PmtuState::new(true, policy).expect("valid PMTU policy");
         state.apply_ptb(1200);
 
