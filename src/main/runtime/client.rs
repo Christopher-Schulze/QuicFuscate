@@ -912,7 +912,7 @@ pub(super) async fn run_client(
                             // datagram at a time, so split before feeding. A
                             // `gso_size` of 0 means no cmsg arrived: the buffer is
                             // one plain datagram, not len 1-byte slices.
-                            let seg = if slot.gso_size > 0 { usize::from(slot.gso_size) } else { len };
+                            let seg = gro_segment_stride(len, slot.gso_size);
                             let mut seg_off = 0usize;
                             while seg_off < len {
                                 let seg_end = (seg_off + seg).min(len);

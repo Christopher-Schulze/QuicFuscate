@@ -247,15 +247,17 @@ async fn recv_connected_datagram(
 }
 
 /// Non-Linux RX path: one datagram per call. Returns the datagram length plus
-/// a pseudo segment size of `1` so callers can share the GRO-split logic
-/// (segment = whole buffer). Linux uses `recv_connected_burst` with
+/// a `gso_size` of `0`, which callers treat as "one plain datagram, no
+/// segmentation" — the whole buffer is a single wire datagram. Returning any
+/// positive pseudo value would make the GRO-split logic shred the datagram
+/// into byte-sized slices. Linux uses `recv_connected_burst` with
 /// `recv_batch_gro` directly.
 #[cfg(not(target_os = "linux"))]
 async fn recv_connected_segments(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
 ) -> std::io::Result<(usize, u16)> {
-    recv_connected_datagram(socket, buf).await.map(|len| (len, 1))
+    recv_connected_datagram(socket, buf).await.map(|len| (len, 0))
 }
 
 /// Persistent RX slot count for the connected-socket burst receive path. On
@@ -271,6 +273,18 @@ struct ConnectedRxSlot {
     buf_index: usize,
     len: usize,
     gso_size: u16,
+}
+
+/// Per-segment stride for a received burst slot. A `gso_size` of `0` marks one
+/// plain datagram (no kernel GRO cmsg): the stride covers the whole buffer so
+/// `conn.recv` consumes the intact wire datagram. A positive `gso_size` marks
+/// a kernel-coalesced `UDP_GRO` super-buffer of `gso_size`-aligned datagrams.
+fn gro_segment_stride(len: usize, gso_size: u16) -> usize {
+    if gso_size > 0 {
+        usize::from(gso_size)
+    } else {
+        len.max(1)
+    }
 }
 
 /// Linux RX burst: one `recvmmsg` fills up to `bufs.len()` slots in a single
@@ -646,6 +660,36 @@ mod tokio_udp_tests {
         let len =
             timeout(Duration::from_secs(1), recv_connected_datagram(&server, &mut buf)).await??;
         assert_eq!(&buf[..len], payload);
+        Ok(())
+    }
+
+    #[test]
+    fn gro_segment_stride_marks_plain_datagram_whole_buffer() {
+        // gso_size=0: one plain datagram → the split must yield the buffer as
+        // a single wire datagram, never byte-sized slices.
+        assert_eq!(gro_segment_stride(89, 0), 89);
+        assert_eq!(gro_segment_stride(1200, 0), 1200);
+        // Positive gso_size: kernel-coalesced UDP_GRO super-buffer → aligned
+        // segment stride.
+        assert_eq!(gro_segment_stride(4096, 1200), 1200);
+    }
+
+    #[tokio::test]
+    async fn burst_slot_delivers_whole_plain_datagram() -> Result<(), Box<dyn std::error::Error>> {
+        // Regression for the non-Linux fallback reporting a pseudo gso_size of
+        // 1: the caller then shredded every datagram into 1-byte slices and
+        // conn.recv rejected each as a probe, freezing the inbound data plane.
+        let (server, client) = bind_pair().await?;
+        let payload = vec![0xabu8; 89];
+        send_connected_datagram(&client, &payload).await?;
+        let mut bufs = vec![vec![0u8; RX_BURST_SLOT_CAP]; RX_BURST_SLOTS];
+        let slots =
+            timeout(Duration::from_secs(2), recv_connected_burst(&server, &mut bufs)).await??;
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].len, payload.len());
+        assert_eq!(slots[0].gso_size, 0);
+        assert_eq!(gro_segment_stride(slots[0].len, slots[0].gso_size), payload.len());
+        assert_eq!(&bufs[slots[0].buf_index][..slots[0].len], &payload[..]);
         Ok(())
     }
 
