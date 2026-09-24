@@ -157,7 +157,7 @@ pub(super) async fn run_client(
 ) -> std::io::Result<()> {
     enum ExitReason {
         CleanShutdown,
-        RemoteClosed,
+        RemoteClosed(Option<quicfuscate::error::ConnectionError>),
         HeartbeatTimeout,
         DataPlane(quicfuscate::engine::DataPlaneFault),
         SocketError(String),
@@ -1026,11 +1026,7 @@ pub(super) async fn run_client(
                             }
                         }
                         if conn.conn.is_closed() {
-                            info!(
-                                "Server closed the connection: {:?}",
-                                conn.conn.error()
-                            );
-                            break ExitReason::RemoteClosed;
+                            break ExitReason::RemoteClosed(conn.conn.error().cloned());
                         }
                     }
                     Err(e) => {
@@ -1518,8 +1514,7 @@ pub(super) async fn run_client(
                 break ExitReason::HeartbeatTimeout;
             }
             if conn.conn.is_closed() {
-                info!("Server closed the connection: {:?}", conn.conn.error());
-                break ExitReason::RemoteClosed;
+                break ExitReason::RemoteClosed(conn.conn.error().cloned());
             }
             // The housekeeping block owns the authoritative re-arm: it
             // may legitimately postpone the next service (idle back-off),
@@ -1611,9 +1606,11 @@ pub(super) async fn run_client(
     }
     let primary_error = match exit_reason {
         ExitReason::CleanShutdown => None,
-        ExitReason::RemoteClosed => Some(std::io::Error::new(
+        ExitReason::RemoteClosed(peer_error) => Some(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
-            "VPN server closed the connection; firewall remains fail-closed",
+            format!(
+                "VPN server closed the connection; firewall remains fail-closed: {peer_error:?}"
+            ),
         )),
         ExitReason::HeartbeatTimeout => Some(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
