@@ -14,6 +14,11 @@ pub(super) type LiveUringWorker = crate::optimize::uring_batch::UringBatchWorker
 #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
 pub(super) type LiveUringWorker = ();
 
+fn masque_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("QUICFUSCATE_MASQUE_TRACE").is_some())
+}
+
 pub fn load_server_identity(
     config: &mut crate::transport::Config,
     cert_path: &std::path::Path,
@@ -1406,22 +1411,38 @@ pub(super) async fn process_live_server_client_datagram(
                             route,
                             payload,
                         );
-                        if let Err(error) = tun_sink.write(payload) {
-                            // TODO-896: WouldBlock is transient backpressure, not a fault.
-                            if error.kind() == std::io::ErrorKind::WouldBlock {
-                                masque_metrics.record_tun_write_backpressure();
-                                return;
+                        match tun_sink.write(payload) {
+                            Ok(n) => {
+                                if masque_trace_enabled() {
+                                    log::info!(
+                                        "MASQUE uplink delivered to server TUN bytes={}",
+                                        n
+                                    );
+                                }
                             }
-                            log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
-                            record_live_tun_fault(
-                                &tun_fault_for_masque,
-                                &tun_notify_for_masque,
-                                &shutdown_for_masque,
-                                DataPlaneFault::TunWrite {
-                                    component: "server MASQUE downlink".to_string(),
-                                    error: error.to_string(),
-                                },
-                            );
+                            Err(error) => {
+                                // TODO-896: WouldBlock is transient backpressure, not a fault.
+                                if error.kind() == std::io::ErrorKind::WouldBlock {
+                                    masque_metrics.record_tun_write_backpressure();
+                                    if masque_trace_enabled() {
+                                        log::info!(
+                                            "MASQUE uplink TUN write backpressured bytes={}",
+                                            payload.len()
+                                        );
+                                    }
+                                    return;
+                                }
+                                log::warn!("Server TUN write (MASQUE) failed: {:?}", error);
+                                record_live_tun_fault(
+                                    &tun_fault_for_masque,
+                                    &tun_notify_for_masque,
+                                    &shutdown_for_masque,
+                                    DataPlaneFault::TunWrite {
+                                        component: "server MASQUE downlink".to_string(),
+                                        error: error.to_string(),
+                                    },
+                                );
+                            }
                         }
                     },
                 ))));
