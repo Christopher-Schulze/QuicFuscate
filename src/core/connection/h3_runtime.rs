@@ -935,6 +935,19 @@ impl QuicFuscateConnection {
             || packet.len() > self.effective_tunnel_mtu()
             || !matches!(packet.first().map(|byte| byte >> 4), Some(4 | 6))
         {
+            if masque_trace_enabled() {
+                let head: Vec<String> = packet
+                    .iter()
+                    .take(16)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                log::info!(
+                    "tunnel uplink rejected packet: len={} tunnel_mtu={} head={}",
+                    packet.len(),
+                    self.effective_tunnel_mtu(),
+                    head.join(" ")
+                );
+            }
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
         if self.private_required_payload_gate_closed() {
