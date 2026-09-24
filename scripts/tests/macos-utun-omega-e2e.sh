@@ -106,7 +106,9 @@ fi
 CURRENT_UTUNS="$(ifconfig -l | tr ' ' '\n' | grep -c '^utun' || true)"
 [ "$CURRENT_UTUNS" = "$BASELINE_UTUNS" ] \
   || fail "utun count drifted: baseline=$BASELINE_UTUNS now=$CURRENT_UTUNS"
-if pfctl -sA 2>/dev/null | grep -q "$PF_ANCHOR"; then
+# The anchor *statement* lives in the main ruleset permanently; residue means
+# rules still loaded inside the owned anchor, not the reference existing.
+if [ -n "$(pfctl -a "$PF_ANCHOR" -sr 2>/dev/null)" ]; then
   fail "pf anchor residue remains after graceful shutdown: $PF_ANCHOR"
 fi
 if netstat -nr -f inet 2>/dev/null | grep -q "$UTUN_IF"; then
