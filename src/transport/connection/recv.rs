@@ -1228,6 +1228,20 @@ impl Connection {
             let tag_reserve = self.tag_reserve_1rtt();
             log::trace!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",
                 off, need, tag_reserve, out.len(), self.dgram_send_queue.len());
+            if off + need + tag_reserve > out.len() {
+                static DATAGRAM_STALL_LOG_ONCE: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !DATAGRAM_STALL_LOG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::info!(
+                        "datagram queue head does not fit packet budget: need={} off={} tag_reserve={} out_len={} queue_len={} (head-of-line stall)",
+                        need,
+                        off,
+                        tag_reserve,
+                        out.len(),
+                        self.dgram_send_queue.len()
+                    );
+                }
+            }
             if off + need + tag_reserve <= out.len() {
                 let Some(front) = self.dgram_send_queue.get(self.admitted_batch_dgram_skip) else {
                     return Ok((off, None));
