@@ -202,9 +202,12 @@ impl UringRecvBatch {
             return None;
         }
 
-        // Register the eventfd so CQ completions trigger it.
-        if ring.submitter().register_eventfd_async(efd).is_err() {
-            log::debug!("register_eventfd_async failed");
+        // Register the eventfd so CQ completions trigger it. Plain
+        // IORING_REGISTER_EVENTFD (not _ASYNC): the async variant only
+        // signals worker-pool completions, while socket recv requests finish
+        // through the kernel's poll path and never raise the async eventfd.
+        if ring.submitter().register_eventfd(efd).is_err() {
+            log::debug!("register_eventfd failed");
             // SAFETY: efd is a valid open fd from the eventfd() call above and
             // is not used after this close.
             unsafe {
@@ -815,8 +818,8 @@ impl UringRecvMultishot {
             log::debug!("eventfd creation failed: {}", std::io::Error::last_os_error());
             return None;
         }
-        if ring.submitter().register_eventfd_async(efd).is_err() {
-            log::debug!("register_eventfd_async failed");
+        if ring.submitter().register_eventfd(efd).is_err() {
+            log::debug!("register_eventfd failed");
             // SAFETY: efd is a valid open fd not used after this close.
             unsafe {
                 libc::close(efd);

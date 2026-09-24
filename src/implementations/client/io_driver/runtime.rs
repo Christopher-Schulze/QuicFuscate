@@ -1175,6 +1175,7 @@ impl IoDriver {
             let timeout = self.recv_timeout(&conn);
             let readable = tokio::time::timeout(timeout, event.readable()).await;
 
+            let mut drain_ready = false;
             match readable {
                 Ok(Ok(mut guard)) => {
                     // Clear the eventfd counter (read 8 bytes).
@@ -1207,89 +1208,28 @@ impl IoDriver {
                             .transport_receive_error("client io_uring eventfd short read", error));
                     }
                     guard.clear_ready();
-
-                    // Drain all completed receives.
-                    let completions = receiver.drain_completions().map_err(|e| {
-                        self.transport_receive_error("client io_uring completion drain", e)
-                    })?;
-                    if masque_trace_enabled() {
-                        log::info!("client uring eventfd fired, completions={}", completions.len());
-                    }
-
-                    if !completions.is_empty() {
-                        crate::telemetry::IO_URING_RECV_BATCHES.inc();
-                        crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
-                        if masque_trace_enabled() {
-                            log::info!(
-                                "client uring completions n={} lens={:?}",
-                                completions.len(),
-                                completions.iter().map(|c| c.len()).collect::<Vec<_>>()
-                            );
-                        }
-
-                        // Telemetry accumulates into locals and lands as one
-                        // atomic batch; early returns flush what was counted.
-                        let flush_batch = |batch_bytes: u64, batch_packets: u64| {
-                            if batch_packets > 0 {
-                                self.stats
-                                    .udp_packets_received
-                                    .fetch_add(batch_packets, Ordering::Relaxed);
-                                let global = crate::instrumentation::global();
-                                global.transport.record_bytes_in(batch_bytes);
-                                global.transport.record_packets_in(batch_packets);
-                            }
-                        };
-                        let mut batch_bytes = 0u64;
-                        let mut batch_packets = 0u64;
-                        for mut c in completions {
-                            batch_bytes += c.len() as u64;
-                            batch_packets += 1;
-                            {
-                                let mut conn_guard = conn.lock();
-                                let completion_len = c.len;
-                                let recv_result = if let Some(block) = c.block {
-                                    conn_guard.recv_pooled_block(block, c.len)
-                                } else {
-                                    conn_guard.recv_mut(&mut c.data)
-                                };
-                                if let Err(e) = recv_result {
-                                    if masque_trace_enabled() {
-                                        log::info!(
-                                            "client uring conn.recv error bytes={} err={:?}",
-                                            completion_len,
-                                            e
-                                        );
-                                    } else {
-                                        log::debug!("Connection recv error: {:?}", e);
-                                    }
-                                    flush_batch(batch_bytes, batch_packets);
-                                    return Err(self.transport_receive_error(
-                                        "client io_uring QUIC receive",
-                                        e,
-                                    ));
-                                } else if masque_trace_enabled() {
-                                    log::info!("client uring conn.recv ok bytes={}", completion_len);
-                                }
-                            }
-
-                            if let Err(error) = self
-                                .poll_http3_to_ingress(&conn, &ingress)
-                                .and_then(|()| self.drain_ingress_to_tun(&tun, &ingress))
-                            {
-                                flush_batch(batch_bytes, batch_packets);
-                                return Err(error);
-                            }
-                        }
-                        flush_batch(batch_bytes, batch_packets);
-                    }
+                    drain_ready = true;
                 }
                 Ok(Err(e)) => {
                     log::warn!("AsyncFd error on uring recv eventfd: {}", e);
                     return Err(self.transport_receive_error("client io_uring eventfd", e));
                 }
                 Err(_) => {
-                    // Timeout - check shutdown, continue.
+                    // Timeout wake: drain anyway. CQEs are readable without an
+                    // eventfd signal - the fd only shortens wake latency, and a
+                    // kernel that under-signals it must not stall the path.
+                    drain_ready = true;
                 }
+            }
+
+            if drain_ready {
+                let completions = receiver.drain_completions().map_err(|e| {
+                    self.transport_receive_error("client io_uring completion drain", e)
+                })?;
+                if masque_trace_enabled() {
+                    log::info!("client uring drained completions={}", completions.len());
+                }
+                self.process_uring_completions(&conn, &tun, &ingress, completions)?;
             }
 
             if !handshake_signaled {
@@ -1305,6 +1245,84 @@ impl IoDriver {
             // Flush ACKs or PTO probes produced by the completions/timeout.
             self.flush_outbound(&conn, &socket, &mut send_buf).await?;
         }
+        Ok(())
+    }
+
+    /// Feed drained io_uring receive completions into QUIC, H3/MASQUE, and TUN.
+    /// Shared by the eventfd wake and the timeout-fallback drain so both paths
+    /// apply identical telemetry, error mapping, and downlink delivery.
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    fn process_uring_completions(
+        &self,
+        conn: &Arc<parking_lot::Mutex<ClientDataPlane>>,
+        tun: &Arc<parking_lot::Mutex<TunInterface>>,
+        ingress: &ClientTunnelIngress,
+        completions: Vec<crate::optimize::uring_batch::RecvCompletion>,
+    ) -> Result<(), EngineError> {
+        if completions.is_empty() {
+            return Ok(());
+        }
+        crate::telemetry::IO_URING_RECV_BATCHES.inc();
+        crate::telemetry::IO_URING_RECV_PACKETS.inc_by(completions.len() as u64);
+        if masque_trace_enabled() {
+            log::info!(
+                "client uring completions n={} lens={:?}",
+                completions.len(),
+                completions.iter().map(|c| c.len()).collect::<Vec<_>>()
+            );
+        }
+
+        // Telemetry accumulates into locals and lands as one atomic batch;
+        // early returns flush what was counted.
+        let flush_batch = |batch_bytes: u64, batch_packets: u64| {
+            if batch_packets > 0 {
+                self.stats
+                    .udp_packets_received
+                    .fetch_add(batch_packets, Ordering::Relaxed);
+                let global = crate::instrumentation::global();
+                global.transport.record_bytes_in(batch_bytes);
+                global.transport.record_packets_in(batch_packets);
+            }
+        };
+        let mut batch_bytes = 0u64;
+        let mut batch_packets = 0u64;
+        for mut c in completions {
+            batch_bytes += c.len() as u64;
+            batch_packets += 1;
+            {
+                let mut conn_guard = conn.lock();
+                let completion_len = c.len;
+                let recv_result = if let Some(block) = c.block {
+                    conn_guard.recv_pooled_block(block, c.len)
+                } else {
+                    conn_guard.recv_mut(&mut c.data)
+                };
+                if let Err(e) = recv_result {
+                    if masque_trace_enabled() {
+                        log::info!(
+                            "client uring conn.recv error bytes={} err={:?}",
+                            completion_len,
+                            e
+                        );
+                    } else {
+                        log::debug!("Connection recv error: {:?}", e);
+                    }
+                    flush_batch(batch_bytes, batch_packets);
+                    return Err(self.transport_receive_error("client io_uring QUIC receive", e));
+                } else if masque_trace_enabled() {
+                    log::info!("client uring conn.recv ok bytes={}", completion_len);
+                }
+            }
+
+            if let Err(error) = self
+                .poll_http3_to_ingress(conn, ingress)
+                .and_then(|()| self.drain_ingress_to_tun(tun, ingress))
+            {
+                flush_batch(batch_bytes, batch_packets);
+                return Err(error);
+            }
+        }
+        flush_batch(batch_bytes, batch_packets);
         Ok(())
     }
 
