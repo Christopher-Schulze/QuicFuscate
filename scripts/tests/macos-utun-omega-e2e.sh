@@ -58,11 +58,22 @@ chmod 644 "$WORK_DIR/client.log"
 
 # The standalone client path logs nothing on TUN success — readiness is the
 # interface itself: a new utun carrying the assigned 10.252.0.x address.
+# NOTE: the probe must always exit 0 — under `set -o pipefail` a non-matching
+# while-loop leaves status 1, which would abort the assignment via `set -e`.
+find_tunnel_if() {
+  local i
+  for i in $(ifconfig -l | tr ' ' '\n' | grep '^utun'); do
+    if ifconfig "$i" 2>/dev/null | grep -q 'inet 10\.252\.0\.'; then
+      echo "$i"
+      return 0
+    fi
+  done
+  return 0
+}
 UTUN_IF=""
+echo "INFO: waiting up to ${TIMEOUT}s for tunnel interface with 10.252.0.x ..."
 for ((attempt = 0; attempt < TIMEOUT; attempt++)); do
-  UTUN_IF="$(ifconfig -l | tr ' ' '\n' | grep '^utun' | while read -r i; do
-    ifconfig "$i" 2>/dev/null | grep -q 'inet 10\.252\.0\.' && echo "$i"
-  done | head -1)"
+  UTUN_IF="$(find_tunnel_if)"
   [ -n "$UTUN_IF" ] && break
   kill -0 "$CLIENT_PID" 2>/dev/null || break
   sleep 1
