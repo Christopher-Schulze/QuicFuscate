@@ -508,6 +508,11 @@ impl QuicFuscateConnection {
             if let Ok(mut f) = cb.lock() {
                 (f)(0x00, payload);
             }
+        } else if masque_trace_enabled() {
+            info!(
+                "dropping MASQUE datagram payload: no sink installed bytes={}",
+                payload.len()
+            );
         }
     }
 
@@ -681,7 +686,19 @@ impl QuicFuscateConnection {
                             masque_cb,
                             &payload[..outcome.packet_len],
                         );
+                    } else if masque_trace_enabled() {
+                        info!(
+                            "dropping MASQUE TunIp payload: ingress normalizer dropped flow={} bytes={}",
+                            flow_id, payload_len
+                        );
                     }
+                } else if masque_trace_enabled() {
+                    info!(
+                        "dropping MASQUE TunIp payload with non-IP leading byte flow={} bytes={} first={:#04x?}",
+                        flow_id,
+                        payload_len,
+                        payload[..payload_len].first()
+                    );
                 }
             }
             MasqueFlowPurpose::NextHopUdp => {
@@ -726,6 +743,12 @@ impl QuicFuscateConnection {
             || context.bindings.masque_relay_cb.is_some();
         if stealth_manager.masque_datagram_enabled() || has_sink {
             while let Some((flow_id, offset, payload_len)) = h3.try_recv_masque_datagram(conn) {
+                if masque_trace_enabled() {
+                    info!(
+                        "draining MASQUE datagram flow={} offset={} bytes={}",
+                        flow_id, offset, payload_len
+                    );
+                }
                 let binding =
                     context.local_flows.get(&flow_id).or_else(|| context.peer_flows.get(&flow_id));
                 Self::dispatch_bound_masque_payload(

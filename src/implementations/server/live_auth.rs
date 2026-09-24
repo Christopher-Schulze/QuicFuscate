@@ -1343,6 +1343,7 @@ pub(super) async fn process_live_server_client_datagram(
                             require_auth,
                             datagram_auth_gate.load(AtomicOrdering::Relaxed),
                         ) {
+                            log::debug!("Client MASQUE uplink denied: QKey auth gate closed");
                             return;
                         }
                         let logical_addr = **masque_logical_addr.load();
