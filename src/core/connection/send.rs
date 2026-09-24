@@ -13,6 +13,14 @@ enum ProduceOutcome {
     Ready,
 }
 
+/// `BufferTooShort` carries no site context and surfaces across the entire
+/// send path, so each raise reports its caller location once under debug.
+#[track_caller]
+fn buffer_too_short() -> crate::error::ConnectionError {
+    log::debug!("BufferTooShort raised at {}", std::panic::Location::caller());
+    crate::error::ConnectionError::BufferTooShort
+}
+
 impl QuicFuscateConnection {
     /// Earliest outgoing release imposed by the pacer or an open deferral
     /// window edge (TODO-1016).
@@ -447,7 +455,7 @@ impl QuicFuscateConnection {
         let quic_end = quic_offset
             .checked_add(write)
             .filter(|end| *end <= send_buffer.len())
-            .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+            .ok_or_else(buffer_too_short)?;
         send_buffer.copy_within(quic_offset..quic_end, 0);
         Ok(None)
     }
@@ -515,7 +523,7 @@ impl QuicFuscateConnection {
         // Check if there are any responses from upstream to send back (bypass stealth scheduler)
         if let Some(resp) = self.stealth_manager.poll_fallback() {
             if buf.len() < resp.data.len() {
-                return Err(crate::error::ConnectionError::BufferTooShort);
+                return Err(buffer_too_short());
             }
             buf[..resp.data.len()].copy_from_slice(&resp.data);
             return Ok((
@@ -963,7 +971,7 @@ impl QuicFuscateConnection {
         for _ in 0..count {
             let block = PooledBlock::new(pool.clone());
             if block.len() <= head {
-                return Err(crate::error::ConnectionError::BufferTooShort);
+                return Err(buffer_too_short());
             }
             blocks.push(block);
         }
@@ -1004,7 +1012,7 @@ impl QuicFuscateConnection {
         let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
         let send_result = if wire_profile.is_some() {
             if send_buffer.len() <= 2 * wire::SOURCE_LENGTH_LEN {
-                return Err(crate::error::ConnectionError::BufferTooShort);
+                return Err(buffer_too_short());
             }
             self.conn.send_with_datagram_overhead(
                 &mut send_buffer[2 * wire::SOURCE_LENGTH_LEN..],
@@ -1033,7 +1041,7 @@ impl QuicFuscateConnection {
             }
             Err(crate::error::ConnectionError::BufferTooShort) => {
                 drop(send_buffer);
-                return Err(crate::error::ConnectionError::BufferTooShort);
+                return Err(buffer_too_short());
             }
             Err(e) => {
                 drop(send_buffer);
@@ -1101,7 +1109,7 @@ impl QuicFuscateConnection {
                 u16::try_from(write).map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
             let source_len = quic_len
                 .checked_add(wire::SOURCE_LENGTH_LEN as u16)
-                .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+                .ok_or_else(buffer_too_short)?;
             send_buffer[..wire::SOURCE_LENGTH_LEN].copy_from_slice(&source_len.to_be_bytes());
             send_buffer[wire::SOURCE_LENGTH_LEN..2 * wire::SOURCE_LENGTH_LEN]
                 .copy_from_slice(&quic_len.to_be_bytes());
@@ -1412,7 +1420,7 @@ impl QuicFuscateConnection {
                 return Ok((0, zero_send_info(now)));
             }
             Err(crate::error::ConnectionError::BufferTooShort) => {
-                return Err(crate::error::ConnectionError::BufferTooShort);
+                return Err(buffer_too_short());
             }
             Err(e) => return Err(crate::error::ConnectionError::Transport(e.to_string())),
         };
@@ -1458,7 +1466,7 @@ impl QuicFuscateConnection {
             if self.burst_draining.get() {
                 let mut send_buffer = PooledBlock::new(self.optimization_manager.memory_pool());
                 if send_buffer.len() < write {
-                    return Err(crate::error::ConnectionError::BufferTooShort);
+                    return Err(buffer_too_short());
                 }
                 send_buffer[..write].copy_from_slice(&buf[..write]);
                 let send_pool = send_buffer.pool();

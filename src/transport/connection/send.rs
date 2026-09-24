@@ -1,6 +1,14 @@
 use super::state::AdmittedShortHeader;
 use super::*;
 
+/// `BufferTooShort` carries no site context and surfaces across the entire
+/// send path, so each raise reports its caller location once under debug.
+#[track_caller]
+fn buffer_too_short() -> crate::error::ConnectionError {
+    log::debug!("BufferTooShort raised at {}", std::panic::Location::caller());
+    crate::error::ConnectionError::BufferTooShort
+}
+
 impl Connection {
     /// Generates outgoing packet
     #[inline(always)]
@@ -62,7 +70,7 @@ impl Connection {
         // the RFC Length, rewrites the compact header and seals once.
         let header_reserve = packet::long_header_reserve(&header)?;
         if out.len() < header_reserve {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(buffer_too_short());
         }
         let close = &self.pending_control[close_index];
         let payload_len = frames::to_bytes(close, &mut out[header_reserve..])?;
@@ -110,7 +118,7 @@ impl Connection {
         use crate::error::ConnectionError;
         use udpfast::unlikely;
         if unlikely(out.len() < MIN_CLIENT_INITIAL_LEN) {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(buffer_too_short());
         }
         if self.is_closed {
             if self.tls_provider.is_some()
@@ -185,7 +193,7 @@ impl Connection {
         log::trace!("send_with_datagram_overhead: out_len={} dgram_send_max_size={} pmtu={} packetization_mtu={} outer_mtu_cap={} datagram_overhead={} mtu_cap={} dgram_queue_len={} bytes_in_flight={} cwnd={}",
             out.len(), self.dgram_send_max_size, pmtu, packetization_mtu, outer_mtu_cap, datagram_overhead, mtu_cap, self.dgram_send_queue.len(), self.bytes_in_flight, self.cwnd);
         if unlikely(mtu_cap == 0) {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(buffer_too_short());
         }
         let out = &mut out[..mtu_cap];
         // Congestion gate: only send if within cwnd budget.
@@ -290,7 +298,7 @@ impl Connection {
                 // seals once with the final packet-number offset.
                 let header_reserve = packet::long_header_reserve(&base_hdr)?;
                 if out.len() < header_reserve {
-                    return Err(ConnectionError::BufferTooShort);
+                    return Err(buffer_too_short());
                 }
                 let mut off = header_reserve;
 
@@ -514,7 +522,7 @@ impl Connection {
             4
         };
         if out.len() < hdr_len + pn_len {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(buffer_too_short());
         }
         // Write truncated PN (big-endian) before encryption
         {
@@ -923,7 +931,7 @@ impl Connection {
         // the RFC Length, rewrites the compact header and seals once.
         let header_reserve = packet::long_header_reserve(&base_hdr)?;
         if out.len() < header_reserve {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(buffer_too_short());
         }
         let mut off = header_reserve;
 
