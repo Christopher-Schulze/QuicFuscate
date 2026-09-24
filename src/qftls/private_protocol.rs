@@ -1651,4 +1651,57 @@ mod tests {
             .expect("tampered body still parses");
         assert!(decoded.verify_authenticated_with(&[0x77; PRIVATE_HASH_LEN], &shape).is_err());
     }
+
+    #[test]
+    fn advanced_required_pair_completes_authenticated_negotiation() {
+        let mut client = PrivateNegotiationMachine::new(
+            PacketProtectionMode::AdvancedRequired,
+            PrivateNegotiationRole::Client,
+            Some(PrivateAeadFamily::Aegis128L),
+            7,
+            1,
+            b"h3".to_vec(),
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            [0x44; PRIVATE_HASH_LEN],
+            [0x11; PRIVATE_NONCE_LEN],
+        )
+        .expect("client machine");
+        let mut server = PrivateNegotiationMachine::new(
+            PacketProtectionMode::AdvancedRequired,
+            PrivateNegotiationRole::Server,
+            Some(PrivateAeadFamily::Aegis128L),
+            7,
+            1,
+            b"h3".to_vec(),
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            [0x44; PRIVATE_HASH_LEN],
+            [0x22; PRIVATE_NONCE_LEN],
+        )
+        .expect("server machine");
+        for machine in [&mut client, &mut server] {
+            machine.install_exporter_root(&[0x77; PRIVATE_HASH_LEN]).expect("root");
+            machine.mark_authenticated().expect("auth");
+        }
+
+        let proposal = client.build_proposal().expect("proposal");
+        server.receive_proposal(&proposal).expect("proposal");
+        let selection = server.build_selection().expect("selection");
+        client.receive_selection(&selection).expect("selection");
+        let client_confirmation = client.build_confirmation(100).expect("client boundary");
+        server.receive_confirmation(&client_confirmation).expect("client confirmation");
+        let server_confirmation = server.build_confirmation(200).expect("server boundary");
+        client.receive_confirmation(&server_confirmation).expect("server confirmation");
+        server.activate().expect("server activation");
+        client.activate().expect("client activation");
+        assert_eq!(client.state(), PrivateNegotiationState::AdvancedActive);
+        assert_eq!(server.state(), PrivateNegotiationState::AdvancedActive);
+        let client_material =
+            client.derive_material(PrivateDirection::ClientToServer, 1).expect("client material");
+        let server_material =
+            server.derive_material(PrivateDirection::ClientToServer, 1).expect("server material");
+        assert_eq!(client_material.key.as_slice(), server_material.key.as_slice());
+        assert_eq!(client_material.iv.as_slice(), server_material.iv.as_slice());
+    }
 }

@@ -2464,3 +2464,137 @@ fn maybenot_recv_events_reach_runtime() {
         "accepted datagrams must feed the machine"
     );
 }
+
+fn advanced_required_test_client(
+    clock: crate::time_source::ProtocolClock,
+) -> (QuicFuscateConnection, QuicFuscateConnection) {
+    let (mut client, server) =
+        test_tls_connection_pair(StealthConfig::default(), StealthConfig::default());
+    client.clock = clock;
+    client.set_private_packet_protection_policy(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+    );
+    client.set_authenticated_qkey_transcript_hash([0x42; 32]);
+    (client, server)
+}
+
+#[test]
+fn advanced_required_missing_family_fails_closed_immediately() {
+    let (mut client, _server) =
+        test_tls_connection_pair(StealthConfig::default(), StealthConfig::default());
+    client.set_private_packet_protection_policy(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        None,
+    );
+    client.set_authenticated_qkey_transcript_hash([0x42; 32]);
+
+    let error = client
+        .private_packet_protection_control_tick()
+        .expect_err("required policy without a family must fail closed");
+    assert!(
+        matches!(error, crate::error::ConnectionError::CryptoError(ref message) if message.contains("family")),
+        "expected missing-family error, got {error}"
+    );
+}
+
+#[test]
+fn advanced_required_pending_control_deadline_fails_closed() {
+    let manual = crate::time_source::test_support::ManualTimeSource::new(
+        std::time::Instant::now(),
+        std::time::SystemTime::now(),
+    );
+    let (mut client, _server) = advanced_required_test_client(
+        crate::time_source::ProtocolClock::from_source(manual.clone()),
+    );
+
+    // No authenticated MASQUE control flow exists: the peer cannot negotiate.
+    // The wait must start bounded instead of idling on standard protection.
+    client
+        .private_packet_protection_control_tick()
+        .expect("first pending tick is still inside the deadline");
+    assert!(client.private_required_pending_since.is_some());
+
+    manual.advance(std::time::Duration::from_secs(11));
+    let error = client
+        .private_packet_protection_control_tick()
+        .expect_err("unsupported peer must fail closed at the deadline");
+    assert!(
+        matches!(error, crate::error::ConnectionError::CryptoError(ref message) if message.contains("deadline")),
+        "expected negotiation deadline error, got {error}"
+    );
+    assert!(!client.take_private_upgrade_activated());
+}
+
+#[test]
+fn advanced_required_runtime_deadline_terminates_negotiation() {
+    let manual = crate::time_source::test_support::ManualTimeSource::new(
+        std::time::Instant::now(),
+        std::time::SystemTime::now(),
+    );
+    let (mut client, _server) = advanced_required_test_client(
+        crate::time_source::ProtocolClock::from_source(manual.clone()),
+    );
+
+    // Inject the runtime shape `ensure` builds, created at the manual clock's now.
+    let created_at = client.protocol_clock().now();
+    let mut machine = crate::qftls::PrivateNegotiationMachine::new(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        crate::qftls::PrivateNegotiationRole::Client,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+        7,
+        1,
+        b"h3".to_vec(),
+        vec![1, 2, 3],
+        vec![4, 5, 6],
+        [0x44; crate::qftls::PRIVATE_HASH_LEN],
+        [0x11; crate::qftls::PRIVATE_NONCE_LEN],
+    )
+    .expect("negotiation machine");
+    machine.install_exporter_root(&[0x77; crate::qftls::PRIVATE_HASH_LEN]).expect("exporter root");
+    machine.mark_authenticated().expect("authenticated state");
+    client.private_packet_protection_runtime = Some(Arc::new(std::sync::Mutex::new(
+        private_packet_protection::PrivatePacketProtectionRuntime::new(
+            qf_crypto::PacketProtectionMode::AdvancedRequired,
+            crate::qftls::PrivateNegotiationRole::Client,
+            machine,
+            created_at,
+        ),
+    )));
+
+    manual.advance(std::time::Duration::from_secs(11));
+    let error = client
+        .private_packet_protection_control_tick()
+        .expect_err("expired required negotiation must fail closed");
+    assert!(
+        matches!(error, crate::error::ConnectionError::CryptoError(ref message) if message.contains("deadline")),
+        "expected negotiation deadline error, got {error}"
+    );
+    let runtime = client.private_packet_protection_runtime.as_ref().expect("runtime");
+    let runtime = runtime.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(runtime.machine().state(), crate::qftls::PrivateNegotiationState::Terminal);
+}
+
+#[test]
+fn auto_pending_control_deadline_keeps_standard_fallback() {
+    let manual = crate::time_source::test_support::ManualTimeSource::new(
+        std::time::Instant::now(),
+        std::time::SystemTime::now(),
+    );
+    let (mut client, _server) =
+        test_tls_connection_pair(StealthConfig::default(), StealthConfig::default());
+    client.clock = crate::time_source::ProtocolClock::from_source(manual.clone());
+    client.set_private_packet_protection_policy(
+        qf_crypto::PacketProtectionMode::Auto,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+    );
+    client.set_authenticated_qkey_transcript_hash([0x42; 32]);
+
+    client.private_packet_protection_control_tick().expect("auto pending tick");
+    assert!(client.private_required_pending_since.is_none());
+    manual.advance(std::time::Duration::from_secs(11));
+    client
+        .private_packet_protection_control_tick()
+        .expect("auto keeps the unbounded standard fallback");
+    assert!(!client.take_private_upgrade_activated());
+}

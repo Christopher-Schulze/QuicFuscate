@@ -72,6 +72,28 @@ pub fn runtime_mode_uses_libaegis(
     }
 }
 
+/// Resolve the packet-protection policy applied to one live connection.
+///
+/// The stealth-mode pin owns the `auto`-vs-`standard` choice so stealth modes
+/// keep their standards-only wire contract. An explicit `advanced-required`
+/// request tightens the resulting mode while retaining the validated private
+/// family: the connection then fails closed instead of silently falling back
+/// to standard protection. Validation rejects `advanced-required` combined
+/// with stealth modes that pin the standard baseline, so reaching this helper
+/// with `stealth_uses_libaegis == false` still preserves the explicit family
+/// as a defensive invariant rather than weakening the requested policy.
+pub fn effective_packet_protection_policy(
+    crypto: &CryptoConfig,
+    stealth_uses_libaegis: bool,
+) -> (PacketProtectionMode, Option<PrivateAeadFamily>) {
+    let (mode, family) = qf_crypto::payload_protection_pin(stealth_uses_libaegis);
+    if crypto.packet_protection_mode == PacketProtectionMode::AdvancedRequired {
+        (PacketProtectionMode::AdvancedRequired, family.or_else(|| crypto.private_family()))
+    } else {
+        (mode, family)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +112,33 @@ mod tests {
         config.force_aead.clear();
         config.aead_preference = AeadPreference::Aegis128L;
         assert!(requests_private_packet_protection(&config));
+    }
+
+    #[test]
+    fn effective_packet_protection_policy_preserves_required_mode() {
+        let mut crypto = CryptoConfig::default();
+        assert_eq!(
+            effective_packet_protection_policy(&crypto, false),
+            (PacketProtectionMode::Standard, None)
+        );
+
+        crypto.aead_preference = AeadPreference::Aegis128L;
+        assert_eq!(
+            effective_packet_protection_policy(&crypto, true),
+            (PacketProtectionMode::Auto, Some(PrivateAeadFamily::Aegis128L))
+        );
+
+        // advanced-required tightens the stealth-pinned mode while retaining
+        // the validated explicit family - it never degrades to standard.
+        crypto.packet_protection_mode = PacketProtectionMode::AdvancedRequired;
+        assert_eq!(
+            effective_packet_protection_policy(&crypto, true),
+            (PacketProtectionMode::AdvancedRequired, Some(PrivateAeadFamily::Aegis128L))
+        );
+        assert_eq!(
+            effective_packet_protection_policy(&crypto, false),
+            (PacketProtectionMode::AdvancedRequired, Some(PrivateAeadFamily::Aegis128L))
+        );
     }
 
     #[test]

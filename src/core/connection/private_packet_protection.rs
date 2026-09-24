@@ -34,10 +34,20 @@ impl QuicFuscateConnection {
         } else {
             self.local_private_packet_protection_control_available()
         };
-        if !self.conn.tls_handshake_complete()
-            || self.authenticated_qkey_transcript_hash.is_none()
-            || !control_available
+        if !self.conn.tls_handshake_complete() {
+            return Ok(false);
+        }
+        // A required policy without a selected family is a local contract
+        // violation: fail closed immediately instead of idling until the
+        // pending-prerequisite deadline fires.
+        if self.private_packet_protection_mode == PacketProtectionMode::AdvancedRequired
+            && self.private_packet_protection_family.is_none()
         {
+            return Err(crate::error::ConnectionError::CryptoError(
+                "advanced-required private packet protection has no selected family".to_string(),
+            ));
+        }
+        if self.authenticated_qkey_transcript_hash.is_none() || !control_available {
             return Ok(false);
         }
         let Some(family) = self.private_packet_protection_family else {
@@ -150,7 +160,7 @@ impl QuicFuscateConnection {
     ) -> Result<(), crate::error::ConnectionError> {
         let _ = self.ensure_private_packet_protection_runtime()?;
         let Some(runtime) = self.private_packet_protection_runtime.as_ref().cloned() else {
-            return Ok(());
+            return self.require_private_pending_within_deadline();
         };
         let boundary = self.conn.next_application_send_packet_number()?.saturating_add(1);
         let now = self.protocol_clock().now();
@@ -209,6 +219,30 @@ impl QuicFuscateConnection {
                 return Err(error);
             }
             runtime.mark_owner_activation_attempted();
+        }
+        Ok(())
+    }
+
+    /// Bound the pre-runtime wait of an advanced-required connection. Once the
+    /// TLS handshake completes, the same negotiation deadline that bounds an
+    /// active exchange also bounds the wait for the QKey transcript binding and
+    /// the authenticated MASQUE control flow; an unsupported or silent peer
+    /// must fail closed instead of idling on standard protection forever. Auto
+    /// keeps its standard-fallback semantics and is intentionally unbounded.
+    fn require_private_pending_within_deadline(
+        &mut self,
+    ) -> Result<(), crate::error::ConnectionError> {
+        if self.private_packet_protection_mode != PacketProtectionMode::AdvancedRequired
+            || !self.conn.tls_handshake_complete()
+        {
+            return Ok(());
+        }
+        let now = self.protocol_clock().now();
+        let pending_since = *self.private_required_pending_since.get_or_insert(now);
+        if now.saturating_duration_since(pending_since) >= PRIVATE_NEGOTIATION_DEADLINE {
+            return Err(crate::error::ConnectionError::CryptoError(
+                PrivateProtocolError::NegotiationTimeout.to_string(),
+            ));
         }
         Ok(())
     }

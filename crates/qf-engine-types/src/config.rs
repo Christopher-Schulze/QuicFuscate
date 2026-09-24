@@ -19,7 +19,8 @@ use crate::{
     AeadPreference, AntiReplaySection, AuditConfig, CcAlgorithm, CircuitConfig, ConfigError,
     ConnectionConfig, CryptoConfig, EngineMode, EngineSection, FecSection,
     FingerprintRotationConfig, InterfaceConfig, LoggingConfig, NatTraversalSection,
-    OptimizationConfig, QKeyConfig, SecurityConfig, StealthMode, TelemetryConfig, TransportConfig,
+    OptimizationConfig, PacketProtectionMode, QKeyConfig, SecurityConfig, StealthMode,
+    TelemetryConfig, TransportConfig,
 };
 
 /// Complete engine configuration aggregating all subsystems.
@@ -208,6 +209,32 @@ impl EngineConfig {
             .validate()
             .map_err(|error| ConfigError::Validation(error.to_string()))?;
         self.crypto.validate().map_err(ConfigError::Validation)?;
+        if self.crypto.packet_protection_mode == PacketProtectionMode::AdvancedRequired {
+            // Stealth modes pin the standards-only wire baseline for the whole
+            // connection; a required private upgrade would either violate that
+            // contract or be silently weakened to standard protection.
+            if matches!(
+                self.stealth.mode,
+                StealthMode::Stealth | StealthMode::StealthMax | StealthMode::Dynamic
+            ) {
+                return Err(ConfigError::Validation(
+                    "crypto.packet_protection_mode = \"advanced-required\" conflicts with a stealth mode that pins standard packet protection; use off, manual, or performance"
+                        .to_string(),
+                ));
+            }
+            // Multi-hop paths never propagate the private policy onto hop
+            // connections today; accepting the mode there would silently run
+            // standard protection on every hop.
+            if self.circuit.is_some()
+                || self.alternate_circuit.is_some()
+                || self.connection.outer_hop != crate::OuterHop::None
+            {
+                return Err(ConfigError::Validation(
+                    "crypto.packet_protection_mode = \"advanced-required\" is not supported on circuit or outer_hop paths yet; it must not silently degrade to standard protection"
+                        .to_string(),
+                ));
+            }
+        }
         self.interface.validate().map_err(|error| ConfigError::Validation(error.to_string()))?;
         self.telemetry.validate().map_err(ConfigError::Validation)?;
         self.logging.validate().map_err(ConfigError::Validation)?;
@@ -1065,7 +1092,7 @@ mode = "roaming"
     #[test]
     fn private_packet_policy_roundtrips_as_typed_config_and_validates() {
         let config = EngineConfig::from_toml(
-            "[crypto]\npacket_protection_mode = \"advanced-required\"\naead_preference = \"aegis\"\n",
+            "[crypto]\npacket_protection_mode = \"advanced-required\"\naead_preference = \"aegis\"\n[stealth]\nmode = \"manual\"\n",
         )
         .expect("private packet policy parses");
         assert_eq!(config.crypto.packet_protection_mode, PacketProtectionMode::AdvancedRequired);

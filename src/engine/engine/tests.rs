@@ -26,22 +26,68 @@ fn canonical_circuit_example_parses_and_validates() {
 }
 
 #[test]
-fn advanced_required_private_packet_policy_fails_closed_until_promotion_gates() {
+fn advanced_required_private_policy_constructs_with_explicit_family() {
     let mut config = EngineConfig::default();
+    config.stealth.mode = qf_engine_types::StealthMode::Manual;
     config.crypto.packet_protection_mode = qf_engine_types::PacketProtectionMode::AdvancedRequired;
     config.crypto.aead_preference = qf_engine_types::AeadPreference::Aegis128L;
 
-    let error = match QuicFuscateEngine::new(config) {
-        Ok(_) => panic!("advanced-required must not construct before promotion gates"),
-        Err(error) => error,
-    };
-    match error {
-        EngineError::Config(message) => {
-            assert!(message.contains("TODO-883"), "error must identify TODO-883: {message}");
-            assert!(message.contains("TODO-884"), "error must identify TODO-884: {message}");
-            assert!(message.contains("TODO-681"), "error must identify TODO-681: {message}");
+    QuicFuscateEngine::new(config).expect(
+        "explicit advanced-required opt-in with a private-capable stealth mode must construct",
+    );
+}
+
+#[test]
+fn advanced_required_private_policy_fails_closed_on_contradictions() {
+    // Missing explicit family: validation must reject before any runtime exists.
+    let mut missing_family = EngineConfig::default();
+    missing_family.stealth.mode = qf_engine_types::StealthMode::Manual;
+    missing_family.crypto.packet_protection_mode =
+        qf_engine_types::PacketProtectionMode::AdvancedRequired;
+    match QuicFuscateEngine::new(missing_family) {
+        Ok(_) => panic!("advanced-required without a family must fail closed"),
+        Err(EngineError::Config(message)) => {
+            assert!(message.contains("advanced-required"), "error must name the mode: {message}");
         }
-        other => panic!("advanced-required returned the wrong error: {other:?}"),
+        Err(other) => panic!("missing-family returned the wrong error: {other:?}"),
+    }
+
+    // Standard-pinning stealth modes cannot host a required private upgrade.
+    let mut stealth_conflict = EngineConfig::default();
+    stealth_conflict.crypto.packet_protection_mode =
+        qf_engine_types::PacketProtectionMode::AdvancedRequired;
+    stealth_conflict.crypto.aead_preference = qf_engine_types::AeadPreference::Aegis128L;
+    match QuicFuscateEngine::new(stealth_conflict) {
+        Ok(_) => panic!("advanced-required inside a standard-pinned stealth mode must fail closed"),
+        Err(EngineError::Config(message)) => {
+            assert!(message.contains("stealth"), "error must name the stealth conflict: {message}");
+        }
+        Err(other) => panic!("stealth conflict returned the wrong error: {other:?}"),
+    }
+
+    // Multi-hop paths never propagate the policy onto hop connections.
+    let mut circuit_conflict = EngineConfig::default();
+    circuit_conflict.stealth.mode = qf_engine_types::StealthMode::Manual;
+    circuit_conflict.crypto.packet_protection_mode =
+        qf_engine_types::PacketProtectionMode::AdvancedRequired;
+    circuit_conflict.crypto.aead_preference = qf_engine_types::AeadPreference::Aegis128L;
+    circuit_conflict.connection.outer_hop = qf_engine_types::OuterHop::Masque;
+    circuit_conflict.connection.qkey_token = Some(qf_engine_types::QKeyToken::new("ab".repeat(16)));
+    circuit_conflict.connection.outer_hop_relay = Some(qf_engine_types::HopConfig {
+        label: "edge".to_string(),
+        endpoint: "relay.example.com:4433".to_string(),
+        sni: "relay.example.com".to_string(),
+        qkey_id: "0123456789ab".to_string(),
+        qkey_token_ref: "env:QF_RELAY_QKEY".to_string(),
+        role: qf_engine_types::HopRole::Relay,
+        ..qf_engine_types::HopConfig::default()
+    });
+    match QuicFuscateEngine::new(circuit_conflict) {
+        Ok(_) => panic!("advanced-required on a multi-hop path must fail closed"),
+        Err(EngineError::Config(message)) => {
+            assert!(message.contains("advanced-required"), "error must name the mode: {message}");
+        }
+        Err(other) => panic!("multi-hop conflict returned the wrong error: {other:?}"),
     }
 }
 

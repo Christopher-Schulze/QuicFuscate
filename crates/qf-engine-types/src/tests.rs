@@ -413,3 +413,35 @@ fn outer_hop_roundtrips_through_engine_toml() {
     assert_eq!(decoded.connection.outer_hop, OuterHop::Masque);
     assert!(decoded.connection.outer_hop_relay.is_some());
 }
+
+#[test]
+fn advanced_required_rejects_standard_pinned_stealth_and_multi_hop() {
+    let mut base = EngineConfig::default();
+    base.crypto.packet_protection_mode = PacketProtectionMode::AdvancedRequired;
+    base.crypto.aead_preference = AeadPreference::Aegis128L;
+
+    // The default stealth mode (dynamic) pins the standard wire baseline.
+    let error = base.validate().expect_err("standard-pinned stealth must fail");
+    assert!(error.to_string().contains("stealth"), "{error}");
+
+    // Private-capable stealth modes validate the explicit opt-in.
+    base.stealth.mode = StealthMode::Performance;
+    base.validate().expect("performance stealth plus explicit family validates");
+    base.stealth.mode = StealthMode::Manual;
+    base.validate().expect("manual stealth plus explicit family validates");
+
+    // Multi-hop paths never propagate the private policy onto hop connections.
+    base.connection.outer_hop = OuterHop::Masque;
+    base.connection.qkey_token = Some(crate::QKeyToken::new("cd".repeat(16)));
+    base.connection.outer_hop_relay = Some(circuit::HopConfig {
+        label: "edge".to_string(),
+        endpoint: "relay.example.com:4433".to_string(),
+        sni: "relay.example.com".to_string(),
+        qkey_id: "0123456789ab".to_string(),
+        qkey_token_ref: "env:QF_RELAY_QKEY".to_string(),
+        role: circuit::HopRole::Relay,
+        ..circuit::HopConfig::default()
+    });
+    let error = base.validate().expect_err("multi-hop advanced-required must fail");
+    assert!(error.to_string().contains("advanced-required"), "{error}");
+}

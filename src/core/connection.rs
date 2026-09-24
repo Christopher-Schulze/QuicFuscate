@@ -155,6 +155,11 @@ pub struct QuicFuscateConnection {
     private_protocol_shape: crate::qftls::PrivateProtocolShape,
     /// One-shot latch so the private upgrade is counted once per connection.
     private_upgrade_observed: bool,
+    /// Start of the post-handshake wait for advanced-required prerequisites
+    /// (QKey transcript binding plus the authenticated MASQUE control flow).
+    /// Bounded by the shared private negotiation deadline so an unsupported or
+    /// silent peer fails closed instead of idling on standard protection.
+    private_required_pending_since: Option<std::time::Instant>,
     masque_relay_response_queue: Option<Arc<std::sync::Mutex<MasqueRelayResponseQueue>>>,
     /// Locally-initiated MASQUE CONNECT-UDP stream id (client side).
     masque_stream_id: Option<u64>,
@@ -696,6 +701,7 @@ impl QuicFuscateConnection {
             private_packet_protection_family: params.private_packet_protection_family,
             private_protocol_shape: params.private_protocol_shape,
             private_upgrade_observed: false,
+            private_required_pending_since: None,
             masque_relay_response_queue: None,
             masque_stream_id: None,
             masque_local_flows: HashMap::new(),

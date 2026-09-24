@@ -214,11 +214,13 @@ impl ClientConnection {
             clock.clone(),
         )
         .map_err(|error| EngineError::Connection(error.to_string()))?;
-        let (mode, family) =
-            qf_crypto::payload_protection_pin(crate::engine::engine_mode_uses_libaegis(
+        let (mode, family) = crate::engine::effective_packet_protection_policy(
+            &config.crypto,
+            crate::engine::engine_mode_uses_libaegis(
                 config.stealth.mode,
                 config.crypto.private_family().is_some(),
-            ));
+            ),
+        );
         connection.set_private_packet_protection_policy(mode, family);
         if let Some(seed) = config.crypto.private_shape_seed_bytes() {
             connection

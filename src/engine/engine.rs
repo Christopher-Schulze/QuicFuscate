@@ -136,12 +136,6 @@ impl QuicFuscateEngine {
                 config.crypto.force_aead
             );
         }
-        if config.crypto.packet_protection_mode == qf_crypto::PacketProtectionMode::AdvancedRequired
-        {
-            return Err(EngineError::Config(
-                "advanced-required private packet protection is unavailable until TODO-883, TODO-884, and TODO-681 promotion gates are complete".to_string(),
-            ));
-        }
         let instrumentation = crate::instrumentation::global();
 
         let engine = Self {

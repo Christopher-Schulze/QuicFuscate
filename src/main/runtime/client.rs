@@ -204,7 +204,8 @@ pub(super) async fn run_client(
         {
             return run_circuit_client(config_path, engine_config).await;
         }
-        let (mode, family) = quicfuscate::crypto::payload_protection_pin(
+        let (mode, family) = quicfuscate::engine::effective_packet_protection_policy(
+            &engine_config.crypto,
             quicfuscate::engine::engine_mode_uses_libaegis(
                 engine_config.stealth.mode,
                 engine_config.crypto.private_family().is_some(),

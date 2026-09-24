@@ -275,7 +275,10 @@ pub(crate) fn build_live_server_client_init(
         request.clock,
     ) {
         Ok(mut connection) => {
-            let (mode, family) = qf_crypto::payload_protection_pin(use_aegis);
+            let (mode, family) = crate::engine::effective_packet_protection_policy(
+                &runtime_policy.crypto,
+                use_aegis,
+            );
             connection.set_private_packet_protection_policy(mode, family);
             if let Some(seed) = runtime_policy.crypto.private_shape_seed_bytes() {
                 connection.set_private_protocol_shape(

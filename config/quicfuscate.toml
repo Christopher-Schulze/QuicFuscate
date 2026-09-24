@@ -187,6 +187,9 @@ max_early_data_size = 16384
 # manual follows the selection below. Leave both at the defaults for AES-128-GCM.
 # To select AEGIS in manual mode, set packet_protection_mode = "auto"
 # and aead_preference = "aegis".
+# "advanced-required" additionally requires a private-capable stealth mode
+# (off, performance, or manual) and the direct single-hop path; it fails
+# closed instead of falling back to standard protection.
 packet_protection_mode = "standard"
 aead_preference = "auto"
 force_aead = ""
