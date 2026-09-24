@@ -25,8 +25,19 @@
 //! - IPv6 carries no DF flag and no ID; only the hop limit is shaped.
 
 use super::{OsFingerprintProfile, OsProfile};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+/// Windows sockets expose `AsRawSocket`; the alias keeps the generic bound
+/// identical on every platform.
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket as AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Raw socket handle type handed to the platform sockopt helpers.
+#[cfg(unix)]
+type SocketFd = std::os::unix::io::RawFd;
+#[cfg(windows)]
+type SocketFd = std::os::windows::io::RawSocket;
 
 /// Whether the "unsupported sockopt" warning already fired. The spec asks for
 /// a single log line per process — repeated disguise migrations must not spam.
@@ -95,7 +106,10 @@ impl OuterHeaderOutcome {
 /// OS default and report `false`; callers log once and keep the connection.
 pub fn apply_outer_header<S: AsRawFd>(socket: &S, os: OsProfile, ipv6: bool) -> OuterHeaderOutcome {
     let policy = outer_header_for(os);
+    #[cfg(unix)]
     let fd = socket.as_raw_fd();
+    #[cfg(windows)]
+    let fd = socket.as_raw_socket();
     let ttl_applied = match policy.ttl {
         Some(ttl) => set_hop_limit(fd, ttl, ipv6),
         None => true, // Nothing requested — treat as applied for logging purposes.
@@ -131,7 +145,8 @@ pub fn apply_outer_header_logged<S: AsRawFd>(socket: &S, os: OsProfile, ipv6: bo
 }
 
 /// Sets the IPv4 TTL (`IP_TTL`) or IPv6 hop limit (`IPV6_UNICAST_HOPS`).
-fn set_hop_limit(fd: std::os::unix::io::RawFd, ttl: u8, ipv6: bool) -> bool {
+#[cfg(unix)]
+fn set_hop_limit(fd: SocketFd, ttl: u8, ipv6: bool) -> bool {
     let value = ttl as libc::c_int;
     let (level, name) = if ipv6 {
         (libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS)
@@ -152,13 +167,20 @@ fn set_hop_limit(fd: std::os::unix::io::RawFd, ttl: u8, ipv6: bool) -> bool {
     rc == 0
 }
 
+/// Windows carries no `libc` sockopt surface in this build; shaping is a
+/// documented non-goal there, so report unsupported like other platforms do.
+#[cfg(windows)]
+fn set_hop_limit(_fd: SocketFd, _ttl: u8, _ipv6: bool) -> bool {
+    false
+}
+
 /// Sets or clears the IPv4 Don't-Fragment flag on emitted datagrams.
 ///
 /// - Linux: `IP_MTU_DISCOVER = IP_PMTUDISC_DO` (2) for DF, `IP_PMTUDISC_DONT`
 ///   (0) to clear.
 /// - macOS/BSD: `IP_DONTFRAG = 1` for DF, `0` to clear.
 #[cfg(target_os = "linux")]
-fn set_ipv4_df(fd: std::os::unix::io::RawFd, df: bool) -> bool {
+fn set_ipv4_df(fd: SocketFd, df: bool) -> bool {
     let value: libc::c_int = if df { libc::IP_PMTUDISC_DO as libc::c_int } else { 0 };
     // SAFETY: as above — `value` outlives the call, fd is a live socket.
     let rc = unsafe {
@@ -174,7 +196,7 @@ fn set_ipv4_df(fd: std::os::unix::io::RawFd, df: bool) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn set_ipv4_df(fd: std::os::unix::io::RawFd, df: bool) -> bool {
+fn set_ipv4_df(fd: SocketFd, df: bool) -> bool {
     let value: libc::c_int = df as libc::c_int;
     // SAFETY: as above — `value` outlives the call, fd is a live socket.
     let rc = unsafe {
@@ -190,7 +212,7 @@ fn set_ipv4_df(fd: std::os::unix::io::RawFd, df: bool) -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn set_ipv4_df(_fd: std::os::unix::io::RawFd, _df: bool) -> bool {
+fn set_ipv4_df(_fd: SocketFd, _df: bool) -> bool {
     // Platforms without a DF sockopt report failure; callers keep the
     // connection on the OS default per the non-goal.
     false
@@ -204,6 +226,7 @@ mod tests {
         std::net::UdpSocket::bind("127.0.0.1:0").expect("bind v4")
     }
 
+    #[cfg(unix)]
     fn get_sockopt_int(fd: std::os::unix::io::RawFd, level: libc::c_int, name: libc::c_int) -> i32 {
         let mut value: libc::c_int = -1;
         let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -241,6 +264,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn real_socket_accepts_persona_ttl_and_df() {
         // Real-socket proof (spec risk): apply to a bound UDP socket and read
         // the kernel-visible values back with getsockopt — the mock alone
@@ -269,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn real_socket_ios_df_is_cleared() {
         use std::os::unix::io::AsRawFd;
         let socket = bound_v4_socket();
