@@ -1493,10 +1493,16 @@ fn client_housekeeping_delay(
         || tun_backpressure_pending;
     if active {
         // An armed send deadline (stealth release, pacing, reorder hold)
-        // must not wait a full active tick behind queued datagrams:
-        // wake at the deadline instead, bounded by the 1 ms CPU guard.
+        // must not wait a full active tick behind queued datagrams: wake at
+        // the deadline instead. The wait is bounded by the housekeeping
+        // service interval — traffic-analysis/chaff schedules legitimately
+        // hold releases for seconds, and parking housekeeping that long
+        // starved keepalive probes and the heartbeat watchdog to death on a
+        // healthy link. A deadline inside the bound still lands exactly.
         if let Some(wait) = send_deadline_wait() {
-            return wait.max(CLIENT_HOUSEKEEPING_DEADLINE_FLOOR);
+            return wait
+                .min(housekeeping_service_bound(heartbeat_deadline))
+                .max(CLIENT_HOUSEKEEPING_DEADLINE_FLOOR);
         }
         return CLIENT_HOUSEKEEPING_ACTIVE;
     }
@@ -1520,6 +1526,18 @@ fn client_housekeeping_delay(
     } else {
         delay.max(CLIENT_HOUSEKEEPING_ACTIVE)
     }
+}
+
+/// Longest the housekeeping branch may sleep behind an armed send deadline:
+/// the idle cadence, tightened to the next heartbeat probe when one is armed
+/// sooner. Stealth send schedules may hold releases for seconds; without the
+/// bound, housekeeping duties (stats, keepalive probes, the heartbeat
+/// watchdog, the connected firewall transition) stall for the whole window.
+fn housekeeping_service_bound(heartbeat_deadline: Option<tokio::time::Instant>) -> Duration {
+    heartbeat_deadline
+        .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
+        .unwrap_or(CLIENT_HOUSEKEEPING_IDLE)
+        .min(CLIENT_HOUSEKEEPING_IDLE)
 }
 
 /// Re-arms the shared housekeeping timer with deadline-monotone semantics:
@@ -1766,6 +1784,22 @@ mod housekeeping_rearm_tests {
         tokio::time::timeout(Duration::from_millis(60), housekeeping.tick())
             .await
             .expect("housekeeping starved by sibling re-arms");
+    }
+
+    #[test]
+    fn service_bound_caps_send_deadline_park() {
+        use super::{housekeeping_service_bound, CLIENT_HOUSEKEEPING_IDLE};
+        // No heartbeat armed: the idle cadence is the bound — a multi-second
+        // stealth send deadline may never park housekeeping longer.
+        assert_eq!(housekeeping_service_bound(None), CLIENT_HOUSEKEEPING_IDLE);
+        // A heartbeat probe inside the bound tightens it to the probe.
+        let soon = tokio::time::Instant::now() + Duration::from_millis(40);
+        let bound = housekeeping_service_bound(Some(soon));
+        assert!(bound <= Duration::from_millis(40));
+        assert!(bound > Duration::from_millis(30));
+        // A probe beyond the bound leaves the idle cadence in charge.
+        let later = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert_eq!(housekeeping_service_bound(Some(later)), CLIENT_HOUSEKEEPING_IDLE);
     }
 
     #[tokio::test]
