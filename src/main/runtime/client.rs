@@ -821,11 +821,11 @@ pub(super) async fn run_client(
     // Format: (wave, next_unsent_index).
     let mut tun_backpressure_frame: Option<(Vec<quicfuscate::interface::TunPacket>, usize)> = None;
     let mut dns_runtime: Option<quicfuscate::implementations::client::ClientDnsRuntime> = None;
-    let mut housekeeping = interval(Duration::from_millis(5));
-    housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Shadow of the interval's next armed deadline. Non-housekeeping
-    // branches re-arm through `rearm_client_housekeeping` (pull-earlier
-    // only); the housekeeping branch re-arms unconditionally below.
+    // Wall-clock deadline for the next housekeeping service. Non-housekeeping
+    // branches may pull it earlier through `rearm_client_housekeeping` but must
+    // never postpone it; the housekeeping block re-arms unconditionally below.
+    // The deadline is checked directly after every select resolution — timer
+    // driver starvation cannot delay due housekeeping.
     let mut housekeeping_deadline = tokio::time::Instant::now() + Duration::from_millis(5);
     let mut next_stats_log = tokio::time::Instant::now();
     let heartbeat_probe_interval = heartbeat_probe_interval(heartbeat_timeout_ms);
@@ -862,9 +862,9 @@ pub(super) async fn run_client(
 
     let exit_reason = 'runtime: loop {
         tokio::select! {
-            // Poll arms in declaration order: housekeeping must be checked
-            // before the hot arms so a permanently-ready sibling cannot keep
-            // an elapsed housekeeping tick permanently unwon.
+            // Poll arms in declaration order: the housekeeping wake must be
+            // checked before the hot arms so an idle select always wakes for
+            // a due service instead of losing the slot to a hot sibling.
             biased;
             _ = &mut shutdown_signal => {
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
@@ -882,397 +882,7 @@ pub(super) async fn run_client(
                 }
                 break ExitReason::CleanShutdown;
             }
-            _ = housekeeping.tick() => {
-                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
-                    break ExitReason::DataPlane(fault);
-                }
-                let branch_started = std::time::Instant::now();
-                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
-                if client_receive_diagnostics_enabled
-                    && scheduling_gap >= Duration::from_millis(250)
-                {
-                    info!(
-                        "Client runtime resumed: branch=housekeeping scheduling_gap_ms={}",
-                        scheduling_gap.as_millis()
-                    );
-                }
-                last_runtime_progress = branch_started;
-                if client_receive_diagnostics_enabled {
-                    info!(
-                        "Client runtime housekeeping tick: branch=housekeeping entered"
-                    );
-                }
-
-                // TODO-1056: settle an in-flight disguise migration first —
-                // commit the new socket on validation, roll back to the
-                // standby socket on failure (the old path survives).
-                if let Some(outcome) = conn.take_disguise_migration_outcome() {
-                    match outcome {
-                        true => {
-                            standby_socket = None;
-                            info!("Disguise migration committed: new local UDP port");
-                        }
-                        false => {
-                            if let Some(old) = standby_socket.take() {
-                                socket = old;
-                                enable_client_gro(&socket);
-                            }
-                            warn!("Disguise migration failed validation; keeping old path");
-                        }
-                    }
-                }
-
-                // TODO-1056: disguise migration fires the jittered 2-10 min
-                // draw — a new local UDP port via the path-validation API,
-                // never a new handshake. Speed profiles never report due.
-                if conn.conn.is_established()
-                    && !conn.disguise_migration_pending()
-                    && conn.disguise_migration_due()
-                {
-                    let migration_bind = SocketAddr::new(local_addr.ip(), 0);
-                    match bind_connected_udp_socket(migration_bind, server_addr) {
-                        Ok(new_socket) => match new_socket.local_addr() {
-                            Ok(new_local) => match conn.begin_disguise_migration(new_local) {
-                                Ok(_) => {
-                                    standby_socket = Some(std::mem::replace(&mut socket, new_socket));
-                                    enable_client_gro(&socket);
-                                    // TODO-1057: a freshly bound socket forgets
-                                    // sockopts — re-apply the persona header
-                                    // policy to the migrated path.
-                                    quicfuscate::stealth::outer_header::apply_outer_header_logged(
-                                        &socket,
-                                        conn.stealth_manager().persona_os(),
-                                        new_local.is_ipv6(),
-                                    );
-                                    info!(
-                                        "Disguise migration probing new local port {}",
-                                        new_local.port()
-                                    );
-                                }
-                                Err(error) => {
-                                    conn.note_disguise_migration_attempt();
-                                    warn!("Disguise migration start failed: {:?}", error);
-                                }
-                            },
-                            Err(error) => {
-                                conn.note_disguise_migration_attempt();
-                                warn!("Disguise migration local addr failed: {}", error);
-                            }
-                        },
-                        Err(error) => {
-                            conn.note_disguise_migration_attempt();
-                            warn!("Disguise migration socket bind failed: {}", error);
-                        }
-                    }
-                }
-
-                if conn.conn.is_established()
-                    && tun_enable
-                    && !conn.masque_tunnel_established()
-                {
-                    if let Err(error) = conn.begin_masque_tunnel() {
-                        warn!("MASQUE CONNECT-UDP open failed: {:?}", error);
-                    }
-                }
-
-                if conn.conn.is_established() && !request_sent {
-                    match conn.send_http3_request(target.request_path.as_str()) {
-                        Ok(_) => {
-                            request_sent = true;
-                        }
-                        Err(e) => {
-                            warn!("HTTP/3 request failed: {:?}", e);
-                        }
-                    }
-                }
-
-                if tun_enable {
-                    let poll_started = std::time::Instant::now();
-                    if h3_stream_id.is_none() {
-                        match conn.open_http3_stream_post("/tun") {
-                            Ok(sid) => { h3_stream_id = Some(sid); }
-                            Err(e) => { warn!("open_http3_stream_post failed: {:?}", e); }
-                        }
-                    }
-                    // Downlink: H3 stream data from server -> TUN interface
-                    if let Err(e) = conn.poll_http3_with(client_h3_downlink_body_cb(
-                        &tun_writer,
-                        &tun_reader_fault,
-                        &tun_notify,
-                        &tun_reader_shutdown,
-                    )) {
-                        warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
-                    }
-                    // MASQUE CONNECT-UDP downlink datagrams are drained and written
-                    // to the TUN by drain_masque_datagrams (inside poll_http3_with
-                    // above) via the masque_datagram_cb sink installed at TUN open.
-                    // The previous bare dgram_recv loop expected unframed QUIC
-                    // datagrams and has been removed in favor of the single
-                    // consistent MASQUE transport.
-
-                    // TUN uplink: forward frames from the TUN reader channel to
-                    // the MASQUE data plane. Also done in the recv branch above,
-                    // but tokio::select! is not fair and the recv branch may not
-                    // fire when the server is silent. TUN reader notifications
-                    // wake the event loop immediately; the adaptive tick remains
-                    // as a bounded retry path for transport progress.
-                    if conn.masque_tunnel_established() {
-                        if let Some(ref tun) = tun_writer {
-                            let more_tun = match drain_uplink_any(
-                                &mut conn,
-                                tun,
-                                h3_stream_id,
-                                &tun_rx,
-                                &tun_read_end,
-                                &mut tun_backpressure_frame,
-                                io_diagnostics.as_mut(),
-                            ) {
-                                Ok(more_tun) => more_tun,
-                                Err(fault) => break ExitReason::DataPlane(fault),
-                            };
-                            if more_tun {
-                                tun_notify.notify_one();
-                            }
-                        }
-                    }
-                    let poll_elapsed = poll_started.elapsed();
-                    if client_receive_diagnostics_enabled
-                        && poll_elapsed >= Duration::from_millis(100)
-                    {
-                        info!(
-                            "Client runtime slow phase: branch=housekeeping phase=http3-and-tun duration_ms={}",
-                            poll_elapsed.as_millis()
-                        );
-                    }
-                } else if let Err(e) = conn.poll_http3() {
-                    warn!("HTTP/3 error: {:?}", e);
-                }
-
-                // Connected policy means the authenticated tunnel data plane is
-                // ready, not merely that QUIC completed its handshake.
-                let reader_failed = tun_reader_fault
-                    .as_ref()
-                    .is_some_and(|slot| slot.lock().is_some());
-                let data_plane_ready = conn.conn.is_established()
-                    && tun_activation_ready
-                    && !reader_failed
-                    && (!tun_enable || conn.masque_tunnel_established());
-                if data_plane_ready && !kill_switch_connected {
-                    let policy_started = std::time::Instant::now();
-                    if let Some(ref ks) = kill_switch {
-                        if let Err(error) = ks.on_vpn_connected(&connected_firewall_policy) {
-                            break ExitReason::SocketError(format!(
-                                "kill switch connected policy failed: {error}"
-                            ));
-                        }
-                        info!("Kill switch: VPN traffic allowed, non-VPN blocked");
-                    }
-                    kill_switch_connected = true;
-                    if tun_enable && !disable_doh {
-                        let Some(tun) = tun_writer.as_ref() else {
-                            break ExitReason::SocketError(
-                                "client DoH requires an active TUN interface".to_string(),
-                            );
-                        };
-                        let Some(proxy_config) = prepared_dns.take() else {
-                            break ExitReason::SocketError(
-                                "client DoH configuration was not prepared".to_string(),
-                            );
-                        };
-                        let dns_start =
-                            quicfuscate::implementations::client::ClientDnsRuntime::start_with_config(
-                                &tokio::runtime::Handle::current(),
-                                proxy_config,
-                                tun.name(),
-                            );
-                        match dns_start {
-                            Ok(proxy) => {
-                                dns_runtime = Some(proxy);
-                                info!("Client DoH DNS proxy activated for the standalone TUN runtime");
-                            }
-                            Err(error) => {
-                                break ExitReason::SocketError(format!(
-                                    "client DoH DNS proxy activation failed: {error}"
-                                ));
-                            }
-                        }
-                    }
-                    if client_receive_diagnostics_enabled {
-                        info!(
-                            "Client runtime phase: connected-firewall duration_ms={}",
-                            policy_started.elapsed().as_millis()
-                        );
-                    }
-                }
-
-                let now = tokio::time::Instant::now();
-                if conn.conn.is_established()
-                    && heartbeat_probe_interval.is_some()
-                    && next_heartbeat_probe.is_some_and(|deadline| now >= deadline)
-                {
-                    conn.queue_keepalive_ping();
-                    next_heartbeat_probe =
-                        heartbeat_probe_interval.map(|interval| now + interval);
-                }
-                let flush_started = std::time::Instant::now();
-                if let Err(e) = flush_connected_outgoing(
-                    &socket,
-                    &mut conn,
-                    &mut out,
-                    io_diagnostics.as_mut(),
-                )
-                .await
-                {
-                    break ExitReason::DataPlane(e);
-                }
-                let flush_elapsed = flush_started.elapsed();
-                if client_receive_diagnostics_enabled
-                    && flush_elapsed >= Duration::from_millis(100)
-                {
-                    info!(
-                        "Client runtime slow phase: branch=housekeeping phase=flush duration_ms={}",
-                        flush_elapsed.as_millis()
-                    );
-                }
-
-                let update_started = std::time::Instant::now();
-                if client_receive_diagnostics_enabled {
-                    conn.update_state_with_slow_phase_diagnostics();
-                } else {
-                    conn.update_state();
-                }
-                let update_elapsed = update_started.elapsed();
-                if client_receive_diagnostics_enabled
-                    && update_elapsed >= Duration::from_millis(100)
-                {
-                    info!(
-                        "Client runtime slow phase: branch=housekeeping phase=update-state duration_ms={}",
-                        update_elapsed.as_millis()
-                    );
-                }
-                if let Some(tun) = tun_writer.as_ref() {
-                    if let Err(error) =
-                        synchronize_client_tun_mtu(&conn, tun, negotiated_tun_mtu)
-                    {
-                        break ExitReason::SocketError(format!(
-                            "client TUN MTU synchronization failed: {error}"
-                        ));
-                    }
-                }
-                if now >= next_stats_log {
-                    if let Some(diagnostics) = io_diagnostics.as_ref() {
-                        let protocol_now = conn.protocol_clock().now();
-                        info!(
-                            "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} tun_drops={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
-                            conn.rtt_ms(),
-                            conn.loss_rate() * 100.0,
-                            conn.conn.stats().sent,
-                            conn.conn.stats().recv,
-                            conn.conn.stats().lost,
-                            conn.conn.dgram_send_queue_len(),
-                            conn.conn.bytes_in_flight(),
-                            conn.conn.cwnd(),
-                            diagnostics.send_polls,
-                            diagnostics.send_datagrams,
-                            diagnostics.send_zero_results,
-                            diagnostics.send_done_results,
-                            diagnostics.send_errors,
-                            diagnostics.tun_dropped_frames,
-                            conn.send_yield_counts()[0],
-                            conn.send_yield_counts()[1],
-                            conn.send_yield_counts()[2],
-                            conn.send_yield_counts()[3],
-                            conn.send_yield_counts()[4],
-                            conn.send_yield_counts()[5],
-                            conn.next_outbound_release_deadline().map(|deadline| {
-                                deadline.saturating_duration_since(protocol_now).as_millis()
-                            }),
-                            conn.conn.recovery_deadline().map(|deadline| {
-                                deadline.saturating_duration_since(protocol_now).as_millis()
-                            }),
-                        );
-                    } else {
-                        info!(
-                            "client stats: RTT {:.0} ms, Loss {:.2}%",
-                            conn.rtt_ms(),
-                            conn.loss_rate() * 100.0
-                        );
-                    }
-                    next_stats_log = now + Duration::from_secs(1);
-                }
-                // Only drive the idle timeout when the connection has actually been
-                // idle; calling it every tick collapses cwnd and inflates loss.
-                if conn.conn.idle_timeout_elapsed() {
-                    conn.conn.on_timeout();
-                }
-                if conn.conn.is_established()
-                    && heartbeat_timeout_ms > 0
-                    && observable_inbound_silence(
-                        conn.conn.last_activity_elapsed(),
-                        conn.protocol_clock().elapsed_since(liveness_floor),
-                    ) >= Duration::from_millis(heartbeat_timeout_ms)
-                {
-                    if let Some(diagnostics) = io_diagnostics.as_ref() {
-                        let diagnostic_now = std::time::Instant::now();
-                        let protocol_now = conn.protocol_clock().now();
-                        warn!(
-                            "Client receive diagnostics at heartbeat: socket_datagrams={}, socket_bytes={}, core_recv_successes={}, core_recv_errors={}, activity_updates={}, send_polls={}, send_datagrams={}, send_bytes={}, send_zero_results={}, send_done_results={}, send_errors={}, last_send_elapsed_ms={:?}, request_sent={}, h3_stream_id={:?}, masque_established={}, kill_switch_connected={}, transport_sent={}, transport_recv={}, transport_lost={}, transport_dgram_queue={}, transport_bytes_in_flight={}, transport_cwnd={}, pending_application_ack={}, outbound_release_remaining_ms={:?}, recovery_remaining_ms={:?}, last_activity_elapsed_ms={}",
-                            diagnostics.socket_datagrams,
-                            diagnostics.socket_bytes,
-                            diagnostics.core_recv_successes,
-                            diagnostics.core_recv_errors,
-                            diagnostics.activity_updates,
-                            diagnostics.send_polls,
-                            diagnostics.send_datagrams,
-                            diagnostics.send_bytes,
-                            diagnostics.send_zero_results,
-                            diagnostics.send_done_results,
-                            diagnostics.send_errors,
-                            diagnostics
-                                .last_send_at
-                                .map(|sent_at| diagnostic_now.saturating_duration_since(sent_at).as_millis()),
-                            request_sent,
-                            h3_stream_id,
-                            conn.masque_tunnel_established(),
-                            kill_switch_connected,
-                            conn.conn.stats().sent,
-                            conn.conn.stats().recv,
-                            conn.conn.stats().lost,
-                            conn.conn.dgram_send_queue_len(),
-                            conn.conn.bytes_in_flight(),
-                            conn.conn.cwnd(),
-                            conn.conn.has_pending_application_ack(),
-                            conn.next_outbound_release_deadline().map(|deadline| {
-                                deadline.saturating_duration_since(protocol_now).as_millis()
-                            }),
-                            conn.conn.recovery_deadline().map(|deadline| {
-                                deadline.saturating_duration_since(protocol_now).as_millis()
-                            }),
-                            conn.conn.last_activity_elapsed().as_millis(),
-                        );
-                    }
-                    warn!(
-                        "Client heartbeat timeout after {}ms; activating fail-closed firewall state",
-                        heartbeat_timeout_ms
-                    );
-                    break ExitReason::HeartbeatTimeout;
-                }
-                if conn.conn.is_closed() {
-                    break ExitReason::RemoteClosed;
-                }
-                // The housekeeping branch owns the authoritative re-arm: it
-                // may legitimately postpone the next tick (idle back-off),
-                // unlike the pull-earlier-only re-arm of sibling branches.
-                let housekeeping_delay = client_housekeeping_delay(
-                    &conn,
-                    tun_writer.is_some(),
-                    request_sent,
-                    tun_backpressure_frame.is_some(),
-                    next_heartbeat_probe,
-                );
-                housekeeping.reset_after(housekeeping_delay);
-                housekeeping_deadline = tokio::time::Instant::now() + housekeeping_delay;
-            }
+            _ = tokio::time::sleep_until(housekeeping_deadline) => {}
             recv_res = recv_connected_burst(&socket, &mut rx_bufs) => {
                 if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
                     break ExitReason::DataPlane(fault);
@@ -1425,7 +1035,7 @@ pub(super) async fn run_client(
                         break ExitReason::SocketError(e.to_string());
                     }
                 }
-                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
+                rearm_client_housekeeping(&mut housekeeping_deadline, client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
@@ -1481,7 +1091,7 @@ pub(super) async fn run_client(
                         break ExitReason::DataPlane(error);
                     }
                 }
-                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
+                rearm_client_housekeeping(&mut housekeeping_deadline, client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
@@ -1533,7 +1143,7 @@ pub(super) async fn run_client(
                         }
                     }
                 }
-                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
+                rearm_client_housekeeping(&mut housekeeping_deadline, client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
@@ -1542,12 +1152,387 @@ pub(super) async fn run_client(
                 ));
             }
         }
-        // A permanently-ready select arm starves the housekeeping timer:
-        // when every `select!` resolves synchronously the task never yields,
-        // so the interval tick future is never polled and the runtime's
-        // timer driver never advances — housekeeping duties go dead on a
-        // healthy link. Yield once per iteration so due ticks stay
-        // reachable under sustained arm readiness.
+        // Due housekeeping runs at the iteration boundary by wall clock —
+        // never hostage to select fairness or timer-driver liveness. The
+        // `sleep_until` arm above only wakes an idle select; under a hot
+        // sibling every recv/notify resolution reaches this check.
+        if tokio::time::Instant::now() >= housekeeping_deadline {
+            if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
+                break ExitReason::DataPlane(fault);
+            }
+            let branch_started = std::time::Instant::now();
+            let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+            if client_receive_diagnostics_enabled && scheduling_gap >= Duration::from_millis(250) {
+                info!(
+                    "Client runtime resumed: branch=housekeeping scheduling_gap_ms={}",
+                    scheduling_gap.as_millis()
+                );
+            }
+            last_runtime_progress = branch_started;
+            if client_receive_diagnostics_enabled {
+                info!("Client runtime housekeeping tick: branch=housekeeping entered");
+            }
+
+            // TODO-1056: settle an in-flight disguise migration first —
+            // commit the new socket on validation, roll back to the
+            // standby socket on failure (the old path survives).
+            if let Some(outcome) = conn.take_disguise_migration_outcome() {
+                match outcome {
+                    true => {
+                        standby_socket = None;
+                        info!("Disguise migration committed: new local UDP port");
+                    }
+                    false => {
+                        if let Some(old) = standby_socket.take() {
+                            socket = old;
+                            enable_client_gro(&socket);
+                        }
+                        warn!("Disguise migration failed validation; keeping old path");
+                    }
+                }
+            }
+
+            // TODO-1056: disguise migration fires the jittered 2-10 min
+            // draw — a new local UDP port via the path-validation API,
+            // never a new handshake. Speed profiles never report due.
+            if conn.conn.is_established()
+                && !conn.disguise_migration_pending()
+                && conn.disguise_migration_due()
+            {
+                let migration_bind = SocketAddr::new(local_addr.ip(), 0);
+                match bind_connected_udp_socket(migration_bind, server_addr) {
+                    Ok(new_socket) => match new_socket.local_addr() {
+                        Ok(new_local) => match conn.begin_disguise_migration(new_local) {
+                            Ok(_) => {
+                                standby_socket = Some(std::mem::replace(&mut socket, new_socket));
+                                enable_client_gro(&socket);
+                                // TODO-1057: a freshly bound socket forgets
+                                // sockopts — re-apply the persona header
+                                // policy to the migrated path.
+                                quicfuscate::stealth::outer_header::apply_outer_header_logged(
+                                    &socket,
+                                    conn.stealth_manager().persona_os(),
+                                    new_local.is_ipv6(),
+                                );
+                                info!(
+                                    "Disguise migration probing new local port {}",
+                                    new_local.port()
+                                );
+                            }
+                            Err(error) => {
+                                conn.note_disguise_migration_attempt();
+                                warn!("Disguise migration start failed: {:?}", error);
+                            }
+                        },
+                        Err(error) => {
+                            conn.note_disguise_migration_attempt();
+                            warn!("Disguise migration local addr failed: {}", error);
+                        }
+                    },
+                    Err(error) => {
+                        conn.note_disguise_migration_attempt();
+                        warn!("Disguise migration socket bind failed: {}", error);
+                    }
+                }
+            }
+
+            if conn.conn.is_established() && tun_enable && !conn.masque_tunnel_established() {
+                if let Err(error) = conn.begin_masque_tunnel() {
+                    warn!("MASQUE CONNECT-UDP open failed: {:?}", error);
+                }
+            }
+
+            if conn.conn.is_established() && !request_sent {
+                match conn.send_http3_request(target.request_path.as_str()) {
+                    Ok(_) => {
+                        request_sent = true;
+                    }
+                    Err(e) => {
+                        warn!("HTTP/3 request failed: {:?}", e);
+                    }
+                }
+            }
+
+            if tun_enable {
+                let poll_started = std::time::Instant::now();
+                if h3_stream_id.is_none() {
+                    match conn.open_http3_stream_post("/tun") {
+                        Ok(sid) => {
+                            h3_stream_id = Some(sid);
+                        }
+                        Err(e) => {
+                            warn!("open_http3_stream_post failed: {:?}", e);
+                        }
+                    }
+                }
+                // Downlink: H3 stream data from server -> TUN interface
+                if let Err(e) = conn.poll_http3_with(client_h3_downlink_body_cb(
+                    &tun_writer,
+                    &tun_reader_fault,
+                    &tun_notify,
+                    &tun_reader_shutdown,
+                )) {
+                    warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                }
+                // MASQUE CONNECT-UDP downlink datagrams are drained and written
+                // to the TUN by drain_masque_datagrams (inside poll_http3_with
+                // above) via the masque_datagram_cb sink installed at TUN open.
+                // The previous bare dgram_recv loop expected unframed QUIC
+                // datagrams and has been removed in favor of the single
+                // consistent MASQUE transport.
+
+                // TUN uplink: forward frames from the TUN reader channel to
+                // the MASQUE data plane. Also done in the recv branch above,
+                // but tokio::select! is not fair and the recv branch may not
+                // fire when the server is silent. TUN reader notifications
+                // wake the event loop immediately; the adaptive tick remains
+                // as a bounded retry path for transport progress.
+                if conn.masque_tunnel_established() {
+                    if let Some(ref tun) = tun_writer {
+                        let more_tun = match drain_uplink_any(
+                            &mut conn,
+                            tun,
+                            h3_stream_id,
+                            &tun_rx,
+                            &tun_read_end,
+                            &mut tun_backpressure_frame,
+                            io_diagnostics.as_mut(),
+                        ) {
+                            Ok(more_tun) => more_tun,
+                            Err(fault) => break ExitReason::DataPlane(fault),
+                        };
+                        if more_tun {
+                            tun_notify.notify_one();
+                        }
+                    }
+                }
+                let poll_elapsed = poll_started.elapsed();
+                if client_receive_diagnostics_enabled && poll_elapsed >= Duration::from_millis(100)
+                {
+                    info!(
+                        "Client runtime slow phase: branch=housekeeping phase=http3-and-tun duration_ms={}",
+                        poll_elapsed.as_millis()
+                    );
+                }
+            } else if let Err(e) = conn.poll_http3() {
+                warn!("HTTP/3 error: {:?}", e);
+            }
+
+            // Connected policy means the authenticated tunnel data plane is
+            // ready, not merely that QUIC completed its handshake.
+            let reader_failed = tun_reader_fault.as_ref().is_some_and(|slot| slot.lock().is_some());
+            let data_plane_ready = conn.conn.is_established()
+                && tun_activation_ready
+                && !reader_failed
+                && (!tun_enable || conn.masque_tunnel_established());
+            if data_plane_ready && !kill_switch_connected {
+                let policy_started = std::time::Instant::now();
+                if let Some(ref ks) = kill_switch {
+                    if let Err(error) = ks.on_vpn_connected(&connected_firewall_policy) {
+                        break ExitReason::SocketError(format!(
+                            "kill switch connected policy failed: {error}"
+                        ));
+                    }
+                    info!("Kill switch: VPN traffic allowed, non-VPN blocked");
+                }
+                kill_switch_connected = true;
+                if tun_enable && !disable_doh {
+                    let Some(tun) = tun_writer.as_ref() else {
+                        break ExitReason::SocketError(
+                            "client DoH requires an active TUN interface".to_string(),
+                        );
+                    };
+                    let Some(proxy_config) = prepared_dns.take() else {
+                        break ExitReason::SocketError(
+                            "client DoH configuration was not prepared".to_string(),
+                        );
+                    };
+                    let dns_start =
+                        quicfuscate::implementations::client::ClientDnsRuntime::start_with_config(
+                            &tokio::runtime::Handle::current(),
+                            proxy_config,
+                            tun.name(),
+                        );
+                    match dns_start {
+                        Ok(proxy) => {
+                            dns_runtime = Some(proxy);
+                            info!("Client DoH DNS proxy activated for the standalone TUN runtime");
+                        }
+                        Err(error) => {
+                            break ExitReason::SocketError(format!(
+                                "client DoH DNS proxy activation failed: {error}"
+                            ));
+                        }
+                    }
+                }
+                if client_receive_diagnostics_enabled {
+                    info!(
+                        "Client runtime phase: connected-firewall duration_ms={}",
+                        policy_started.elapsed().as_millis()
+                    );
+                }
+            }
+
+            let now = tokio::time::Instant::now();
+            if conn.conn.is_established()
+                && heartbeat_probe_interval.is_some()
+                && next_heartbeat_probe.is_some_and(|deadline| now >= deadline)
+            {
+                conn.queue_keepalive_ping();
+                next_heartbeat_probe = heartbeat_probe_interval.map(|interval| now + interval);
+            }
+            let flush_started = std::time::Instant::now();
+            if let Err(e) =
+                flush_connected_outgoing(&socket, &mut conn, &mut out, io_diagnostics.as_mut())
+                    .await
+            {
+                break ExitReason::DataPlane(e);
+            }
+            let flush_elapsed = flush_started.elapsed();
+            if client_receive_diagnostics_enabled && flush_elapsed >= Duration::from_millis(100) {
+                info!(
+                    "Client runtime slow phase: branch=housekeeping phase=flush duration_ms={}",
+                    flush_elapsed.as_millis()
+                );
+            }
+
+            let update_started = std::time::Instant::now();
+            if client_receive_diagnostics_enabled {
+                conn.update_state_with_slow_phase_diagnostics();
+            } else {
+                conn.update_state();
+            }
+            let update_elapsed = update_started.elapsed();
+            if client_receive_diagnostics_enabled && update_elapsed >= Duration::from_millis(100) {
+                info!(
+                    "Client runtime slow phase: branch=housekeeping phase=update-state duration_ms={}",
+                    update_elapsed.as_millis()
+                );
+            }
+            if let Some(tun) = tun_writer.as_ref() {
+                if let Err(error) = synchronize_client_tun_mtu(&conn, tun, negotiated_tun_mtu) {
+                    break ExitReason::SocketError(format!(
+                        "client TUN MTU synchronization failed: {error}"
+                    ));
+                }
+            }
+            if now >= next_stats_log {
+                if let Some(diagnostics) = io_diagnostics.as_ref() {
+                    let protocol_now = conn.protocol_clock().now();
+                    info!(
+                        "client stats: RTT {:.0} ms, Loss {:.2}% | transport_sent={} transport_recv={} transport_lost={} transport_dgram_queue={} transport_bytes_in_flight={} transport_cwnd={} send_polls={} send_datagrams={} send_zero_results={} send_done_results={} send_errors={} tun_drops={} yield_window={} yield_pacer={} yield_held={} yield_done={} drain_emits={} drain_entries={} outbound_release_remaining_ms={:?} recovery_remaining_ms={:?}",
+                        conn.rtt_ms(),
+                        conn.loss_rate() * 100.0,
+                        conn.conn.stats().sent,
+                        conn.conn.stats().recv,
+                        conn.conn.stats().lost,
+                        conn.conn.dgram_send_queue_len(),
+                        conn.conn.bytes_in_flight(),
+                        conn.conn.cwnd(),
+                        diagnostics.send_polls,
+                        diagnostics.send_datagrams,
+                        diagnostics.send_zero_results,
+                        diagnostics.send_done_results,
+                        diagnostics.send_errors,
+                        diagnostics.tun_dropped_frames,
+                        conn.send_yield_counts()[0],
+                        conn.send_yield_counts()[1],
+                        conn.send_yield_counts()[2],
+                        conn.send_yield_counts()[3],
+                        conn.send_yield_counts()[4],
+                        conn.send_yield_counts()[5],
+                        conn.next_outbound_release_deadline().map(|deadline| {
+                            deadline.saturating_duration_since(protocol_now).as_millis()
+                        }),
+                        conn.conn.recovery_deadline().map(|deadline| {
+                            deadline.saturating_duration_since(protocol_now).as_millis()
+                        }),
+                    );
+                } else {
+                    info!(
+                        "client stats: RTT {:.0} ms, Loss {:.2}%",
+                        conn.rtt_ms(),
+                        conn.loss_rate() * 100.0
+                    );
+                }
+                next_stats_log = now + Duration::from_secs(1);
+            }
+            // Only drive the idle timeout when the connection has actually been
+            // idle; calling it every tick collapses cwnd and inflates loss.
+            if conn.conn.idle_timeout_elapsed() {
+                conn.conn.on_timeout();
+            }
+            if conn.conn.is_established()
+                && heartbeat_timeout_ms > 0
+                && observable_inbound_silence(
+                    conn.conn.last_activity_elapsed(),
+                    conn.protocol_clock().elapsed_since(liveness_floor),
+                ) >= Duration::from_millis(heartbeat_timeout_ms)
+            {
+                if let Some(diagnostics) = io_diagnostics.as_ref() {
+                    let diagnostic_now = std::time::Instant::now();
+                    let protocol_now = conn.protocol_clock().now();
+                    warn!(
+                        "Client receive diagnostics at heartbeat: socket_datagrams={}, socket_bytes={}, core_recv_successes={}, core_recv_errors={}, activity_updates={}, send_polls={}, send_datagrams={}, send_bytes={}, send_zero_results={}, send_done_results={}, send_errors={}, last_send_elapsed_ms={:?}, request_sent={}, h3_stream_id={:?}, masque_established={}, kill_switch_connected={}, transport_sent={}, transport_recv={}, transport_lost={}, transport_dgram_queue={}, transport_bytes_in_flight={}, transport_cwnd={}, pending_application_ack={}, outbound_release_remaining_ms={:?}, recovery_remaining_ms={:?}, last_activity_elapsed_ms={}",
+                        diagnostics.socket_datagrams,
+                        diagnostics.socket_bytes,
+                        diagnostics.core_recv_successes,
+                        diagnostics.core_recv_errors,
+                        diagnostics.activity_updates,
+                        diagnostics.send_polls,
+                        diagnostics.send_datagrams,
+                        diagnostics.send_bytes,
+                        diagnostics.send_zero_results,
+                        diagnostics.send_done_results,
+                        diagnostics.send_errors,
+                        diagnostics
+                            .last_send_at
+                            .map(|sent_at| diagnostic_now.saturating_duration_since(sent_at).as_millis()),
+                        request_sent,
+                        h3_stream_id,
+                        conn.masque_tunnel_established(),
+                        kill_switch_connected,
+                        conn.conn.stats().sent,
+                        conn.conn.stats().recv,
+                        conn.conn.stats().lost,
+                        conn.conn.dgram_send_queue_len(),
+                        conn.conn.bytes_in_flight(),
+                        conn.conn.cwnd(),
+                        conn.conn.has_pending_application_ack(),
+                        conn.next_outbound_release_deadline().map(|deadline| {
+                            deadline.saturating_duration_since(protocol_now).as_millis()
+                        }),
+                        conn.conn.recovery_deadline().map(|deadline| {
+                            deadline.saturating_duration_since(protocol_now).as_millis()
+                        }),
+                        conn.conn.last_activity_elapsed().as_millis(),
+                    );
+                }
+                warn!(
+                    "Client heartbeat timeout after {}ms; activating fail-closed firewall state",
+                    heartbeat_timeout_ms
+                );
+                break ExitReason::HeartbeatTimeout;
+            }
+            if conn.conn.is_closed() {
+                break ExitReason::RemoteClosed;
+            }
+            // The housekeeping block owns the authoritative re-arm: it
+            // may legitimately postpone the next service (idle back-off),
+            // unlike the pull-earlier-only re-arm of sibling branches.
+            let housekeeping_delay = client_housekeeping_delay(
+                &conn,
+                tun_writer.is_some(),
+                request_sent,
+                tun_backpressure_frame.is_some(),
+                next_heartbeat_probe,
+            );
+            housekeeping_deadline = tokio::time::Instant::now() + housekeeping_delay;
+        }
+        // A permanently-ready select arm keeps the task runnable forever:
+        // without a yield the runtime's driver loop never advances and
+        // every other pending future (send deadlines, sleeps, spawned
+        // work) goes dead on a healthy link. Yield once per iteration.
         tokio::task::yield_now().await;
     };
 

@@ -1540,21 +1540,14 @@ fn housekeeping_service_bound(heartbeat_deadline: Option<tokio::time::Instant>) 
         .min(CLIENT_HOUSEKEEPING_IDLE)
 }
 
-/// Re-arms the shared housekeeping timer with deadline-monotone semantics:
-/// non-housekeeping select branches may pull the next tick earlier but must
-/// never postpone it. An unconditional `reset_after` lets a permanently
-/// ready recv branch starve housekeeping under an inbound datagram flood —
-/// every wake re-arms the timer past the next datagram, so stats, keepalive
-/// probes, the connected firewall transition, and the heartbeat watchdog
-/// never run until the link goes silent.
-fn rearm_client_housekeeping(
-    housekeeping: &mut tokio::time::Interval,
-    armed_deadline: &mut tokio::time::Instant,
-    delay: Duration,
-) {
+/// Re-arms the shared housekeeping deadline with deadline-monotone semantics:
+/// non-housekeeping select branches may pull the next service earlier but must
+/// never postpone it. The deadline is wall-clock state checked after every
+/// select resolution — not a timer entry — so an earlier target simply narrows
+/// the window until the next housekeeping run.
+fn rearm_client_housekeeping(armed_deadline: &mut tokio::time::Instant, delay: Duration) {
     let target = tokio::time::Instant::now() + delay;
     if target < *armed_deadline {
-        housekeeping.reset_at(target);
         *armed_deadline = target;
     }
 }
@@ -1776,26 +1769,22 @@ mod housekeeping_rearm_tests {
     use std::time::Duration;
 
     /// Regression for the inbound-flood starvation: every recv-branch wake
-    /// used to `reset_after` the housekeeping interval, postponing the tick
+    /// used to `reset_after` the housekeeping timer, postponing the service
     /// past each new datagram so a probe flood starved stats, keepalive
-    /// probes, and the heartbeat watchdog indefinitely.
+    /// probes, and the heartbeat watchdog indefinitely. The deadline is
+    /// wall-clock state now — monotone re-arm must never push it out.
     #[tokio::test]
     async fn sibling_wakes_cannot_postpone_housekeeping() {
-        let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
-        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        housekeeping.tick().await; // consume the immediate first tick
         let mut armed = tokio::time::Instant::now() + Duration::from_millis(60);
-        housekeeping.reset_at(armed);
+        let original = armed;
         // Sibling-branch storm: wakes every ~5 ms each asking for an idle
-        // (250 ms) re-arm — under unconditional reset_after the tick would
-        // slide to last-wake + 250 ms and could not fire inside this window.
+        // (250 ms) re-arm — under unconditional reset_after the deadline
+        // would slide to last-wake + 250 ms.
         for _ in 0..8 {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            rearm_client_housekeeping(&mut housekeeping, &mut armed, Duration::from_millis(250));
+            rearm_client_housekeeping(&mut armed, Duration::from_millis(250));
         }
-        tokio::time::timeout(Duration::from_millis(60), housekeeping.tick())
-            .await
-            .expect("housekeeping starved by sibling re-arms");
+        assert!(armed <= original, "sibling re-arms postponed housekeeping");
     }
 
     #[test]
@@ -1816,43 +1805,40 @@ mod housekeeping_rearm_tests {
 
     #[tokio::test]
     async fn sibling_wake_pulls_earlier_deadline() {
-        let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
-        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        housekeeping.tick().await;
         let mut armed = tokio::time::Instant::now() + Duration::from_secs(60);
-        housekeeping.reset_at(armed);
-        rearm_client_housekeeping(&mut housekeeping, &mut armed, Duration::from_millis(10));
-        tokio::time::timeout(Duration::from_millis(200), housekeeping.tick())
-            .await
-            .expect("pull-earlier re-arm must still fire");
+        rearm_client_housekeeping(&mut armed, Duration::from_millis(10));
+        assert!(
+            armed <= tokio::time::Instant::now() + Duration::from_millis(50),
+            "pull-earlier re-arm did not narrow the deadline"
+        );
     }
 
-    /// Regression for the never-yielding select starvation: a sibling arm
-    /// that stays permanently ready (e.g. a notify permit re-armed by the
-    /// drain loop) resolves every `select!` synchronously, so the task
-    /// never yields and the interval tick future is never polled — under a
-    /// single-worker runtime housekeeping goes dead. The per-iteration
-    /// `yield_now` keeps due ticks reachable.
+    /// Regression for the timer-driver starvation class: housekeeping is
+    /// gated on the wall-clock deadline checked after every select
+    /// resolution, never on a timer arm winning `select!` — a permanently
+    /// ready sibling (a notify permit re-armed by the drain loop, or a
+    /// socket that never drains under a probe flood) resolves every select
+    /// synchronously and starved interval-based housekeeping to death on
+    /// the Windows runner. The post-select due-check always reaches it.
     #[tokio::test(flavor = "current_thread")]
-    async fn housekeeping_tick_survives_permanently_ready_sibling() {
+    async fn housekeeping_runs_despite_permanently_ready_sibling() {
         let notify = std::sync::Arc::new(tokio::sync::Notify::new());
         notify.notify_one(); // self-sustaining permit, like drain's more_tun
-        let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
-        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        housekeeping.tick().await;
-        let mut ticks = 0u32;
-        let deadline = std::time::Instant::now() + Duration::from_millis(60);
-        while std::time::Instant::now() < deadline {
+        let mut deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+        let mut runs = 0u32;
+        let end = std::time::Instant::now() + Duration::from_millis(200);
+        while std::time::Instant::now() < end && runs == 0 {
             tokio::select! {
                 _ = notify.notified() => { notify.notify_one(); }
-                _ = housekeeping.tick() => { ticks += 1; }
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                runs += 1;
+                deadline = tokio::time::Instant::now() + Duration::from_millis(20);
             }
             tokio::task::yield_now().await;
-            if ticks > 0 {
-                break;
-            }
         }
-        assert!(ticks > 0, "housekeeping starved by permanently-ready sibling");
+        assert!(runs > 0, "housekeeping starved by permanently-ready sibling");
     }
 
     #[test]
