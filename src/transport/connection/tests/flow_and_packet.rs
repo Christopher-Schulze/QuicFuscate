@@ -723,12 +723,15 @@ fn dgram_send_recv_roundtrip() {
 fn owned_datagram_insufficient_output_preserves_queue() {
     let mut c = make_conn();
     c.enable_datagrams(16, 16);
-    let payload_len = 16_384;
+    // The payload must stay inside the negotiated UDP payload bound so the
+    // entry is emittable in principle; only the offered output buffer is too
+    // small. Entries that can never fit are dropped by contract instead.
+    let payload_len = 1_000;
     c.dgram_send_queue.push_back(DatagramSendEntry {
         data: vec![0xAB; payload_len],
         class: DatagramClass::Protected,
     });
-    let mut output = vec![0u8; 1 + 2 + payload_len];
+    let mut output = vec![0u8; 512];
 
     assert_eq!(
         c.maybe_stage_one_datagram_frame(&mut output, 0).expect("insufficient output is a no-op"),

@@ -426,8 +426,16 @@ fn peer_transport_limit_clamps_datagram_packetization() {
         .apply_peer_transport_limits(&max_udp_payload_transport_parameter(1413), true)
         .expect("valid peer max_udp_payload_size");
     assert_eq!(connection.dgram_send_max_size, 1413);
-    assert_eq!(connection.dgram_send(&vec![0u8; 1413]), Ok(()));
-    assert_eq!(connection.dgram_send(&vec![0u8; 1414]), Err(ConnectionError::InvalidState));
+    // The negotiated UDP payload budget also carries the DATAGRAM frame
+    // header, packet header fields, and the AEAD tag, so the largest
+    // enqueueable payload is the peer limit minus that shared overhead.
+    let overhead = 1usize + 2 + 1 + connection.dcid.as_ref().len() + 4 + 16;
+    let fitting = connection.dgram_send_max_size - overhead;
+    assert_eq!(connection.dgram_send(&vec![0u8; fitting]), Ok(()));
+    assert_eq!(
+        connection.dgram_send(&vec![0u8; fitting + 1]),
+        Err(ConnectionError::InvalidState)
+    );
 }
 
 #[test]
