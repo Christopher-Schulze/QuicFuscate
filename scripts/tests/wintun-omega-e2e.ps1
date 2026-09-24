@@ -38,7 +38,6 @@ $AdapterReadyAtUtc = $null
 $AdapterSnapshot = $null
 $PingAttempts = @()
 $PingAttempts6 = @()
-$AdapterCounterDelta = $null
 $ClientAliveBeforeCleanup = $false
 
 function Require-SecretValue {
@@ -428,12 +427,24 @@ try {
 
     $Phase = "ipv4-tunnel-ping"
     $PingSuccesses = 0
-    # Adapter counter baseline: OutUnicastPkts/OutOctets on the Wintun
-    # interface prove whether the echo requests ever reached the miniport.
-    # A rising counter with an empty reader ring isolates the loss to the
-    # driver/session boundary; a flat counter means the stack never egressed.
-    $AdapterStatsBefore = Get-NetAdapterStatistics -Name $AdapterName `
-        -ErrorAction SilentlyContinue
+    # pktmon packet-path capture around the echo window: each recorded frame
+    # names every NDIS component it traversed plus the component that dropped
+    # it. This is the definitive boundary probe for "did the echo reach the
+    # Wintun miniport" when the reader ring reports nothing.
+    $PktmonEtl = Join-Path $EvidenceDirectory "pktmon.etl"
+    $PktmonTxt = Join-Path $EvidenceDirectory "pktmon.txt"
+    $PktmonActive = $false
+    try {
+        & pktmon filter remove 2>$null | Out-Null
+        & pktmon filter add -i $ServerTunAddress 2>$null | Out-Null
+        & pktmon filter add -i $ServerTunAddress6 2>$null | Out-Null
+        & pktmon start --capture --file-name $PktmonEtl --pkt-size 0 `
+            2>$null | Out-Null
+        $PktmonActive = $true
+    }
+    catch {
+        Write-Output "pktmon start failed: $($_.Exception.Message)"
+    }
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         $PingResult = Invoke-TunnelPingAttempt `
             -TargetAddress $ServerTunAddress `
@@ -444,16 +455,13 @@ try {
             $PingSuccesses++
         }
     }
-    $AdapterStatsAfter = Get-NetAdapterStatistics -Name $AdapterName `
-        -ErrorAction SilentlyContinue
-    if ($AdapterStatsBefore -and $AdapterStatsAfter) {
-        $AdapterCounterDelta = [ordered]@{
-            out_unicast_before = $AdapterStatsBefore.OutUnicastPkts
-            out_unicast_after = $AdapterStatsAfter.OutUnicastPkts
-            out_octets_before = $AdapterStatsBefore.OutOctets
-            out_octets_after = $AdapterStatsAfter.OutOctets
-            in_unicast_before = $AdapterStatsBefore.InUnicastPkts
-            in_unicast_after = $AdapterStatsAfter.InUnicastPkts
+    if ($PktmonActive) {
+        try {
+            & pktmon stop 2>$null | Out-Null
+            & pktmon format $PktmonEtl -o $PktmonTxt 2>$null | Out-Null
+        }
+        catch {
+            Write-Output "pktmon stop/format failed: $($_.Exception.Message)"
         }
     }
     if ($PingSuccesses -ne 5) {
@@ -589,7 +597,6 @@ finally {
                 $AdapterReadyAtUtc.ToString("o")
             }
             adapter = $AdapterSnapshot
-            adapter_counter_delta = $AdapterCounterDelta
             ipv4_attempts = $PingAttempts
             ipv6_attempts = $PingAttempts6
             client_alive_before_cleanup = $ClientAliveBeforeCleanup
