@@ -243,6 +243,10 @@ use_utls = true
 reality_cover_targets = []
 
 # HTTP/3 masquerading - Make QUIC traffic look like HTTP/3
+# Honored as written on non-dynamic modes; --disable-http3 force-disables it.
+# `dynamic` owns this knob through the frozen wire image. When
+# enable_protocol_mimicry (below) is true it expands onto this key plus
+# use_qpack_headers/use_tls_cover as one bundle.
 enable_http3_masquerading = true
 
 # TLS Cover - Use synthetic cover handshakes for DPI evasion
