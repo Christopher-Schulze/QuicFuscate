@@ -2606,8 +2606,8 @@ fn write_dgram_pcap(
         ip[9] = 17; // UDP
         ip[12..16].copy_from_slice(&src4.ip().octets());
         ip[16..20].copy_from_slice(&dst4.ip().octets());
-        let mut sum =
-            ip.chunks_exact(2).fold(0u32, |acc, w| acc + u16::from_be_bytes([w[0], w[1]]) as u32);
+        let (words, _) = ip.as_chunks::<2>();
+        let mut sum = words.iter().fold(0u32, |acc, w| acc + u16::from_be_bytes(*w) as u32);
         while sum >> 16 != 0 {
             sum = (sum & 0xffff) + (sum >> 16);
         }

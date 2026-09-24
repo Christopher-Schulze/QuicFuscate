@@ -1666,8 +1666,10 @@ mod assignment_close_tests {
             crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
                 .expect("client transport config");
         client_config.verify_peer = false;
-        let mut client_stealth = crate::stealth::StealthConfig::default();
-        client_stealth.reality_cover_targets = vec!["127.0.0.1:443".to_string()];
+        let client_stealth = crate::stealth::StealthConfig {
+            reality_cover_targets: vec!["127.0.0.1:443".to_string()],
+            ..crate::stealth::StealthConfig::default()
+        };
         let mut client = crate::core::QuicFuscateConnection::new_client(
             "localhost",
             client_addr,

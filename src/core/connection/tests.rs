@@ -241,8 +241,10 @@ fn test_tls_connection_pair(
 
 #[test]
 fn core_emits_protected_crypto_close_before_probe_fallback() {
-    let mut receiver_stealth = StealthConfig::default();
-    receiver_stealth.reality_cover_targets = vec!["127.0.0.1:443".to_string()];
+    let receiver_stealth = StealthConfig {
+        reality_cover_targets: vec!["127.0.0.1:443".to_string()],
+        ..StealthConfig::default()
+    };
     let (mut sender, mut receiver) =
         test_tls_connection_pair(StealthConfig::default(), receiver_stealth);
     receiver

@@ -66,17 +66,18 @@ fn aead_rejects_packet_numbers_above_quic_limit() {
 
 #[test]
 fn data_aead_config_force_aegis_is_accepted_when_protection_is_auto() {
-    let mut config = CryptoConfig::default();
-    config.packet_protection_mode = PacketProtectionMode::Auto;
-    config.force_aead = "aegis".to_string();
+    let config = CryptoConfig {
+        packet_protection_mode: PacketProtectionMode::Auto,
+        force_aead: "aegis".to_string(),
+        ..CryptoConfig::default()
+    };
     assert!(config.validate().is_ok());
 }
 
 #[test]
 fn data_aead_config_force_internal_width_aliases_fail_closed() {
     for spelling in ["aegis-128x4", "aegis-128x8"] {
-        let mut config = CryptoConfig::default();
-        config.force_aead = spelling.to_string();
+        let config = CryptoConfig { force_aead: spelling.to_string(), ..CryptoConfig::default() };
         assert!(config.validate().is_err(), "{spelling} must fail closed");
     }
 }
@@ -103,18 +104,17 @@ fn private_packet_selector_requires_exact_key_and_iv_material() {
     let key = [0x11u8; PrivateAeadFamily::KEY_LEN];
     let iv = [0x22u8; PrivateAeadFamily::IV_LEN];
     let plaintext = b"private-roundtrip";
-    for family in [PrivateAeadFamily::Aegis128L] {
-        let (seal, open) =
-            super::select_private_packet_data_aead(family, &key, &iv).expect("exact material");
-        let mut packet = vec![0u8; plaintext.len() + PrivateAeadFamily::TAG_LEN];
-        packet[..plaintext.len()].copy_from_slice(plaintext);
-        seal.seal_with_u64_counter(7, b"aad", &mut packet, plaintext.len(), None).expect("seal");
-        let length = open.open_with_u64_counter(7, b"aad", &mut packet).expect("open");
-        assert_eq!(length, plaintext.len());
-        assert_eq!(&packet[..length], plaintext);
-        assert!(super::select_private_packet_data_aead(family, &[0u8; 32], &iv).is_err());
-        assert!(super::select_private_packet_data_aead(family, &key, &[0u8; 16]).is_err());
-    }
+    let family = PrivateAeadFamily::Aegis128L;
+    let (seal, open) =
+        super::select_private_packet_data_aead(family, &key, &iv).expect("exact material");
+    let mut packet = vec![0u8; plaintext.len() + PrivateAeadFamily::TAG_LEN];
+    packet[..plaintext.len()].copy_from_slice(plaintext);
+    seal.seal_with_u64_counter(7, b"aad", &mut packet, plaintext.len(), None).expect("seal");
+    let length = open.open_with_u64_counter(7, b"aad", &mut packet).expect("open");
+    assert_eq!(length, plaintext.len());
+    assert_eq!(&packet[..length], plaintext);
+    assert!(super::select_private_packet_data_aead(family, &[0u8; 32], &iv).is_err());
+    assert!(super::select_private_packet_data_aead(family, &key, &[0u8; 16]).is_err());
 }
 
 #[test]
@@ -223,8 +223,8 @@ fn ring_chacha20poly1305_roundtrips_across_quic_counters() {
 
 #[test]
 fn data_aead_config_preference_aegis_conflicts_with_standard() {
-    let mut config = CryptoConfig::default();
-    config.aead_preference = DataAeadPreference::Aegis128L;
+    let mut config =
+        CryptoConfig { aead_preference: DataAeadPreference::Aegis128L, ..CryptoConfig::default() };
     assert!(config.validate().is_err());
     config.packet_protection_mode = PacketProtectionMode::Auto;
     assert!(config.validate().is_ok());

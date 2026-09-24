@@ -7,7 +7,7 @@ fn assert_tls13_only(cipher_suites: &[u16]) {
     assert!(!cipher_suites.is_empty(), "TLS 1.3 suite list must not be empty");
     for (index, suite) in cipher_suites.iter().enumerate() {
         assert!(
-            matches!(*suite, 0x1301 | 0x1302 | 0x1303),
+            matches!(*suite, 0x1301..=0x1303),
             "non-TLS-1.3 suite {suite:#x} is not in the browser fixture"
         );
         assert!(

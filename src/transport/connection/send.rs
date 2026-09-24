@@ -72,11 +72,13 @@ impl Connection {
             packet::seal_long_header_packet(
                 &crypto,
                 &mut header,
-                pn,
-                pn_len,
-                header_reserve,
-                payload_len,
-                min_total,
+                packet::LongSealPlan {
+                    pn,
+                    pn_len,
+                    header_reserve,
+                    payload_len,
+                    min_packet_len: min_total,
+                },
                 out,
             )?
         };
@@ -370,11 +372,13 @@ impl Connection {
                     packet::seal_long_header_packet(
                         &crypto,
                         &mut base_hdr,
-                        pn,
-                        pn_len,
-                        header_reserve,
-                        payload_len,
-                        min_total,
+                        packet::LongSealPlan {
+                            pn,
+                            pn_len,
+                            header_reserve,
+                            payload_len,
+                            min_packet_len: min_total,
+                        },
                         out,
                     )?
                 };
@@ -927,11 +931,7 @@ impl Connection {
             packet::seal_long_header_packet(
                 &crypto,
                 &mut base_hdr,
-                pn,
-                pn_len,
-                header_reserve,
-                payload_len,
-                0,
+                packet::LongSealPlan { pn, pn_len, header_reserve, payload_len, min_packet_len: 0 },
                 out,
             )?
         };

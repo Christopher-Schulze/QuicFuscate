@@ -865,7 +865,7 @@ mod time_source_tests {
             for _ in 0..burst {
                 pn += 1;
                 // Reorder every 5th packet, vary sizes across classes.
-                let observed = if pn % 5 == 0 { pn + 1 } else { pn };
+                let observed = if pn.is_multiple_of(5) { pn + 1 } else { pn };
                 brain.on_packet_recv(observed, 64 + ((tick * 37) & 1023));
             }
             brain.on_ack(2_000 + ((tick % 9) as u64) * 2_500, &[]);

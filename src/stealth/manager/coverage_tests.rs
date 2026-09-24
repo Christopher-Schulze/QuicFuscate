@@ -180,7 +180,7 @@ mod stealth_coverage_tests {
             crate::transport::Config::new_with_version(crate::transport::PROTOCOL_VERSION)
                 .expect("transport config");
         m.apply_utls_profile(&mut config);
-        assert_eq!(config.max_pacing_rate, Some(1 * 125_000));
+        assert_eq!(config.max_pacing_rate, Some(125_000));
     }
 
     #[test]

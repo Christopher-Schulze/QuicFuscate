@@ -1081,6 +1081,45 @@ impl StealthConfig {
     }
 }
 
+/// A Reality cover target is a `host` or `host:port` whose certificate the hop
+/// presents or relays. Hostnames must not carry whitespace, userinfo, path or
+/// port garbage - the entry names a real endpoint.
+fn is_valid_cover_target(target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let (host, port) = match target.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.starts_with('[') {
+                // [v6]:port form
+                let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) else {
+                    return false;
+                };
+                if inner.parse::<std::net::Ipv6Addr>().is_err() {
+                    return false;
+                }
+                (host, Some(port))
+            } else {
+                if host.contains(':') {
+                    return false;
+                }
+                (host, Some(port))
+            }
+        }
+        None => (target, None),
+    };
+    if let Some(port) = port {
+        if !port.parse::<u16>().is_ok_and(|p| p > 0) {
+            return false;
+        }
+    }
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    !host.is_empty()
+        && !host.chars().any(char::is_whitespace)
+        && !host.contains(['/', '?', '#', '@'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::StealthConfig;
@@ -1279,43 +1318,4 @@ mod tests {
         assert_eq!(cfg.max_padding_size, 96);
         assert!(!cfg.enable_cover_ping);
     }
-}
-
-/// A Reality cover target is a `host` or `host:port` whose certificate the hop
-/// presents or relays. Hostnames must not carry whitespace, userinfo, path or
-/// port garbage - the entry names a real endpoint.
-fn is_valid_cover_target(target: &str) -> bool {
-    let target = target.trim();
-    if target.is_empty() {
-        return false;
-    }
-    let (host, port) = match target.rsplit_once(':') {
-        Some((host, port)) => {
-            if host.starts_with('[') {
-                // [v6]:port form
-                let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) else {
-                    return false;
-                };
-                if inner.parse::<std::net::Ipv6Addr>().is_err() {
-                    return false;
-                }
-                (host, Some(port))
-            } else {
-                if host.contains(':') {
-                    return false;
-                }
-                (host, Some(port))
-            }
-        }
-        None => (target, None),
-    };
-    if let Some(port) = port {
-        if !port.parse::<u16>().is_ok_and(|p| p > 0) {
-            return false;
-        }
-    }
-    let host = host.trim_matches(|c| c == '[' || c == ']');
-    !host.is_empty()
-        && !host.chars().any(char::is_whitespace)
-        && !host.contains(['/', '?', '#', '@'])
 }

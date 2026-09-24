@@ -532,25 +532,40 @@ fn resolve_long_packet_length(
     Err(ConnectionError::InvalidPacket)
 }
 
+/// Staged-layout and seal parameters for [`seal_long_header_packet`].
+///
+/// `header_reserve` bytes at the start of the output buffer hold worst-case
+/// header space (see [`long_header_reserve`]); `payload_len` plaintext frame
+/// bytes follow at `out[header_reserve..]`.
+pub struct LongSealPlan {
+    /// Full packet number for AEAD nonce construction.
+    pub pn: u64,
+    /// Truncated packet-number width in bytes (1-4).
+    pub pn_len: usize,
+    /// Reserved worst-case header prefix length the payload was staged behind.
+    pub header_reserve: usize,
+    /// Plaintext frame bytes staged at `header_reserve`.
+    pub payload_len: usize,
+    /// Minimum total packet length (e.g. 1200 for client Initials, else 0).
+    pub min_packet_len: usize,
+}
+
 /// Finalize a staged long-header packet and seal it exactly once.
 ///
-/// `header_reserve` bytes at the start of `out` hold worst-case header
-/// space (see [`long_header_reserve`]); `payload_len` plaintext frame bytes
-/// follow at `out[header_reserve..]`. The payload is extended with
+/// `plan.header_reserve` bytes at the start of `out` hold worst-case header
+/// space (see [`long_header_reserve`]); `plan.payload_len` plaintext frame
+/// bytes follow at `out[plan.header_reserve..]`. The payload is extended with
 /// zero-filled PADDING frames up to the resolved RFC Length (sample minimum
-/// and `min_packet_len`), the compact header and packet number are written,
-/// the payload is moved into place, and the packet is sealed. Returns the
-/// sealed packet length.
+/// and `plan.min_packet_len`), the compact header and packet number are
+/// written, the payload is moved into place, and the packet is sealed.
+/// Returns the sealed packet length.
 pub fn seal_long_header_packet(
     crypto: &CryptoContext,
     h: &mut Header,
-    pn: u64,
-    pn_len: usize,
-    header_reserve: usize,
-    payload_len: usize,
-    min_packet_len: usize,
+    plan: LongSealPlan,
     out: &mut [u8],
 ) -> Result<usize, ConnectionError> {
+    let LongSealPlan { pn, pn_len, header_reserve, payload_len, min_packet_len } = plan;
     let ciphertext_len = checked_usize_add(payload_len, AEAD_TAG_LEN)?;
     let length = resolve_long_packet_length(h, pn_len, ciphertext_len, min_packet_len, out.len())?;
     let length_usize = usize::try_from(length).map_err(|_| ConnectionError::InvalidPacket)?;

@@ -296,15 +296,17 @@ fn outer_hop_none_is_default_and_rejects_stray_relay() {
     assert!(config.outer_hop_relay.is_none());
     config.validate().expect("default connection validates");
 
-    let mut stray = ConnectionConfig::default();
-    stray.outer_hop_relay = Some(circuit::HopConfig::default());
+    let stray = ConnectionConfig {
+        outer_hop_relay: Some(circuit::HopConfig::default()),
+        ..ConnectionConfig::default()
+    };
     assert!(stray.validate().is_err(), "a relay without masque mode is contradictory");
 }
 
 #[test]
 fn outer_hop_masque_requires_relay_with_relay_role() {
-    let mut config = ConnectionConfig::default();
-    config.outer_hop = OuterHop::Masque;
+    let mut config =
+        ConnectionConfig { outer_hop: OuterHop::Masque, ..ConnectionConfig::default() };
     assert!(config.validate().is_err(), "masque without a relay description fails");
 
     let mut relay = circuit::HopConfig {
@@ -328,8 +330,7 @@ fn outer_hop_masque_requires_relay_with_relay_role() {
 
 #[test]
 fn outer_hop_tls_http_is_reserved_and_fails_validation() {
-    let mut config = ConnectionConfig::default();
-    config.outer_hop = OuterHop::TlsHttp;
+    let config = ConnectionConfig { outer_hop: OuterHop::TlsHttp, ..ConnectionConfig::default() };
     let error = config.validate().expect_err("tls_http is reserved, not implemented");
     assert!(error.to_string().contains("tls_http"), "{error}");
 }
