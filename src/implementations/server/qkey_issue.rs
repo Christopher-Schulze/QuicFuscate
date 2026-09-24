@@ -506,9 +506,13 @@ pub fn apply_runtime_stealth_overrides(
     };
     // TODO-1059: `dynamic` froze its wire image at connect — the image preset
     // owns masquerading/QPACK/mimicry, so deployment overrides stay inert.
+    // `disable_http3` is a pure disable flag: without it the configuration's
+    // own masquerading value stands instead of being force-enabled. The
+    // mimicry bundle alias still expands `enable_protocol_mimicry` onto the
+    // H3/QPACK/TLS-cover knobs.
     if !matches!(sc.mode, StealthMode::Dynamic) {
-        sc.enable_http3_masquerading = !disable_http3;
         if disable_http3 {
+            sc.enable_http3_masquerading = false;
             sc.use_qpack_headers = false;
             sc.enable_protocol_mimicry = false;
         } else {

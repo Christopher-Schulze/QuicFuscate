@@ -519,6 +519,53 @@ fn test_apply_runtime_stealth_overrides_sets_all_fields() {
 }
 
 #[test]
+fn test_apply_runtime_stealth_overrides_preserves_config_disabled_masquerading() {
+    let mut sc = StealthConfig::default();
+    sc.mode = StealthMode::Manual;
+    sc.enable_http3_masquerading = false;
+    sc.use_qpack_headers = false;
+    sc.use_tls_cover = false;
+    sc.enable_protocol_mimicry = false;
+    apply_runtime_stealth_overrides(
+        &mut sc,
+        BrowserProfile::Firefox,
+        OsProfile::Linux,
+        true,
+        "https://cloudflare-dns.com/dns-query",
+        true,
+        &[],
+        false, // disable_http3 unset: config decides
+    );
+    assert!(!sc.enable_http3_masquerading);
+    assert!(!sc.use_qpack_headers);
+    assert!(!sc.use_tls_cover);
+    assert!(!sc.enable_protocol_mimicry);
+}
+
+#[test]
+fn test_apply_runtime_stealth_overrides_mimicry_bundle_still_expands() {
+    let mut sc = StealthConfig::default();
+    sc.mode = StealthMode::Manual;
+    sc.enable_http3_masquerading = false;
+    sc.use_qpack_headers = false;
+    sc.use_tls_cover = false;
+    sc.enable_protocol_mimicry = true;
+    apply_runtime_stealth_overrides(
+        &mut sc,
+        BrowserProfile::Firefox,
+        OsProfile::Linux,
+        true,
+        "https://cloudflare-dns.com/dns-query",
+        true,
+        &[],
+        false,
+    );
+    assert!(sc.enable_http3_masquerading);
+    assert!(sc.use_qpack_headers);
+    assert!(sc.use_tls_cover);
+}
+
+#[test]
 fn test_apply_runtime_stealth_overrides_keeps_cover_explicit_or_stealth_max_only() {
     let mut sc = StealthConfig::default();
     apply_runtime_stealth_overrides(
