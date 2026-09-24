@@ -555,6 +555,11 @@ mod tests {
         assert_eq!(inner_tun_mtu(576, false), 576);
         assert_eq!(follow_live_inner_mtu(1413, 1280, true), 1280);
         assert_eq!(follow_live_inner_mtu(1413, 1600, false), 1413);
+        // A nested PTB cap may drop the live client budget below the IPv6
+        // link minimum; the TUN still opens at the floor because the
+        // framed-H3 fallback carries oversized packets (TODO-886 Omega run).
+        assert_eq!(follow_live_inner_mtu(1413, 1202, true), 1280);
+        assert_eq!(follow_live_inner_mtu(1413, 1202, false), 1202);
 
         let circuit = CircuitConfig {
             hops: vec![

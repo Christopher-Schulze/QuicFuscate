@@ -833,7 +833,17 @@ impl ClientDataPlane {
                     })
                     .and_then(|mtu| topology.effective_inner_datagram_budget(mtu).ok())
             })
-            .map_or(exit_mtu, |budget| exit_mtu.min(usize::from(budget)))
+            // The inner datagram budget may transiently dip below the IPv6
+            // link minimum under nested PTB caps; the framed-H3 fallback
+            // still carries oversized packets, so the TUN keeps the same
+            // floor as the single-hop path instead of failing to open.
+            .map_or(exit_mtu, |budget| {
+                usize::from(qf_engine_types::follow_live_inner_mtu(
+                    u16::try_from(exit_mtu).unwrap_or(u16::MAX),
+                    budget,
+                    true,
+                ))
+            })
     }
 
     pub fn recv_memory_pool(&self) -> Arc<crate::optimize::MemoryPool> {
