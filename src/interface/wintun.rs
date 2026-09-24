@@ -185,6 +185,50 @@ mod imp {
         )
     }
 
+    fn run_powershell(script: &str, action: &str) -> io::Result<String> {
+        let output = std::process::Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .map_err(|error| io::Error::other(format!("{action} spawn failed: {error}")))?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{action} returned status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Strip every protocol binding except TCP/IPv4 and TCP/IPv6 from the
+    /// tunnel adapter. A VPN adapter only needs the IP bindings; the SMB,
+    /// NetBIOS, LLTD, PPPoE and similar bindings both leak Windows chatter
+    /// onto the tunnel interface and can leave the NDIS datapath suspended
+    /// when a bind operation never completes - which makes the miniport
+    /// drop every outbound frame before it reaches the session ring.
+    fn disable_non_tcpip_bindings(name: &str) -> io::Result<()> {
+        let escaped = name.replace('\'', "''");
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             $adapter = '{escaped}'; \
+             Get-NetAdapterBinding -Name $adapter -AllBindings -IncludeHidden | \
+             Where-Object {{ $_.Enabled -and $_.ComponentID -notin @('ms_tcpip','ms_tcpip6') }} | \
+             ForEach-Object {{ \
+                 Disable-NetAdapterBinding -Name $adapter -ComponentID $_.ComponentID; \
+                 [Console]::WriteLine($_.ComponentID) \
+             }}"
+        );
+        let disabled = run_powershell(&script, "disable non-TCP/IP bindings")?;
+        if !disabled.is_empty() {
+            log::info!(
+                "Wintun adapter '{name}': disabled non-IP bindings: {}",
+                disabled.replace('\n', ",")
+            );
+        }
+        Ok(())
+    }
+
     fn read_interface_mtu(name: &str, family: &str) -> io::Result<u16> {
         let script = interface_mtu_script(name, family);
         let output = std::process::Command::new("powershell.exe")
@@ -801,8 +845,8 @@ mod imp {
 
             // Assign the unicast IP address. A failure here tears down the
             // whole device so we never hand back an unconfigured adapter.
-            if let Err(e) = device
-                .assign_address(config)
+            if let Err(e) = disable_non_tcpip_bindings(&device.name)
+                .and_then(|()| device.assign_address(config))
                 .and_then(|()| set_interface_mtu(&device.name, config.mtu, device.ipv6_enabled))
                 .and_then(|()| wait_for_address_activation(config))
             {

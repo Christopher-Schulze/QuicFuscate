@@ -242,12 +242,13 @@ function Read-TunDatapathSnapshot {
         try {
             $Stats = Get-NetAdapterStatistics -Name $AdapterName `
                 -IncludeHidden -ErrorAction Stop
-            foreach ($Prop in @(
-                "OutUnicastPackets", "OutDiscardedPackets", "OutPacketErrors",
-                "ReceivedUnicastPackets", "InDiscardedPackets", "InPacketErrors")) {
-                $Member = $Stats.psobject.Properties[$Prop]
-                if ($null -ne $Member) {
-                    $Snapshot[$Prop] = $Member.Value
+            # Property names vary across NetAdapter builds: copy every
+            # numeric member so the delta stays observable regardless of
+            # the underlying counter naming scheme.
+            foreach ($Member in $Stats.psobject.Properties) {
+                if ($Member.Value -is [int] -or $Member.Value -is [long] `
+                    -or $Member.Value -is [uint64] -or $Member.Value -is [uint32]) {
+                    $Snapshot["stats_$($Member.Name)"] = $Member.Value
                 }
             }
         }
