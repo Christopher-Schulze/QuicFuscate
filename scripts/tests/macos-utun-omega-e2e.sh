@@ -40,7 +40,7 @@ trap cleanup EXIT
 
 BASELINE_UTUNS="$(ifconfig -l | tr ' ' '\n' | grep -c '^utun' || true)"
 
-QUICFUSCATE_MASQUE_TRACE=1 "$BINARY" client \
+QUICFUSCATE_MASQUE_TRACE=1 QUICFUSCATE_CLIENT_RECV_DIAGNOSTICS=1 "$BINARY" client \
   --remote "$ENDPOINT" \
   --url "https://$ENDPOINT_HOST/" \
   --qkey "$QF_MACOS_E2E_QKEY" \
@@ -81,10 +81,18 @@ done
 [ -n "$UTUN_IF" ] || { tail -30 "$WORK_DIR/client.log" >&2; fail "no utun with a 10.252.0.x address appeared"; }
 echo "INFO: tunnel interface up: $UTUN_IF"
 
+# Capture the utun boundary during the pings: requests prove the kernel
+# handed frames to the client fd, replies prove the downlink write worked.
+tcpdump -i "$UTUN_IF" -n -c 40 -w "$WORK_DIR/utun.pcap" \
+  'icmp or icmp6' >/dev/null 2>&1 &
+TCPDUMP_PID=$!
+
 ping -c 5 -t 10 10.252.0.1 > "$WORK_DIR/ping4.log" 2>&1 \
-  || fail "IPv4 tunnel ping failed: $(tail -3 "$WORK_DIR/ping4.log")"
+  || { sleep 1; kill "$TCPDUMP_PID" 2>/dev/null; fail "IPv4 tunnel ping failed: $(tail -3 "$WORK_DIR/ping4.log")"; }
 ping6 -c 5 fd00::1 > "$WORK_DIR/ping6.log" 2>&1 \
-  || fail "IPv6 tunnel ping failed: $(tail -3 "$WORK_DIR/ping6.log")"
+  || { sleep 1; kill "$TCPDUMP_PID" 2>/dev/null; fail "IPv6 tunnel ping failed: $(tail -3 "$WORK_DIR/ping6.log")"; }
+sleep 1
+kill "$TCPDUMP_PID" 2>/dev/null || true
 echo "INFO: IPv4/IPv6 tunnel pings passed"
 
 kill -TERM "$CLIENT_PID"

@@ -3,6 +3,7 @@
 use super::*;
 
 use std::mem;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::RawFd;
 use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -53,6 +54,50 @@ impl MacTun {
         )))
     }
 
+    fn run_route(args: &[&str]) -> io::Result<()> {
+        let output = Command::new("/sbin/route")
+            .args(args)
+            .output()
+            .map_err(|error| io::Error::other(format!("route spawn: {error}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(io::Error::other(format!(
+            "route {} returned status {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+
+    /// Installs `cidr` as an interface-scoped route. A route the kernel
+    /// already created (e.g. the inet6 prefix route) makes route(8) answer
+    /// EEXIST — that is only accepted when the existing route resolves
+    /// through this interface; a foreign route is a real conflict.
+    fn ensure_interface_route(name: &str, cidr: &str, v6: bool) -> io::Result<()> {
+        let family = if v6 { "-inet6" } else { "-inet" };
+        match Self::run_route(&["-n", "add", family, cidr, "-interface", name]) {
+            Ok(()) => Ok(()),
+            Err(_) if Self::route_targets_interface(name, cidr, v6)? => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn route_targets_interface(name: &str, cidr: &str, v6: bool) -> io::Result<bool> {
+        let family = if v6 { "-inet6" } else { "-inet" };
+        let output = Command::new("/sbin/route")
+            .args(["-n", "get", family, cidr])
+            .output()
+            .map_err(|error| io::Error::other(format!("route get spawn: {error}")))?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        let expected = format!("interface: {name}");
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim() == expected))
+    }
+
     fn read_mtu(name: &str) -> io::Result<u16> {
         let output = Command::new("/sbin/ifconfig")
             .arg(name)
@@ -79,19 +124,35 @@ impl MacTun {
         // utun is POINTOPOINT: SIOCAIFADDR (inet) requires a destination address
         // or the kernel answers "Destination address required"; CONNECT-IP
         // supplies no peer address, so the destination is the assigned address
-        // itself — the netmask still installs the subnet route over the link
-        // (the same convention wg-quick uses on Darwin). SIOCAIFADDR_IN6 is the
-        // opposite: it rejects a destination with EINVAL, so inet6 carries only
-        // the address and prefixlen.
+        // itself (the same convention wg-quick uses on Darwin). A P2P
+        // ifconfig only installs the /32 host route to that destination — the
+        // subnet route must be added explicitly as an interface route or
+        // tunnel traffic falls onto the default route. SIOCAIFADDR_IN6 is the
+        // opposite: it rejects a destination with EINVAL, so inet6 carries
+        // only the address and prefixlen.
         if let (Some(IpAddr::V4(address)), Some(IpAddr::V4(netmask))) = (cfg.ip, cfg.netmask) {
-            let address = address.to_string();
-            let netmask = netmask.to_string();
-            Self::run_ifconfig(&[name, "inet", &address, &address, "netmask", &netmask, "up"])?;
+            let address_text = address.to_string();
+            let netmask_text = netmask.to_string();
+            Self::run_ifconfig(&[
+                name,
+                "inet",
+                &address_text,
+                &address_text,
+                "netmask",
+                &netmask_text,
+                "up",
+            ])?;
+            let network = Ipv4Addr::from(u32::from(address) & u32::from(netmask));
+            let prefix = u32::from(netmask).count_ones();
+            Self::ensure_interface_route(name, &format!("{network}/{prefix}"), false)?;
         }
         if let (Some(address), Some(prefix)) = (cfg.ip6, cfg.prefix6) {
-            let address = address.to_string();
-            let prefix = prefix.to_string();
-            Self::run_ifconfig(&[name, "inet6", &address, "prefixlen", &prefix, "up"])?;
+            let address_text = address.to_string();
+            let prefix_text = prefix.to_string();
+            Self::run_ifconfig(&[name, "inet6", &address_text, "prefixlen", &prefix_text, "up"])?;
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            let network = Ipv6Addr::from(u128::from(address) & mask);
+            Self::ensure_interface_route(name, &format!("{network}/{prefix}"), true)?;
         }
         let mtu = cfg.mtu.to_string();
         Self::run_ifconfig(&[name, "mtu", &mtu, "up"])?;
