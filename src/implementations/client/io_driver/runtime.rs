@@ -1284,6 +1284,15 @@ impl IoDriver {
             {
                 let mut conn_guard = conn.lock();
                 let completion_len = c.len;
+                let mut head: Vec<String> = Vec::new();
+                if masque_trace_enabled() {
+                    let head_src: &[u8] = if let Some(block) = &c.block {
+                        &block[..completion_len.min(24)]
+                    } else {
+                        &c.data[..completion_len.min(24)]
+                    };
+                    head = head_src.iter().map(|b| format!("{b:02x}")).collect();
+                }
                 let recv_result = if let Some(block) = c.block {
                     conn_guard.recv_pooled_block(block, c.len)
                 } else {
@@ -1292,9 +1301,10 @@ impl IoDriver {
                 if let Err(e) = recv_result {
                     if masque_trace_enabled() {
                         log::info!(
-                            "client uring conn.recv error bytes={} err={:?}",
+                            "client uring conn.recv error bytes={} err={:?} head={}",
                             completion_len,
-                            e
+                            e,
+                            head.join(" ")
                         );
                     } else {
                         log::debug!("Connection recv error: {:?}", e);
@@ -1508,7 +1518,14 @@ impl IoDriver {
                 let mut conn_guard = conn.lock();
                 if let Err(e) = conn_guard.recv_mut(payload) {
                     if masque_trace_enabled() {
-                        log::info!("client conn.recv error bytes={} err={:?}", len, e);
+                        let head: Vec<String> =
+                            payload.iter().take(24).map(|b| format!("{b:02x}")).collect();
+                        log::info!(
+                            "client conn.recv error bytes={} err={:?} head={}",
+                            len,
+                            e,
+                            head.join(" ")
+                        );
                     } else {
                         log::debug!("Connection recv error: {:?}", e);
                     }

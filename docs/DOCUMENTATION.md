@@ -90,7 +90,13 @@ This section is the fast path for skeptical review. It is not a marketing summar
   GSO trains. The CQ is sized `entries + 64` and each drain ends with one
   overflow-flushing `submit()` so kernel-parked completions (including the
   terminating `-ENOBUFS` CQE) cannot deadlock the armed request. Both variants
-  bridge to Tokio through `register_eventfd_async(eventfd)` + `AsyncFd`.
+  bridge to Tokio through `register_eventfd(eventfd)` + `AsyncFd`: the plain
+  registration signals every completion, whereas `IORING_REGISTER_EVENTFD_ASYNC`
+  only signals completions that ran through an async worker - poll-driven socket
+  receives complete without it and left the inbound path deaf (native Omega
+  regression: zero wakeups, watchdog kill). The eventfd is treated strictly as a
+  latency optimization; the receive loop drains the CQ on every wake including
+  recv-timeout expiries, so an under-signalling kernel cannot stall the path.
   Fallback to Tokio `recv()` + `try_recv()` when io_uring is unavailable.
 - MSG_ZEROCOPY is not part of the final runtime story.
 - Server RX can be sharded across multiple UDP sockets on the same port via Linux

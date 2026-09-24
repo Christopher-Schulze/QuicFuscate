@@ -93,7 +93,7 @@ stop_owned_pid() {
 [ "$FAILURE_TARGET" != "middle" ] || [ "$HOPS" = "3" ] \
   || fail "middle failure proof requires a three-hop circuit"
 [ -x "$BINARY" ] || fail "release binary is missing: $BINARY"
-for command in getconf ip openssl nc python3 tcpdump timeout; do
+for command in getconf ip mount openssl nc python3 tcpdump timeout unshare; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
 done
 [ "$NETEM_DELAY_MS" = "0" ] && [ "$NETEM_JITTER_MS" = "0" ] \
@@ -242,21 +242,30 @@ start_server() {
   local namespace="$1" listen="$2" socket="$3" store="$4" log="$5" mode="$6" next="$7"
   local args=(server --listen "$listen" --cert "$CERT" --key "$KEY" --admin-socket "$socket"
     --qkey-store "$store" --no-drop-privileges -v)
+  # Each server writes durable routing/firewall ownership under /run/quicfuscate.
+  # That state directory is host-global while the owned nftables table lives in
+  # the server's netns, so co-located servers would race on the single
+  # firewall-owner record. Give every server a private mount namespace with an
+  # isolated /run bind so ownership stays scoped to its own process.
+  local isolated_run="$WORK_DIR/run-$namespace"
+  mkdir -p "$isolated_run"
+  local env_args=(QUICFUSCATE_MASQUE_TRACE=1)
   if [ "$mode" = "exit" ]; then
     args+=(--tun --tun-name qtun0 --tun-ip 10.51.0.1 --tun-netmask 255.255.255.0
       --tun-ip6 fd51::1 --tun-prefix6 64 --vpn-dns 10.51.0.1)
-    ip netns exec "$namespace" env QUICFUSCATE_MASQUE_TRACE=1 \
-      "$BINARY" "${args[@]}" > "$log" 2>&1 &
   else
-    ip netns exec "$namespace" env \
-      QUICFUSCATE_MASQUE_TRACE=1 \
-      QUICFUSCATE_MASQUE_RELAY_ENABLED=1 \
-      QUICFUSCATE_MASQUE_RELAY_ALLOW_NON_GLOBAL_TARGETS=1 \
-      QUICFUSCATE_MASQUE_RELAY_ALLOWED_HOSTS="$next" \
-      QUICFUSCATE_MASQUE_RELAY_ALLOWED_CIDRS="${next%.*}.0/24" \
-      QUICFUSCATE_MASQUE_RELAY_ALLOWED_PORTS=4433 \
-      "$BINARY" "${args[@]}" > "$log" 2>&1 &
+    env_args+=(
+      QUICFUSCATE_MASQUE_RELAY_ENABLED=1
+      QUICFUSCATE_MASQUE_RELAY_ALLOW_NON_GLOBAL_TARGETS=1
+      QUICFUSCATE_MASQUE_RELAY_ALLOWED_HOSTS="$next"
+      QUICFUSCATE_MASQUE_RELAY_ALLOWED_CIDRS="${next%.*}.0/24"
+      QUICFUSCATE_MASQUE_RELAY_ALLOWED_PORTS=4433
+    )
   fi
+  ip netns exec "$namespace" \
+    unshare --mount --propagation private -- \
+    /bin/bash -c 'mount --bind "$1" /run; shift; exec env "$@"' qf-run-isolate \
+    "$isolated_run" "${env_args[@]}" "$BINARY" "${args[@]}" > "$log" 2>&1 &
   STARTED_SERVER_PID="$!"
   OWNED_PIDS+=("$STARTED_SERVER_PID")
   RUNTIME_PIDS+=("$STARTED_SERVER_PID")
@@ -364,7 +373,7 @@ fi
 
 CONFIG="$WORK_DIR/client.toml"
 {
-  printf '%s\n' '[engine]' 'mode = "client"' 'log_level = "debug"' '[interface]' 'type = "tun"' 'tun_name = "qtun0"' 'dns_servers = ["10.51.0.1"]'
+  printf '%s\n' '[engine]' 'mode = "client"' "log_level = \"${QF_MH_CLIENT_LOG_LEVEL:-debug}\"" '[interface]' 'type = "tun"' 'tun_name = "qtun0"' 'dns_servers = ["10.51.0.1"]'
   printf '%s\n' '[stealth]' 'enable_doh = false'
   printf '%s\n' '[security]' 'kill_switch = true' '[circuit]' "max_hops = $HOPS" 'max_parallel_circuits = 2' 'allow_single_hop_fallback = false'
   if [ "$HOPS" -ge 2 ]; then
