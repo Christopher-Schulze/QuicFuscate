@@ -1559,6 +1559,18 @@ fn rearm_client_housekeeping(
     }
 }
 
+/// Inbound silence the heartbeat watchdog may count: the younger of the
+/// last-packet age and the liveness floor. Synchronous pre-loop bring-up
+/// (Wintun adapter creation plus interface configuration takes seconds on
+/// Windows) cannot observe the wire, so that span is not evidence of a
+/// dead peer; the floor re-baselines measurement at loop entry.
+fn observable_inbound_silence(
+    last_activity_elapsed: Duration,
+    floor_elapsed: Duration,
+) -> Duration {
+    last_activity_elapsed.min(floor_elapsed)
+}
+
 fn synchronize_client_tun_mtu(
     conn: &QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
@@ -1760,7 +1772,7 @@ mod compact_tun_backlog_tests {
 
 #[cfg(test)]
 mod housekeeping_rearm_tests {
-    use super::rearm_client_housekeeping;
+    use super::{observable_inbound_silence, rearm_client_housekeeping};
     use std::time::Duration;
 
     /// Regression for the inbound-flood starvation: every recv-branch wake
@@ -1813,5 +1825,27 @@ mod housekeeping_rearm_tests {
         tokio::time::timeout(Duration::from_millis(200), housekeeping.tick())
             .await
             .expect("pull-earlier re-arm must still fire");
+    }
+
+    #[test]
+    fn observable_silence_ignores_unobservable_setup_span() {
+        // A synchronous bring-up blackout must not consume the heartbeat
+        // budget: the floor (loop entry) is younger than the last packet.
+        assert_eq!(
+            observable_inbound_silence(Duration::from_secs(19), Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
+        // Once the loop runs, a real inbound packet is the younger,
+        // authoritative baseline again.
+        assert_eq!(
+            observable_inbound_silence(Duration::from_millis(80), Duration::from_secs(9)),
+            Duration::from_millis(80)
+        );
+        // And a genuinely dead peer still trips the watchdog: both clocks
+        // outlive the budget.
+        assert!(
+            observable_inbound_silence(Duration::from_secs(20), Duration::from_secs(16))
+                >= Duration::from_millis(15_000)
+        );
     }
 }

@@ -833,6 +833,14 @@ pub(super) async fn run_client(
         heartbeat_probe_interval.map(|interval| tokio::time::Instant::now() + interval);
     let mut io_diagnostics = client_receive_diagnostics_enabled.then(ClientIoDiagnostics::default);
     let mut last_runtime_progress = std::time::Instant::now();
+    // Liveness floor for the heartbeat watchdog: it must measure silence
+    // the client could actually observe. Synchronous pre-loop bring-up
+    // (Wintun adapter creation plus interface/DNS/route configuration
+    // takes ~14s on Windows) cannot hear the wire, so that time must not
+    // consume the heartbeat budget — unobservable silence is not evidence
+    // of a dead peer. Once the loop runs, real inbound packets keep
+    // `last_activity` ahead of the floor on their own.
+    let liveness_floor = conn.protocol_clock().now();
     let shutdown_signal = wait_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
@@ -1458,8 +1466,10 @@ pub(super) async fn run_client(
                 }
                 if conn.conn.is_established()
                     && heartbeat_timeout_ms > 0
-                    && conn.conn.last_activity_elapsed()
-                        >= Duration::from_millis(heartbeat_timeout_ms)
+                    && observable_inbound_silence(
+                        conn.conn.last_activity_elapsed(),
+                        conn.protocol_clock().elapsed_since(liveness_floor),
+                    ) >= Duration::from_millis(heartbeat_timeout_ms)
                 {
                     if let Some(diagnostics) = io_diagnostics.as_ref() {
                         let diagnostic_now = std::time::Instant::now();
