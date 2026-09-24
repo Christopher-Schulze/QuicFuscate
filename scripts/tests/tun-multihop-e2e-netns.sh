@@ -407,16 +407,82 @@ assert_capture_absent() {
   fi
 }
 
+# Non-UDP capture on one underlay link: must stay empty for the whole run,
+# proving at wire level that no TCP/ICMP/other IPv4 traffic ever leaves a hop
+# outside the QUIC carrier.
+start_leak_capture() {
+  local namespace="$1" interface="$2" output="$3"
+  ip netns exec "$namespace" tcpdump --immediate-mode -l -nn -i "$interface" \
+    'ip and not udp' > "$output" 2> "${output}.stderr" &
+  local pid=$!
+  OWNED_PIDS+=("$pid")
+  CAPTURE_PIDS+=("$pid")
+}
+
+assert_leak_capture_empty() {
+  local capture="$1"
+  if grep -Eq ' IP ' "$capture"; then
+    fail "non-UDP underlay leak captured: $capture"
+  fi
+}
+
+# Completeness audit over a UDP underlay log: every captured datagram must be a
+# QUIC exchange between one allowed adjacent pair (port 4433 on one side), or
+# TUN-subnet payload seen on a relay's `any` interface. Anything else on the
+# wire — stray flows, non-adjacent endpoints, non-QUIC UDP — fails the audit,
+# so the asserted adjacency is exhaustive, not sampled.
+audit_udp_capture() {
+  local capture="$1"
+  python3 - "$capture" "$HOPS" <<'PY' || fail "underlay capture violated adjacency: $capture"
+import ipaddress
+import re
+import sys
+
+path, hops = sys.argv[1], int(sys.argv[2])
+allowed = [{"10.41.0.1", "10.41.0.2"}]
+if hops >= 2:
+    allowed.append({"10.42.0.1", "10.42.0.2"})
+if hops >= 3:
+    allowed.append({"10.43.0.1", "10.43.0.2"})
+tun_v4 = ipaddress.ip_network("10.51.0.0/24")
+
+line_re = re.compile(
+    r"^\d{2}:\d{2}:\d{2}\.\d+ IP (\S+)\.(\d+) > (\S+)\.(\d+): UDP"
+)
+violations = 0
+with open(path, encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        match = line_re.match(line.strip())
+        if match is None:
+            continue
+        src, sport, dst, dport = match.groups()
+        if {src, dst} in allowed and (sport == "4433" or dport == "4433"):
+            continue
+        try:
+            if ipaddress.ip_address(src) in tun_v4 \
+                    and ipaddress.ip_address(dst) in tun_v4:
+                continue
+        except ValueError:
+            pass
+        violations += 1
+        print(f"non-adjacent datagram: {line.strip()}", file=sys.stderr)
+sys.exit(1 if violations else 0)
+PY
+}
+
 # Captures open before the client launches so circuit bring-up (nested
 # handshakes, MASQUE link responses) stays visible in the underlay logs even
 # when the run fails during startup.
 start_capture qf-mh-cli mh-cli "$WORK_DIR/client-underlay.log"
 start_capture qf-mh-r1 any "$WORK_DIR/r1-underlay.log"
+start_leak_capture qf-mh-r1 mh-r1-in "$WORK_DIR/link-a-leak.log"
 if [ "$HOPS" -ge 2 ]; then
   start_capture qf-mh-r2 any "$WORK_DIR/r2-underlay.log"
+  start_leak_capture qf-mh-r2 mh-r2-in "$WORK_DIR/link-b-leak.log"
 fi
 if [ "$HOPS" = "3" ]; then
   start_capture qf-mh-exit mh-exit "$WORK_DIR/exit-underlay.log"
+  start_leak_capture qf-mh-exit mh-exit "$WORK_DIR/link-c-leak.log"
 fi
 
 CONFIG="$WORK_DIR/client.toml"
@@ -681,6 +747,21 @@ elif [ "$HOPS" = "2" ]; then
   assert_capture_absent "$WORK_DIR/r2-underlay.log" '10\.41\.0\.2\.[0-9]+'
 else
   assert_capture_absent "$WORK_DIR/r1-underlay.log" '10\.(42|43)\.0\.2\.4433'
+fi
+
+# Exhaustive adjacency audit: every UDP datagram on every captured interface
+# must belong to an allowed adjacent pair on port 4433 (or TUN-subnet payload),
+# and no non-UDP IPv4 packet may ever appear on an inter-hop link.
+audit_udp_capture "$WORK_DIR/client-underlay.log"
+audit_udp_capture "$WORK_DIR/r1-underlay.log"
+assert_leak_capture_empty "$WORK_DIR/link-a-leak.log"
+if [ "$HOPS" -ge 2 ]; then
+  audit_udp_capture "$WORK_DIR/r2-underlay.log"
+  assert_leak_capture_empty "$WORK_DIR/link-b-leak.log"
+fi
+if [ "$HOPS" = "3" ]; then
+  audit_udp_capture "$WORK_DIR/exit-underlay.log"
+  assert_leak_capture_empty "$WORK_DIR/link-c-leak.log"
 fi
 
 if [ "$HOPS" -ge 2 ]; then
