@@ -823,6 +823,10 @@ pub(super) async fn run_client(
     let mut dns_runtime: Option<quicfuscate::implementations::client::ClientDnsRuntime> = None;
     let mut housekeeping = interval(Duration::from_millis(5));
     housekeeping.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Shadow of the interval's next armed deadline. Non-housekeeping
+    // branches re-arm through `rearm_client_housekeeping` (pull-earlier
+    // only); the housekeeping branch re-arms unconditionally below.
+    let mut housekeeping_deadline = tokio::time::Instant::now() + Duration::from_millis(5);
     let mut next_stats_log = tokio::time::Instant::now();
     let heartbeat_probe_interval = heartbeat_probe_interval(heartbeat_timeout_ms);
     let mut next_heartbeat_probe =
@@ -1018,7 +1022,7 @@ pub(super) async fn run_client(
                         break ExitReason::SocketError(e.to_string());
                     }
                 }
-                housekeeping.reset_after(client_housekeeping_delay(
+                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
@@ -1074,7 +1078,7 @@ pub(super) async fn run_client(
                         break ExitReason::DataPlane(error);
                     }
                 }
-                housekeeping.reset_after(client_housekeeping_delay(
+                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
@@ -1126,7 +1130,7 @@ pub(super) async fn run_client(
                         }
                     }
                 }
-                housekeeping.reset_after(client_housekeeping_delay(
+                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
@@ -1505,13 +1509,18 @@ pub(super) async fn run_client(
                 if conn.conn.is_closed() {
                     break ExitReason::RemoteClosed;
                 }
-                housekeeping.reset_after(client_housekeeping_delay(
+                // The housekeeping branch owns the authoritative re-arm: it
+                // may legitimately postpone the next tick (idle back-off),
+                // unlike the pull-earlier-only re-arm of sibling branches.
+                let housekeeping_delay = client_housekeeping_delay(
                     &conn,
                     tun_writer.is_some(),
                     request_sent,
                     tun_backpressure_frame.is_some(),
                     next_heartbeat_probe,
-                ));
+                );
+                housekeeping.reset_after(housekeeping_delay);
+                housekeeping_deadline = tokio::time::Instant::now() + housekeeping_delay;
             }
         }
     };

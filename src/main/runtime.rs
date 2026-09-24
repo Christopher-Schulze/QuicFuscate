@@ -1522,6 +1522,25 @@ fn client_housekeeping_delay(
     }
 }
 
+/// Re-arms the shared housekeeping timer with deadline-monotone semantics:
+/// non-housekeeping select branches may pull the next tick earlier but must
+/// never postpone it. An unconditional `reset_after` lets a permanently
+/// ready recv branch starve housekeeping under an inbound datagram flood —
+/// every wake re-arms the timer past the next datagram, so stats, keepalive
+/// probes, the connected firewall transition, and the heartbeat watchdog
+/// never run until the link goes silent.
+fn rearm_client_housekeeping(
+    housekeeping: &mut tokio::time::Interval,
+    armed_deadline: &mut tokio::time::Instant,
+    delay: Duration,
+) {
+    let target = tokio::time::Instant::now() + delay;
+    if target < *armed_deadline {
+        housekeeping.reset_at(target);
+        *armed_deadline = target;
+    }
+}
+
 fn synchronize_client_tun_mtu(
     conn: &QuicFuscateConnection,
     tun: &quicfuscate::interface::TunInterface,
@@ -1718,5 +1737,47 @@ mod compact_tun_backlog_tests {
         let mut backlog: Option<(Vec<u8>, usize)> = None;
         compact_tun_backlog(&mut backlog);
         assert!(backlog.is_none());
+    }
+}
+
+#[cfg(test)]
+mod housekeeping_rearm_tests {
+    use super::rearm_client_housekeeping;
+    use std::time::Duration;
+
+    /// Regression for the inbound-flood starvation: every recv-branch wake
+    /// used to `reset_after` the housekeeping interval, postponing the tick
+    /// past each new datagram so a probe flood starved stats, keepalive
+    /// probes, and the heartbeat watchdog indefinitely.
+    #[tokio::test]
+    async fn sibling_wakes_cannot_postpone_housekeeping() {
+        let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
+        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        housekeeping.tick().await; // consume the immediate first tick
+        let mut armed = tokio::time::Instant::now() + Duration::from_millis(60);
+        housekeeping.reset_at(armed);
+        // Sibling-branch storm: wakes every ~5 ms each asking for an idle
+        // (250 ms) re-arm — under unconditional reset_after the tick would
+        // slide to last-wake + 250 ms and could not fire inside this window.
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            rearm_client_housekeeping(&mut housekeeping, &mut armed, Duration::from_millis(250));
+        }
+        tokio::time::timeout(Duration::from_millis(60), housekeeping.tick())
+            .await
+            .expect("housekeeping starved by sibling re-arms");
+    }
+
+    #[tokio::test]
+    async fn sibling_wake_pulls_earlier_deadline() {
+        let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
+        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        housekeeping.tick().await;
+        let mut armed = tokio::time::Instant::now() + Duration::from_secs(60);
+        housekeeping.reset_at(armed);
+        rearm_client_housekeeping(&mut housekeeping, &mut armed, Duration::from_millis(10));
+        tokio::time::timeout(Duration::from_millis(200), housekeeping.tick())
+            .await
+            .expect("pull-earlier re-arm must still fire");
     }
 }
