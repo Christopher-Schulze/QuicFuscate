@@ -29,6 +29,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 [ -x "$BINARY" ] || fail "client binary missing: $BINARY (run: cargo build --bin quicfuscate)"
 
 WORK_DIR="$(mktemp -d /tmp/qf-macos-e2e.XXXXXX)"
+chmod 755 "$WORK_DIR"
 CLIENT_PID=""
 
 cleanup() {
@@ -53,6 +54,7 @@ QUICFUSCATE_MASQUE_TRACE=1 "$BINARY" client \
   --heartbeat-timeout-ms 15000 \
   -v > "$WORK_DIR/client.log" 2>&1 &
 CLIENT_PID=$!
+chmod 644 "$WORK_DIR/client.log"
 
 # The standalone client path logs nothing on TUN success — readiness is the
 # interface itself: a new utun carrying the assigned 10.252.0.x address.
