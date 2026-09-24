@@ -958,12 +958,21 @@ fn classify_server_tun_downlink(
 
     let policy = &live_state.domain.shared.forwarding_policy;
     let route = policy.classify_downlink(packet_slice, server_ips.ipv4, server_ips.ipv6);
-    log::debug!(
-        "server TUN downlink: {}B route={:?} assigned_count={}",
-        packet_slice.len(),
-        route,
-        policy.assigned_address_count()
-    );
+    if masque_trace_enabled() {
+        log::info!(
+            "server TUN downlink: {}B route={:?} assigned_count={}",
+            packet_slice.len(),
+            route,
+            policy.assigned_address_count()
+        );
+    } else {
+        log::debug!(
+            "server TUN downlink: {}B route={:?} assigned_count={}",
+            packet_slice.len(),
+            route,
+            policy.assigned_address_count()
+        );
+    }
     let expired = matches!(route, DownlinkRoute::Unicast { .. })
         && match packet_slice.first().map(|byte| byte >> 4) {
             Some(4) => packet_slice.get(8).is_some_and(|ttl| *ttl == 0),
@@ -1026,6 +1035,11 @@ fn classify_server_tun_downlink(
             return Ok(None);
         }
         DownlinkRoute::Local { .. } => return Ok(None),
+    }
+    if masque_trace_enabled() && targets.is_empty() {
+        log::info!(
+            "server TUN downlink: route resolved to zero targets (no owning session)"
+        );
     }
     Ok(Some(ClassifiedDownlink {
         unicast: matches!(route, DownlinkRoute::Unicast { .. }),
