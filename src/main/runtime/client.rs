@@ -1161,6 +1161,11 @@ pub(super) async fn run_client(
                     );
                 }
                 last_runtime_progress = branch_started;
+                if client_receive_diagnostics_enabled {
+                    info!(
+                        "Client runtime housekeeping tick: branch=housekeeping entered"
+                    );
+                }
 
                 // TODO-1056: settle an in-flight disguise migration first —
                 // commit the new socket on validation, roll back to the
@@ -1533,6 +1538,13 @@ pub(super) async fn run_client(
                 housekeeping_deadline = tokio::time::Instant::now() + housekeeping_delay;
             }
         }
+        // A permanently-ready select arm starves the housekeeping timer:
+        // when every `select!` resolves synchronously the task never yields,
+        // so the interval tick future is never polled and the runtime's
+        // timer driver never advances — housekeeping duties go dead on a
+        // healthy link. Yield once per iteration so due ticks stay
+        // reachable under sustained arm readiness.
+        tokio::task::yield_now().await;
     };
 
     let dns_shutdown_error = if let Some(mut dns_runtime) = dns_runtime.take() {

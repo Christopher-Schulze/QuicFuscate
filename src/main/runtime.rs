@@ -1827,6 +1827,34 @@ mod housekeeping_rearm_tests {
             .expect("pull-earlier re-arm must still fire");
     }
 
+    /// Regression for the never-yielding select starvation: a sibling arm
+    /// that stays permanently ready (e.g. a notify permit re-armed by the
+    /// drain loop) resolves every `select!` synchronously, so the task
+    /// never yields and the interval tick future is never polled — under a
+    /// single-worker runtime housekeeping goes dead. The per-iteration
+    /// `yield_now` keeps due ticks reachable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn housekeeping_tick_survives_permanently_ready_sibling() {
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        notify.notify_one(); // self-sustaining permit, like drain's more_tun
+        let mut housekeeping = tokio::time::interval(Duration::from_millis(5));
+        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        housekeeping.tick().await;
+        let mut ticks = 0u32;
+        let deadline = std::time::Instant::now() + Duration::from_millis(60);
+        while std::time::Instant::now() < deadline {
+            tokio::select! {
+                _ = notify.notified() => { notify.notify_one(); }
+                _ = housekeeping.tick() => { ticks += 1; }
+            }
+            tokio::task::yield_now().await;
+            if ticks > 0 {
+                break;
+            }
+        }
+        assert!(ticks > 0, "housekeeping starved by permanently-ready sibling");
+    }
+
     #[test]
     fn observable_silence_ignores_unobservable_setup_span() {
         // A synchronous bring-up blackout must not consume the heartbeat
