@@ -38,6 +38,7 @@ $AdapterReadyAtUtc = $null
 $AdapterSnapshot = $null
 $PingAttempts = @()
 $PingAttempts6 = @()
+$AdapterCounterDelta = $null
 $ClientAliveBeforeCleanup = $false
 
 function Require-SecretValue {
@@ -427,6 +428,12 @@ try {
 
     $Phase = "ipv4-tunnel-ping"
     $PingSuccesses = 0
+    # Adapter counter baseline: OutUnicastPkts/OutOctets on the Wintun
+    # interface prove whether the echo requests ever reached the miniport.
+    # A rising counter with an empty reader ring isolates the loss to the
+    # driver/session boundary; a flat counter means the stack never egressed.
+    $AdapterStatsBefore = Get-NetAdapterStatistics -Name $AdapterName `
+        -ErrorAction SilentlyContinue
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         $PingResult = Invoke-TunnelPingAttempt `
             -TargetAddress $ServerTunAddress `
@@ -435,6 +442,18 @@ try {
         $PingAttempts += $PingResult
         if ($PingResult.success) {
             $PingSuccesses++
+        }
+    }
+    $AdapterStatsAfter = Get-NetAdapterStatistics -Name $AdapterName `
+        -ErrorAction SilentlyContinue
+    if ($AdapterStatsBefore -and $AdapterStatsAfter) {
+        $AdapterCounterDelta = [ordered]@{
+            out_unicast_before = $AdapterStatsBefore.OutUnicastPkts
+            out_unicast_after = $AdapterStatsAfter.OutUnicastPkts
+            out_octets_before = $AdapterStatsBefore.OutOctets
+            out_octets_after = $AdapterStatsAfter.OutOctets
+            in_unicast_before = $AdapterStatsBefore.InUnicastPkts
+            in_unicast_after = $AdapterStatsAfter.InUnicastPkts
         }
     }
     if ($PingSuccesses -ne 5) {
@@ -570,6 +589,7 @@ finally {
                 $AdapterReadyAtUtc.ToString("o")
             }
             adapter = $AdapterSnapshot
+            adapter_counter_delta = $AdapterCounterDelta
             ipv4_attempts = $PingAttempts
             ipv6_attempts = $PingAttempts6
             client_alive_before_cleanup = $ClientAliveBeforeCleanup
