@@ -1026,7 +1026,10 @@ pub(super) async fn run_client(
                             }
                         }
                         if conn.conn.is_closed() {
-                            info!("Server closed the connection");
+                            info!(
+                                "Server closed the connection: {:?}",
+                                conn.conn.error()
+                            );
                             break ExitReason::RemoteClosed;
                         }
                     }
@@ -1515,6 +1518,7 @@ pub(super) async fn run_client(
                 break ExitReason::HeartbeatTimeout;
             }
             if conn.conn.is_closed() {
+                info!("Server closed the connection: {:?}", conn.conn.error());
                 break ExitReason::RemoteClosed;
             }
             // The housekeeping block owns the authoritative re-arm: it
