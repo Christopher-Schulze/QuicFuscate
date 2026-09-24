@@ -2598,3 +2598,82 @@ fn auto_pending_control_deadline_keeps_standard_fallback() {
         .expect("auto keeps the unbounded standard fallback");
     assert!(!client.take_private_upgrade_activated());
 }
+
+#[test]
+fn advanced_required_payload_gate_blocks_until_activation() {
+    let (mut client, _server) =
+        advanced_required_test_client(crate::time_source::ProtocolClock::global());
+    assert!(client.private_required_payload_gate_closed());
+
+    let ipv4_packet = [
+        0x45, 0x00, 0x00, 0x1c, 0, 0, 0, 0, 64, 1, 0, 0, 10, 0, 0, 2, 10, 0, 0, 1, 0, 0, 0, 0, 0,
+        0, 0, 0,
+    ];
+    let error = client
+        .send_tunnel_packet(0, &ipv4_packet)
+        .expect_err("required policy must gate application payload pre-activation");
+    assert_eq!(
+        error,
+        crate::error::ConnectionError::PrivatePayloadGateClosed,
+        "expected gate error, got {error}"
+    );
+    let error = client
+        .send_masque_downlink(&ipv4_packet)
+        .expect_err("required policy must gate downlink payload pre-activation");
+    assert_eq!(error, crate::error::ConnectionError::PrivatePayloadGateClosed);
+}
+
+#[test]
+fn advanced_required_payload_gate_opens_after_owner_activation() {
+    let (mut client, _server) =
+        advanced_required_test_client(crate::time_source::ProtocolClock::global());
+    let created_at = client.protocol_clock().now();
+    let mut machine = crate::qftls::PrivateNegotiationMachine::new(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        crate::qftls::PrivateNegotiationRole::Client,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+        7,
+        1,
+        b"h3".to_vec(),
+        vec![1, 2, 3],
+        vec![4, 5, 6],
+        [0x44; crate::qftls::PRIVATE_HASH_LEN],
+        [0x11; crate::qftls::PRIVATE_NONCE_LEN],
+    )
+    .expect("negotiation machine");
+    machine.install_exporter_root(&[0x77; crate::qftls::PRIVATE_HASH_LEN]).expect("exporter root");
+    machine.mark_authenticated().expect("authenticated state");
+    let mut runtime = private_packet_protection::PrivatePacketProtectionRuntime::new(
+        qf_crypto::PacketProtectionMode::AdvancedRequired,
+        crate::qftls::PrivateNegotiationRole::Client,
+        machine,
+        created_at,
+    );
+    runtime.mark_owner_activation_attempted();
+    client.private_packet_protection_runtime = Some(Arc::new(std::sync::Mutex::new(runtime)));
+
+    assert!(
+        !client.private_required_payload_gate_closed(),
+        "gate must open permanently once the private owner is installed"
+    );
+}
+
+#[test]
+fn payload_gate_stays_open_for_standard_and_auto() {
+    let (mut standard_client, _s) =
+        test_tls_connection_pair(StealthConfig::default(), StealthConfig::default());
+    standard_client
+        .set_private_packet_protection_policy(qf_crypto::PacketProtectionMode::Standard, None);
+    assert!(!standard_client.private_required_payload_gate_closed());
+
+    let (mut auto_client, _s2) =
+        test_tls_connection_pair(StealthConfig::default(), StealthConfig::default());
+    auto_client.set_private_packet_protection_policy(
+        qf_crypto::PacketProtectionMode::Auto,
+        Some(qf_crypto::PrivateAeadFamily::Aegis128L),
+    );
+    assert!(
+        !auto_client.private_required_payload_gate_closed(),
+        "auto keeps its standard fallback: payload must never be gated"
+    );
+}

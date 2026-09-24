@@ -917,6 +917,9 @@ impl QuicFuscateConnection {
         {
             return Err(crate::error::ConnectionError::BufferTooShort);
         }
+        if self.private_required_payload_gate_closed() {
+            return Err(crate::error::ConnectionError::PrivatePayloadGateClosed);
+        }
 
         if packet.len() <= self.effective_masque_mtu() {
             match self.ensure_masque_tunnel_for_send() {
@@ -988,6 +991,9 @@ impl QuicFuscateConnection {
         let Some(sid) = self.ensure_masque_tunnel()? else {
             return Err("masque tunnel unavailable".into());
         };
+        if self.private_required_payload_gate_closed() {
+            return Err(crate::error::ConnectionError::PrivatePayloadGateClosed);
+        }
         if let Some(ref mut h3) = self.h3_conn {
             h3.send_masque_datagram(&mut self.conn, sid, payload)?;
             Ok(())
@@ -1081,6 +1087,9 @@ impl QuicFuscateConnection {
                 payload.first()
             );
             return Err(crate::error::ConnectionError::BufferTooShort);
+        }
+        if self.private_required_payload_gate_closed() {
+            return Err(crate::error::ConnectionError::PrivatePayloadGateClosed);
         }
 
         let peer_stream_id = self
@@ -1214,6 +1223,9 @@ impl QuicFuscateConnection {
         let Some(queue) = self.masque_relay_response_queue.as_ref().cloned() else {
             return Ok(0);
         };
+        if self.private_required_payload_gate_closed() {
+            return Ok(0);
+        }
         let mut sent = 0usize;
         loop {
             let response = match queue.lock() {

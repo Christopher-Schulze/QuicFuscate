@@ -312,7 +312,8 @@ pub(super) fn drain_pending_tun_downlinks(
                 metrics.record_bandwidth_scheduler_delivery(entry.packet.len());
                 queued.push(target);
             }
-            Err(crate::error::ConnectionError::DgramQueueFull) => {
+            Err(crate::error::ConnectionError::DgramQueueFull)
+            | Err(crate::error::ConnectionError::PrivatePayloadGateClosed) => {
                 live_state.pending_tun_downlinks.refund_capacity(entry.packet.len());
                 log::debug!("pending TUN downlink for {} still backpressured", target);
                 metrics.record_tun_downlink_backpressure_retry();
@@ -809,7 +810,8 @@ fn deliver_tun_downlink_target(
                         }
                         return Ok(false);
                     }
-                    Some(Err(crate::error::ConnectionError::DgramQueueFull)) => {
+                    Some(Err(crate::error::ConnectionError::DgramQueueFull))
+                    | Some(Err(crate::error::ConnectionError::PrivatePayloadGateClosed)) => {
                         let pending_packet = retain_tun_frame(packet, shared_frame);
                         if let Err(reject) = enqueue_pending_tun_downlink_with_accounting(
                             &mut live_state.pending_tun_downlinks,

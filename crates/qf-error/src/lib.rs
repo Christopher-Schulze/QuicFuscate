@@ -39,6 +39,11 @@ pub enum ConnectionError {
     /// QUIC DATAGRAM send queue is at capacity; the caller should apply
     /// backpressure and retry rather than drop the packet.
     DgramQueueFull,
+    /// An `advanced-required` private packet-protection policy has not yet
+    /// activated its private owner, so application payload must wait instead
+    /// of leaving on standard packet protection. Callers apply the same
+    /// backpressure/retry treatment as `DgramQueueFull`.
+    PrivatePayloadGateClosed,
     /// The local endpoint closed the transport connection.
     LocalConnectionClosed {
         error_code: u64,
@@ -119,6 +124,9 @@ impl fmt::Display for ConnectionError {
             Self::ApplicationProtoError => write!(f, "Application protocol error"),
             Self::VersionMismatch => write!(f, "Version mismatch"),
             Self::DgramQueueFull => write!(f, "DATAGRAM send queue full"),
+            Self::PrivatePayloadGateClosed => {
+                write!(f, "payload gated until private packet protection activates")
+            }
         }
     }
 }

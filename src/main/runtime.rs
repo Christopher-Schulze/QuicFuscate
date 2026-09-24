@@ -827,7 +827,9 @@ fn send_client_tun_packet(
     match disposition {
         ClientTunPacketDisposition::Tunnel => {
             conn.send_tunnel_packet(stream_id, packet).map_err(|error| match error {
-                ConnectionError::DgramQueueFull => ClientTunPacketError::Backpressure,
+                ConnectionError::DgramQueueFull | ConnectionError::PrivatePayloadGateClosed => {
+                    ClientTunPacketError::Backpressure
+                }
                 error => ClientTunPacketError::Fault(
                     quicfuscate::engine::DataPlaneFault::TransportSend {
                         component: "standalone client TUN uplink".to_string(),

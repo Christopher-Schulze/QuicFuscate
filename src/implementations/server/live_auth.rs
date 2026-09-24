@@ -1068,7 +1068,8 @@ pub(super) fn drain_masque_downlink_responses(
     while let Some(packet) = conn.pop_masque_downlink_packet() {
         match conn.send_masque_downlink(&packet) {
             Ok(()) => {}
-            Err(crate::error::ConnectionError::DgramQueueFull) => {
+            Err(crate::error::ConnectionError::DgramQueueFull)
+            | Err(crate::error::ConnectionError::PrivatePayloadGateClosed) => {
                 conn.retry_masque_downlink_packet(packet);
                 metrics.record_masque_downlink_response_retry();
                 break;

@@ -247,6 +247,23 @@ impl QuicFuscateConnection {
         Ok(())
     }
 
+    /// True while an `advanced-required` policy still waits for its negotiated
+    /// private owner. Application payload (MASQUE DATAGRAM data, TUN packets)
+    /// must not leave on standard packet protection during this window —
+    /// callers treat the result as backpressure and retry. Handshake,
+    /// MASQUE setup, and control capsules stay on the standard path by design;
+    /// the gate opens permanently once the private owner is installed.
+    pub(crate) fn private_required_payload_gate_closed(&self) -> bool {
+        if self.private_packet_protection_mode != PacketProtectionMode::AdvancedRequired {
+            return false;
+        }
+        let Some(runtime) = self.private_packet_protection_runtime.as_ref() else {
+            return true;
+        };
+        let runtime = runtime.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        !runtime.owner_activation_attempted()
+    }
+
     /// Low-cardinality telemetry latch (TODO-885): returns `true` exactly once
     /// per connection when the negotiated private owner has become the effective
     /// 1-RTT packet AEAD. Exposes only the activation fact - never keys,
