@@ -2824,5 +2824,161 @@ fn live_udp_first_flights_carry_rfc_length_and_coalesce() {
     }
 }
 
+// ---- Private AEAD owner lifecycle --------------------------------------
+
+/// Installs matching authenticated private 1-RTT owners on both peers so every
+/// subsequent packet on either direction is privately protected.
+fn install_private_owner_on_pair(pair: &mut BenchConnectionPair) {
+    let client_key = [0x61; qf_crypto::PrivateAeadFamily::KEY_LEN];
+    let client_iv = [0x62; qf_crypto::PrivateAeadFamily::IV_LEN];
+    let server_key = [0x63; qf_crypto::PrivateAeadFamily::KEY_LEN];
+    let server_iv = [0x64; qf_crypto::PrivateAeadFamily::IV_LEN];
+    pair.client
+        .crypto
+        .write()
+        .install_authenticated_private_1rtt(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            &client_key,
+            &client_iv,
+            &server_key,
+            &server_iv,
+            1,
+            1,
+        )
+        .expect("client private owner");
+    pair.server
+        .crypto
+        .write()
+        .install_authenticated_private_1rtt(
+            qf_crypto::PrivateAeadFamily::Aegis128L,
+            &server_key,
+            &server_iv,
+            &client_key,
+            &client_iv,
+            1,
+            1,
+        )
+        .expect("server private owner");
+}
+
+/// Removes the standard 1-RTT/0-RTT openers so the peer can only open a packet
+/// through the private owner - a strict proof that traffic is truly private.
+fn sabotage_standard_openers(conn: &mut Connection) {
+    let mut crypto = conn.crypto.write();
+    crypto.open_1rtt = None;
+    crypto.open_0rtt = None;
+}
+
+#[test]
+fn private_owner_survives_validated_path_migration() {
+    // The migration path stacks recv -> observe_incoming_path ->
+    // begin_path_validation on top of the already deep send/recv frames, which
+    // overflows the default test thread stack. Run on a dedicated thread with
+    // an explicit stack size (same pattern as the qkey integration test).
+    let res = std::thread::Builder::new()
+        .name("private_owner_migration".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(private_owner_survives_validated_path_migration_impl)
+        .expect("spawn migration test thread")
+        .join();
+    assert!(res.is_ok(), "migration test thread panicked");
+}
+
+fn private_owner_survives_validated_path_migration_impl() {
+    let mut pair = bench_paired_1rtt_connections();
+    install_private_owner_on_pair(&mut pair);
+    let mut packet = [0u8; 1500];
+
+    // Baseline: private uplink on the original path.
+    pair.client.stream_send(0, b"before-rebind", false).expect("queue uplink");
+    let (len, _) = pair.client.send(&mut packet).expect("seal private uplink");
+    pair.server.recv(&mut packet[..len], &pair.recv_info).expect("open private uplink");
+
+    // From here the peers can only open packets through the private owner:
+    // any packet that were standard-protected must fail to open.
+    sabotage_standard_openers(&mut pair.server);
+    sabotage_standard_openers(&mut pair.client);
+
+    // NAT rebind: the server sees the same connection from a new source
+    // address. The private owner is bound to the negotiated material and
+    // packet boundaries, not to the path - the packet must still open.
+    let migrated_client: std::net::SocketAddr = "127.0.0.1:49555".parse().unwrap();
+    let rebound_to_server = RecvInfo { from: migrated_client, to: pair.recv_info.to, ecn: None };
+    pair.client.stream_send(0, b"after-rebind", false).expect("queue uplink");
+    let (len, _) = pair.client.send(&mut packet).expect("seal private uplink on rebound path");
+    pair.server
+        .recv(&mut packet[..len], &rebound_to_server)
+        .expect("private open must survive the peer path change");
+
+    // Passive migration kicked off: the server challenges the new path.
+    let (_, _, challenge_peer, _) =
+        pair.server.pending_path_validation_for_test().expect("path validation pending");
+    assert_eq!(challenge_peer, migrated_client);
+    let (len, challenge_info) = pair.server.send(&mut packet).expect("emit PATH_CHALLENGE");
+    assert_eq!(challenge_info.to, migrated_client);
+    assert!(challenge_info.path_control);
+
+    // The client receives the challenge on its own (unchanged) address and
+    // answers; both packets travel under the private owner only.
+    let challenge_from_server =
+        RecvInfo { from: pair.recv_info.to, to: pair.recv_info.from, ecn: None };
+    pair.client
+        .recv(&mut packet[..len], &challenge_from_server)
+        .expect("open private PATH_CHALLENGE");
+    let (len, response_info) = pair.client.send(&mut packet).expect("emit PATH_RESPONSE");
+    assert_eq!(response_info.to, pair.recv_info.to);
+    pair.server.recv(&mut packet[..len], &rebound_to_server).expect("open private PATH_RESPONSE");
+
+    // Migration committed: peer address switched, validation cleared.
+    assert_eq!(pair.server.peer_addr, migrated_client);
+    assert!(pair.server.pending_path_validation_for_test().is_none());
+
+    // Both directions keep flowing privately on the migrated path.
+    pair.client.stream_send(0, b"post-migration-up", false).expect("queue uplink");
+    let (len, _) = pair.client.send(&mut packet).expect("seal uplink");
+    pair.server.recv(&mut packet[..len], &rebound_to_server).expect("open post-migration uplink");
+    pair.server.stream_send(0, b"post-migration-down", false).expect("queue downlink");
+    let (len, down_info) = pair.server.send(&mut packet).expect("seal downlink");
+    assert_eq!(down_info.to, migrated_client);
+    pair.client
+        .recv(&mut packet[..len], &challenge_from_server)
+        .expect("open post-migration downlink");
+}
+
+#[test]
+fn private_owner_protects_graceful_close() {
+    let mut pair = bench_paired_1rtt_connections();
+    install_private_owner_on_pair(&mut pair);
+    let mut packet = [0u8; 1500];
+
+    // One private uplink so the peer tracks an active stream, then sabotage:
+    // the close frame may only arrive under the private owner.
+    pair.client.stream_send(0, b"payload", false).expect("queue uplink");
+    let (len, _) = pair.client.send(&mut packet).expect("seal uplink");
+    pair.server.recv(&mut packet[..len], &pair.recv_info).expect("open uplink");
+    sabotage_standard_openers(&mut pair.server);
+
+    pair.client.close(true, 42, b"session done").expect("queue graceful close");
+    let (len, _) = pair.client.send(&mut packet).expect("seal protected close");
+    pair.server.recv(&mut packet[..len], &pair.recv_info).expect("open private close");
+    assert!(matches!(
+        pair.server.remote_error(),
+        Some(ConnectionError::PeerApplicationClosed { error_code: 42, .. })
+    ));
+}
+
+#[test]
+fn private_owner_is_fresh_per_connection() {
+    // A fresh connection pair carries no private material: the negotiated
+    // owner state must never leak across reconnects - negotiation restarts.
+    let pair = bench_paired_1rtt_connections();
+    for conn in [&pair.client, &pair.server] {
+        assert_eq!(
+            conn.packet_protection_snapshot().one_rtt.packet_aead_owner,
+            crate::qftls::PacketProtectionOwner::TransportStandard
+        );
+    }
+}
+
 mod flow_and_packet;
 mod recovery_and_scheduling;
