@@ -207,6 +207,12 @@ mod imp {
     /// onto the tunnel interface and can leave the NDIS datapath suspended
     /// when a bind operation never completes - which makes the miniport
     /// drop every outbound frame before it reaches the session ring.
+    ///
+    /// Binding objects are piped into `Disable-NetAdapterBinding` instead
+    /// of re-querying by name/component: some bindings (e.g. `ms_rdma_ndk`)
+    /// enumerate without a `MSFT_NetAdapterBindingSettingData` instance
+    /// that a fresh CIM lookup could resolve. Components that cannot be
+    /// toggled are logged and skipped rather than failing bring-up.
     fn disable_non_tcpip_bindings(name: &str) -> io::Result<()> {
         let escaped = name.replace('\'', "''");
         let script = format!(
@@ -215,15 +221,25 @@ mod imp {
              Get-NetAdapterBinding -Name $adapter -AllBindings -IncludeHidden | \
              Where-Object {{ $_.Enabled -and $_.ComponentID -notin @('ms_tcpip','ms_tcpip6') }} | \
              ForEach-Object {{ \
-                 Disable-NetAdapterBinding -Name $adapter -ComponentID $_.ComponentID; \
-                 [Console]::WriteLine($_.ComponentID) \
+                 $component = $_.ComponentID; \
+                 try {{ \
+                     $_ | Disable-NetAdapterBinding -ErrorAction Stop; \
+                     [Console]::WriteLine($component) \
+                 }} catch {{ \
+                     [Console]::WriteLine(\"skip:$component\") \
+                 }} \
              }}"
         );
         let disabled = run_powershell(&script, "disable non-TCP/IP bindings")?;
-        if !disabled.is_empty() {
-            log::info!(
-                "Wintun adapter '{name}': disabled non-IP bindings: {}",
-                disabled.replace('\n', ",")
+        let (stripped, skipped): (Vec<&str>, Vec<&str>) =
+            disabled.lines().partition(|line| !line.starts_with("skip:"));
+        if !stripped.is_empty() {
+            log::info!("Wintun adapter '{name}': disabled non-IP bindings: {}", stripped.join(","));
+        }
+        if !skipped.is_empty() {
+            log::warn!(
+                "Wintun adapter '{name}': could not disable bindings: {}",
+                skipped.join(",")
             );
         }
         Ok(())
