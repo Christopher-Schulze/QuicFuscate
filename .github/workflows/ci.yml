@@ -251,6 +251,10 @@ jobs:
             --keylog /tmp/qf885/neg-keylog.txt \
             --expect standard
 
+      - name: Relax evidence permissions for upload
+        if: always()
+        run: sudo chmod -R a+r /tmp/qf885 || true
+
       - name: Upload required-e2e evidence
         if: always()
         uses: actions/upload-artifact@v6
