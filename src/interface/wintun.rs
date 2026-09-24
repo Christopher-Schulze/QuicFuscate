@@ -167,15 +167,14 @@ mod imp {
     use windows_sys::Win32::Foundation::{
         CloseHandle, FreeLibrary, GetLastError, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF,
         ERROR_INVALID_DATA, ERROR_NO_MORE_ITEMS, HANDLE, HMODULE, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
     use windows_sys::Win32::System::LibraryLoader::{
         GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
         LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
-    use windows_sys::Win32::System::Threading::{
-        CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE,
-    };
+    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
     /// Hides the console window for spawned `netsh` processes.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -1083,80 +1082,86 @@ mod imp {
                 return Err(closed_error());
             }
 
+            let mut size: u32 = 0;
+            let pkt = unsafe { (self.lib.receive_packet)(self.session, &mut size) };
+            if !pkt.is_null() {
+                let packet_len = size as usize;
+                if packet_len == 0 || packet_len > WINTUN_MAX_IP_PACKET_SIZE {
+                    unsafe { (self.lib.release_receive_packet)(self.session, pkt) };
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Wintun returned invalid packet length {packet_len}"),
+                    ));
+                }
+                if packet_len > buf.len() {
+                    unsafe { (self.lib.release_receive_packet)(self.session, pkt) };
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Wintun packet length {packet_len} exceeds read buffer length {}",
+                            buf.len()
+                        ),
+                    ));
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(pkt as *const u8, buf.as_mut_ptr(), packet_len);
+                    (self.lib.release_receive_packet)(self.session, pkt);
+                }
+                WINTUN_RECV_PACKETS.fetch_add(1, Ordering::Relaxed);
+                return Ok(packet_len);
+            }
+
+            match unsafe { GetLastError() } {
+                // Nonblocking contract (same as a unix O_NONBLOCK tun fd):
+                // an empty ring reports WouldBlock so batched/event-driven
+                // readers can bound their wave; `wait_readable` supplies the
+                // kernel-side block. A blocking read here was the datapath
+                // stall that parked whole waves below `TUN_READ_BURST`.
+                ERROR_NO_MORE_ITEMS => {
+                    WINTUN_RECV_EMPTY_WAITS.fetch_add(1, Ordering::Relaxed);
+                    Err(io::Error::new(io::ErrorKind::WouldBlock, "Wintun receive ring is empty"))
+                }
+                ERROR_HANDLE_EOF => {
+                    WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, "Wintun adapter is terminating"))
+                }
+                ERROR_INVALID_DATA => {
+                    WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Wintun receive ring is corrupt",
+                    ))
+                }
+                code => {
+                    WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    Err(io::Error::from_raw_os_error(code as i32))
+                }
+            }
+        }
+
+        /// Kernel-side readiness wait backing the nonblocking `read`: sleeps
+        /// on the driver tail-moved event and the session shutdown event,
+        /// polling the cooperative shutdown flag between bounded waits
+        /// (same cadence as the unix `poll(2)` loop).
+        fn wait_readable(&self, shutdown: &AtomicBool) -> io::Result<bool> {
+            let _operation = self.operations.read();
             let wait_handles = [self.read_wait_event, self.shutdown_event];
             loop {
-                let mut size: u32 = 0;
-                let pkt = unsafe { (self.lib.receive_packet)(self.session, &mut size) };
-                if !pkt.is_null() {
-                    let packet_len = size as usize;
-                    if packet_len == 0 || packet_len > WINTUN_MAX_IP_PACKET_SIZE {
-                        unsafe { (self.lib.release_receive_packet)(self.session, pkt) };
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Wintun returned invalid packet length {packet_len}"),
-                        ));
-                    }
-                    if packet_len > buf.len() {
-                        unsafe { (self.lib.release_receive_packet)(self.session, pkt) };
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "Wintun packet length {packet_len} exceeds read buffer length {}",
-                                buf.len()
-                            ),
-                        ));
-                    }
-                    unsafe {
-                        ptr::copy_nonoverlapping(pkt as *const u8, buf.as_mut_ptr(), packet_len);
-                        (self.lib.release_receive_packet)(self.session, pkt);
-                    }
-                    WINTUN_RECV_PACKETS.fetch_add(1, Ordering::Relaxed);
-                    return Ok(packet_len);
+                if shutdown.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
+                    return Ok(false);
                 }
-
-                match unsafe { GetLastError() } {
-                    ERROR_NO_MORE_ITEMS => {
-                        WINTUN_RECV_EMPTY_WAITS.fetch_add(1, Ordering::Relaxed);
-                        let wait = unsafe {
-                            WaitForMultipleObjects(
-                                wait_handles.len() as u32,
-                                wait_handles.as_ptr(),
-                                0,
-                                INFINITE,
-                            )
-                        };
-                        match wait {
-                            WAIT_OBJECT_0 => continue,
-                            value if value == WAIT_OBJECT_0 + 1 => return Err(closed_error()),
-                            WAIT_FAILED => {
-                                WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
-                                return Err(io::Error::last_os_error());
-                            }
-                            value => {
-                                WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
-                                return Err(io::Error::other(format!(
-                                    "WaitForMultipleObjects returned unexpected status {value}"
-                                )));
-                            }
-                        }
-                    }
-                    ERROR_HANDLE_EOF => {
-                        WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
-                        return Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "Wintun adapter is terminating",
-                        ));
-                    }
-                    ERROR_INVALID_DATA => {
-                        WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Wintun receive ring is corrupt",
-                        ));
-                    }
-                    code => {
-                        WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
-                        return Err(io::Error::from_raw_os_error(code as i32));
+                let wait = unsafe {
+                    WaitForMultipleObjects(wait_handles.len() as u32, wait_handles.as_ptr(), 0, 100)
+                };
+                match wait {
+                    WAIT_OBJECT_0 => return Ok(true),
+                    value if value == WAIT_OBJECT_0 + 1 => return Ok(false),
+                    WAIT_TIMEOUT => continue,
+                    WAIT_FAILED => return Err(io::Error::last_os_error()),
+                    value => {
+                        return Err(io::Error::other(format!(
+                            "WaitForMultipleObjects returned unexpected status {value}"
+                        )));
                     }
                 }
             }

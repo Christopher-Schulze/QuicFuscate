@@ -582,6 +582,7 @@ fn native_adapter_packet_io_and_bounded_close() {
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(1);
     let outbound_reader = std::thread::spawn(move || {
         let mut packet = [0u8; 65_535];
+        let idle = std::sync::atomic::AtomicBool::new(false);
         loop {
             match reader_device.read(&mut packet) {
                 Ok(length)
@@ -598,6 +599,20 @@ fn native_adapter_packet_io_and_bounded_close() {
                     return;
                 }
                 Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    match reader_device.wait_readable(&idle) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let _ =
+                                outbound_tx.send(Err(io::Error::from(io::ErrorKind::Interrupted)));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = outbound_tx.send(Err(error));
+                            return;
+                        }
+                    }
+                }
                 Err(error) => {
                     let _ = outbound_tx.send(Err(error));
                     return;
@@ -637,9 +652,13 @@ fn native_adapter_packet_io_and_bounded_close() {
     let (blocked_tx, blocked_rx) = mpsc::sync_channel(1);
     let blocked_reader = std::thread::spawn(move || {
         let mut packet = [0u8; 65_535];
+        let idle = std::sync::atomic::AtomicBool::new(false);
         loop {
             match blocked_device.read(&mut packet) {
                 Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let _ = blocked_device.wait_readable(&idle);
+                }
                 Err(error) => {
                     let _ = blocked_tx.send(error.kind());
                     return;
@@ -725,9 +744,18 @@ fn wfp_native_packet_policy_and_cleanup() {
     let (packet_sender, packet_receiver) = mpsc::sync_channel(64);
     let reader = std::thread::spawn(move || {
         let mut packet = [0u8; 65_535];
-        while let Ok(length) = reader_device.read(&mut packet) {
-            if packet_sender.send(packet[..length].to_vec()).is_err() {
-                return;
+        let idle = std::sync::atomic::AtomicBool::new(false);
+        loop {
+            match reader_device.read(&mut packet) {
+                Ok(length) => {
+                    if packet_sender.send(packet[..length].to_vec()).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let _ = reader_device.wait_readable(&idle);
+                }
+                Err(_) => return,
             }
         }
     });

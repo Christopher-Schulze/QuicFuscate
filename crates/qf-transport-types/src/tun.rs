@@ -2,6 +2,7 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
 
 /// Maximum number of owned packets buffered between a blocking TUN reader and
@@ -178,6 +179,18 @@ pub trait TunDevice: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
     /// Writes one complete IP packet from `buf`.
     fn write(&self, buf: &[u8]) -> io::Result<usize>;
+    /// Waits until `read()` can return a packet or shutdown was requested.
+    /// Returns `Ok(true)` when the device is readable, `Ok(false)` when a
+    /// shutdown was observed. Backends whose `read()` never reports
+    /// `WouldBlock` may leave this unsupported; event-driven readers call it
+    /// only after a `WouldBlock` result.
+    fn wait_readable(&self, shutdown: &AtomicBool) -> io::Result<bool> {
+        let _ = shutdown;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TUN backend has no event-driven read readiness",
+        ))
+    }
     /// Wakes a potentially blocking reader so its owner can observe shutdown.
     fn request_read_shutdown(&self) -> io::Result<()> {
         Ok(())
@@ -309,5 +322,34 @@ mod tests {
 
         let rejected: TunFactory = Box::new(|_| Err(std::io::Error::other("rejected factory")));
         assert!(!register_tun_factory(rejected));
+    }
+
+    #[test]
+    fn wait_readable_defaults_to_unsupported_for_blocking_backends() {
+        use crate::tun::TunDevice;
+
+        struct BlockingDevice;
+        impl TunDevice for BlockingDevice {
+            fn name(&self) -> &str {
+                "blocking0"
+            }
+            fn mtu(&self) -> u16 {
+                1500
+            }
+            fn read(&self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+        }
+
+        let device = BlockingDevice;
+        let shutdown = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            device.wait_readable(&shutdown).expect_err("default readiness").kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert!(device.request_read_shutdown().is_ok());
     }
 }

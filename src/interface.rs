@@ -725,11 +725,8 @@ impl TunInterface {
     }
 
     #[cfg(not(unix))]
-    fn wait_for_readable(&self, _shutdown: &AtomicBool) -> io::Result<bool> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "TUN backend returned WouldBlock without event-driven wait support",
-        ))
+    fn wait_for_readable(&self, shutdown: &AtomicBool) -> io::Result<bool> {
+        self.dev.wait_readable(shutdown)
     }
 
     /// Convenience loop with cooperative shutdown: repeatedly reads from TUN
