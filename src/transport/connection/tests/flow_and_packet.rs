@@ -1109,6 +1109,66 @@ fn connection_emits_exact_outer_probe_with_datagram_overhead() {
 }
 
 #[test]
+fn pmtu_probe_clamps_to_negotiated_payload_instead_of_stalling() {
+    // When the peer's max_udp_payload sits below the configured search
+    // ceiling, the probe must emit at the negotiated bound instead of being
+    // vetoed - a raw-target veto freezes the confirmed MTU at the floor and
+    // permanently wedges oversized queued datagrams (TODO-886).
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.dgram_send_max_size = 1472;
+    pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.recovery.bytes_in_flight = 0;
+    let mut packet = [0u8; 1600];
+
+    let (packet_len, _) = pair
+        .client
+        .send(&mut packet)
+        .expect("clamped PMTU probe must emit instead of stalling at the floor");
+
+    assert!(packet_len > 1280, "probe must exceed the confirmed floor, got {packet_len}");
+    assert!(packet_len <= 1472, "probe must stay inside the negotiated cap, got {packet_len}");
+    assert!(pair.client.pmtu_probe_pn.is_some());
+}
+
+#[cfg(not(feature = "zero_copy_dgram"))]
+#[test]
+fn oversized_queued_datagram_is_dropped_not_wedged() {
+    // An entry that can never fit the negotiated payload bound must be dropped
+    // at emit time instead of blocking the FIFO queue head-of-line forever.
+    let mut pair = bench_paired_1rtt_connections();
+    pair.client.dgram_send_max_size = 1472;
+    pair.client.recovery.cwnd = 64 * 1024;
+    pair.client.recovery.bytes_in_flight = 0;
+    pair.client.pmtu = pmtu_state(false, PmtuPolicy::default());
+    // Bypass the enqueue bound to simulate an entry stranded by a late
+    // negotiation shrink (peer advertised a smaller max_udp_payload).
+    let oversized = vec![0xAA; 1472];
+    let small = vec![0xBB; 100];
+    pair.client.dgram_send_queue.push_back(
+        crate::transport::connection::state::DatagramSendEntry {
+            data: oversized,
+            class: crate::transport::DatagramClass::Protected,
+        },
+    );
+    pair.client.dgram_send_queue.push_back(
+        crate::transport::connection::state::DatagramSendEntry {
+            data: small,
+            class: crate::transport::DatagramClass::Protected,
+        },
+    );
+    let mut packet = [0u8; 1600];
+
+    let (packet_len, _) = pair
+        .client
+        .send(&mut packet)
+        .expect("packet must still emit after dropping the unemittable head");
+
+    assert!(packet_len > 100, "the small datagram behind the drop must emit");
+    assert!(pair.client.dgram_send_queue.is_empty());
+}
+
+#[test]
 fn unavailable_probe_capacity_does_not_emit_empty_packet() {
     let mut pair = bench_paired_1rtt_connections();
     pair.client.pmtu = pmtu_state(true, PmtuPolicy::default());

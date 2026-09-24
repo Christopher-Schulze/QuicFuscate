@@ -509,10 +509,7 @@ impl QuicFuscateConnection {
                 (f)(0x00, payload);
             }
         } else if masque_trace_enabled() {
-            info!(
-                "dropping MASQUE datagram payload: no sink installed bytes={}",
-                payload.len()
-            );
+            info!("dropping MASQUE datagram payload: no sink installed bytes={}", payload.len());
         }
     }
 

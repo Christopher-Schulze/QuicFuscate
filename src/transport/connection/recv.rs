@@ -1224,6 +1224,39 @@ impl Connection {
         out: &mut [u8],
         mut off: usize,
     ) -> Result<(usize, Option<DatagramClass>), crate::error::ConnectionError> {
+        // Drop entries that can never be emitted on this connection: the frame
+        // plus short header and AEAD tag must fit the negotiated UDP payload
+        // bound regardless of the currently confirmed PMTU. A permanently
+        // unemittable entry would wedge the FIFO queue head-of-line and starve
+        // every datagram behind it (TODO-886).
+        while let Some(need) = self.pending_datagram_frame_reserve() {
+            let never_fits = 1usize
+                .saturating_add(self.dcid.as_ref().len())
+                .saturating_add(4)
+                .saturating_add(need)
+                .saturating_add(self.tag_reserve_1rtt())
+                > self.dgram_send_max_size;
+            if !never_fits {
+                break;
+            }
+            #[cfg(not(feature = "zero_copy_dgram"))]
+            if let Some(entry) = self.dgram_send_queue.remove(self.admitted_batch_dgram_skip) {
+                Self::return_dgram_freelist(&mut self.dgram_send_freelist, entry.data);
+            }
+            #[cfg(feature = "zero_copy_dgram")]
+            {
+                self.dgram_send_queue.remove(self.admitted_batch_dgram_skip);
+            }
+            static DATAGRAM_DROP_LOG_ONCE: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !DATAGRAM_DROP_LOG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(
+                    "dropped unemittable datagram exceeding negotiated payload bound: need={} max_udp_payload={}",
+                    need,
+                    self.dgram_send_max_size
+                );
+            }
+        }
         if let Some(need) = self.pending_datagram_frame_reserve() {
             let tag_reserve = self.tag_reserve_1rtt();
             log::trace!("maybe_flush_one_datagram_frame: off={} need={} tag_reserve={} out_len={} queue_len={}",

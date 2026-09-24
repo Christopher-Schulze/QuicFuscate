@@ -1414,10 +1414,7 @@ pub(super) async fn process_live_server_client_datagram(
                         match tun_sink.write(payload) {
                             Ok(n) => {
                                 if masque_trace_enabled() {
-                                    log::info!(
-                                        "MASQUE uplink delivered to server TUN bytes={}",
-                                        n
-                                    );
+                                    log::info!("MASQUE uplink delivered to server TUN bytes={}", n);
                                 }
                             }
                             Err(error) => {

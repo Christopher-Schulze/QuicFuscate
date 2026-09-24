@@ -157,13 +157,24 @@ impl Connection {
             );
         }
         let pmtu = self.pmtu.effective_mtu();
-        let available_probe_target = self.pmtu.probe_target().filter(|target| {
-            self.is_established
-                && self.pmtu.should_send_probe(now)
-                && !self.admitted_batch_frames.iter().any(|frame| frame.pmtu_probe_size.is_some())
-                && *target <= self.dgram_send_max_size
-                && *target <= out.len()
-        });
+        // DPLPMTUD probes must fit inside the negotiated UDP payload and the
+        // caller's buffer. Clamp the emitted probe to the largest admissible
+        // size instead of vetoing the probe outright: when the peer's
+        // max_udp_payload sits below `pmtu.max_mtu`, a raw-target veto would
+        // freeze the confirmed MTU at the floor forever (TODO-886 deadlock).
+        let available_probe_target = self
+            .pmtu
+            .probe_target()
+            .map(|target| target.min(self.dgram_send_max_size).min(out.len()))
+            .filter(|target| {
+                self.is_established
+                    && self.pmtu.should_send_probe(now)
+                    && !self
+                        .admitted_batch_frames
+                        .iter()
+                        .any(|frame| frame.pmtu_probe_size.is_some())
+                    && *target > pmtu
+            });
         let dedicated_pmtu_probe = available_probe_target.is_some();
         let packetization_mtu = available_probe_target.unwrap_or(pmtu).max(pmtu);
         let outer_mtu_cap = out
@@ -619,9 +630,12 @@ impl Connection {
         let mut pmtu_probe_size = None;
         if dedicated_pmtu_probe
             && !wrote_ack_eliciting
-            && outer_mtu_cap >= self.pmtu.probe_target().unwrap_or(0)
+            && outer_mtu_cap >= available_probe_target.unwrap_or(0)
         {
-            if let Some(probe_size) = self.pmtu.probe_size() {
+            // The recorded probe size is the clamped emit size, not the raw
+            // target: `on_probe_sent` must reflect what actually reached the
+            // wire or the confirmed MTU would exceed the negotiated cap.
+            if let Some(probe_size) = available_probe_target {
                 // PING frame (ack-eliciting) so the peer ACKs the probe.
                 use crate::transport::Frame;
                 let ping = Frame::Ping { mtu_probe: None };

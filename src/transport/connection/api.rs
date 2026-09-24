@@ -516,7 +516,17 @@ impl Connection {
         class: DatagramClass,
     ) -> Result<(), crate::error::ConnectionError> {
         let total = prefix.len() + payload.len();
-        if total > self.dgram_send_max_size {
+        // A queued DATAGRAM must fit inside one emitted packet: short header
+        // (flags + DCID + up-to-4-byte PN), DATAGRAM frame type+length varint,
+        // and the AEAD tag all share the negotiated UDP payload budget. Entries
+        // that can never fit would wedge the FIFO send queue head-of-line.
+        let frame_reserve = 1usize
+            .saturating_add(crate::transport::varint::varint_len(total as u64))
+            .saturating_add(1)
+            .saturating_add(self.dcid.as_ref().len())
+            .saturating_add(4)
+            .saturating_add(16);
+        if total.saturating_add(frame_reserve) > self.dgram_send_max_size {
             return Err(crate::error::ConnectionError::InvalidState);
         }
         if self.is_dgram_send_queue_full() {
