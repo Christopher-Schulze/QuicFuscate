@@ -1212,6 +1212,9 @@ impl IoDriver {
                     let completions = receiver.drain_completions().map_err(|e| {
                         self.transport_receive_error("client io_uring completion drain", e)
                     })?;
+                    if masque_trace_enabled() {
+                        log::info!("client uring eventfd fired, completions={}", completions.len());
+                    }
 
                     if !completions.is_empty() {
                         crate::telemetry::IO_URING_RECV_BATCHES.inc();
