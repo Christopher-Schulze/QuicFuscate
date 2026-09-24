@@ -137,6 +137,132 @@ jobs:
           cargo test --locked --features "rust-tests io_uring" --lib -- \
             qftls:: early_data key_update packet_protection
 
+  linux-private-required-e2e:
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "stable"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install netns test dependencies
+        run: sudo apt-get update && sudo apt-get install -y tcpdump netcat-openbsd
+
+      - name: Build release binaries
+        run: cargo build --locked --release --bin quicfuscate --bin qf-aead-wire-proof
+
+      - name: Write opt-in required and standard peer configs
+        run: |
+          mkdir -p /tmp/qf885
+          cat > /tmp/qf885/required.toml <<'EOF'
+          [crypto]
+          packet_protection_mode = "advanced-required"
+          aead_preference = "aegis"
+
+          [stealth]
+          mode = "manual"
+          enable_http3_masquerading = false
+          use_qpack_headers = false
+          enable_protocol_mimicry = false
+          enable_traffic_padding = false
+          enable_timing_obfuscation = false
+          use_tls_cover = false
+          enable_doh = false
+          EOF
+          cat > /tmp/qf885/server-standard.toml <<'EOF'
+          [crypto]
+          packet_protection_mode = "standard"
+
+          [stealth]
+          mode = "manual"
+          enable_http3_masquerading = false
+          use_qpack_headers = false
+          enable_protocol_mimicry = false
+          enable_traffic_padding = false
+          enable_timing_obfuscation = false
+          use_tls_cover = false
+          enable_doh = false
+          EOF
+
+      - name: Live advanced-required pair proof
+        run: |
+          sudo -E env \
+            QF_E2E_BINARY="$PWD/target/release/quicfuscate" \
+            QF_E2E_SERVER_CONFIG=/tmp/qf885/required.toml \
+            QF_E2E_CLIENT_CONFIG=/tmp/qf885/required.toml \
+            QF_E2E_KEYLOG_FILE=/tmp/qf885/pos-keylog.txt \
+            QF_E2E_PRIVATE_DUMP_FILE=/tmp/qf885/pos-private.dump \
+            QF_E2E_HANDSHAKE_CAPTURE_FILE=/tmp/qf885/pos-underlay.pcap \
+            QF_E2E_LOG_DIR=/tmp/qf885/logs-pos \
+            QF_E2E_STARTUP_TIMEOUT=30 \
+            bash scripts/tests/tun-e2e-netns.sh
+
+      - name: Wire proof of private post-boundary 1-RTT
+        run: |
+          sudo ./target/release/qf-aead-wire-proof \
+            --pcap /tmp/qf885/pos-underlay.pcap \
+            --keylog /tmp/qf885/pos-keylog.txt \
+            --privdump /tmp/qf885/pos-private.dump \
+            --expect private
+          sudo rm -f /run/quicfuscate/routing/7174756e30.json \
+            /run/quicfuscate/routing/firewall-owner.json || true
+
+      - name: Live fail-closed proof against a standard peer
+        run: |
+          set +e
+          sudo -E env \
+            QF_E2E_BINARY="$PWD/target/release/quicfuscate" \
+            QF_E2E_SERVER_CONFIG=/tmp/qf885/server-standard.toml \
+            QF_E2E_CLIENT_CONFIG=/tmp/qf885/required.toml \
+            QF_E2E_KEYLOG_FILE=/tmp/qf885/neg-keylog.txt \
+            QF_E2E_HANDSHAKE_CAPTURE_FILE=/tmp/qf885/neg-underlay.pcap \
+            QF_E2E_LOG_DIR=/tmp/qf885/logs-neg \
+            QF_E2E_STARTUP_TIMEOUT=30 \
+            bash scripts/tests/tun-e2e-netns.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL: required client survived against a standard-only peer" >&2
+            exit 1
+          fi
+          grep -q "private packet protection negotiation deadline expired" \
+            /tmp/qf885/logs-neg/ns-cli.log || {
+              echo "FAIL: missing deadline kill evidence in client log" >&2
+              exit 1
+            }
+          # The payload gate must leave zero data-plane leakage: no captured
+          # packet above the boundary may carry tunnel payload on the wire.
+          sudo ./target/release/qf-aead-wire-proof \
+            --pcap /tmp/qf885/neg-underlay.pcap \
+            --keylog /tmp/qf885/neg-keylog.txt \
+            --expect standard
+
+      - name: Upload required-e2e evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-private-required-e2e
+          path: |
+            /tmp/qf885/*.pcap
+            /tmp/qf885/*.dump
+            /tmp/qf885/*keylog.txt
+            /tmp/qf885/logs-*/
+          if-no-files-found: warn
+
   frontend-dependency-security:
     timeout-minutes: 15
     runs-on: macos-latest
