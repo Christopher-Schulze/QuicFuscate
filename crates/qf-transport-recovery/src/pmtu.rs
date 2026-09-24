@@ -122,6 +122,29 @@ impl PmtuState {
         }
     }
 
+    /// Apply an external packet-too-big report (nested carrier reject or a
+    /// real ICMP PTB): cap the confirmed MTU at the signaled ceiling even
+    /// below the probing floor. The signal is authoritative — the path just
+    /// failed to carry the packet — so probing above the ceiling is
+    /// pointless until the carrier reports a larger budget again.
+    /// Returns the confirmed MTU after the cap.
+    pub fn apply_ptb(&mut self, ceiling: usize) -> usize {
+        self.confirmed_mtu = self.confirmed_mtu.min(ceiling);
+        self.probe_target = self.probe_target.min(self.confirmed_mtu.max(self.min_mtu));
+        self.probe_in_flight = None;
+        self.above_floor_unacked_since = None;
+        self.confirmed_mtu
+    }
+
+    /// Lift a previously applied PTB cap when the carrier advertises a
+    /// larger budget again. Only raises `probe_target` so the regular probe
+    /// interval re-discovers the MTU instead of trusting the budget blindly.
+    pub fn relax_ptb(&mut self, ceiling: usize) {
+        if ceiling > self.probe_target {
+            self.probe_target = ceiling.min(self.max_mtu);
+        }
+    }
+
     /// Check for black hole (no ACKs for extended period).
     /// Returns true if MTU should be reset to minimum.
     pub fn check_black_hole(&self, now: Instant) -> bool {
@@ -224,5 +247,46 @@ mod tests {
         assert!(state
             .probe_target()
             .is_some_and(|target| { target >= policy.min_mtu && target <= policy.max_mtu }));
+    }
+
+    #[test]
+    fn apply_ptb_caps_confirmed_mtu_below_probing_floor() {
+        let policy = PmtuPolicy { min_mtu: 1280, max_mtu: 1500, ..PmtuPolicy::default() };
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, policy).expect("valid PMTU policy");
+        state.on_probe_sent(1500, start);
+        state.on_probe_acked(start);
+        assert_eq!(state.effective_mtu(), 1500);
+
+        // A carrier reject at 1200 is authoritative even below min_mtu:
+        // the path demonstrably cannot carry more, so confirmation follows.
+        let capped = state.apply_ptb(1200);
+        assert_eq!(capped, 1200);
+        assert_eq!(state.effective_mtu(), 1200);
+        // Probes may still climb back to the policy floor, but never above
+        // it: a rejected probe re-applies the PTB and leaves data small.
+        assert_eq!(state.probe_target(), Some(1280));
+        assert_eq!(state.probe_size(), Some(1280));
+    }
+
+    #[test]
+    fn relax_ptb_reopens_measured_probe_growth() {
+        let policy = PmtuPolicy { min_mtu: 1280, max_mtu: 1500, ..PmtuPolicy::default() };
+        let start = Instant::now();
+        let mut state = PmtuState::new(true, policy).expect("valid PMTU policy");
+        state.apply_ptb(1200);
+
+        state.relax_ptb(1400);
+        assert_eq!(
+            state.probe_target(),
+            Some(1400),
+            "a grown carrier budget must let probes rediscover the MTU"
+        );
+        assert_eq!(state.effective_mtu(), 1200, "relax must not trust blindly");
+
+        // A smaller budget never shrinks the probe target again here; the
+        // PTB path itself owns downward moves.
+        state.relax_ptb(1100);
+        assert_eq!(state.probe_target(), Some(1400));
     }
 }

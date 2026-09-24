@@ -3,6 +3,14 @@ use super::*;
 use crate::transport::DatagramClass;
 
 impl Connection {
+    /// `BufferTooShort` carries no site context, so each raise reports its
+    /// caller location under debug for receive-path fault isolation.
+    #[track_caller]
+    fn buffer_too_short() -> crate::error::ConnectionError {
+        log::debug!("BufferTooShort raised at {}", std::panic::Location::caller());
+        crate::error::ConnectionError::BufferTooShort
+    }
+
     pub(super) fn enqueue_peer_stream_reset(
         &mut self,
         stream_id: u64,
@@ -46,7 +54,7 @@ impl Connection {
             off = off.checked_add(used).ok_or(crate::error::ConnectionError::InvalidFrame)?;
         }
         if off != payload.len() {
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         Ok(())
     }
@@ -142,7 +150,7 @@ impl Connection {
         use crate::error::ConnectionError;
         use udpfast::unlikely;
         if unlikely(buf.is_empty()) {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
 
         // Prefetch packet input for the recv hotpath.
@@ -337,7 +345,7 @@ impl Connection {
         };
         let end = aad_len.saturating_add(pt_len).min(buf.len());
         if aad_len > end {
-            return Err(ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         if aad_len == end {
             return Err(ConnectionError::InvalidFrame);
@@ -907,7 +915,7 @@ impl Connection {
             if out.len().saturating_sub(off) < need.saturating_add(self.tag_reserve_1rtt()) {
                 break;
             }
-            let tail = out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+            let tail = out.get_mut(off..).ok_or_else(Self::buffer_too_short)?;
             off += frames::to_bytes(ctrl, tail)?;
             ack_eliciting |= Self::frame_is_ack_eliciting(ctrl);
             terminal_close |=
@@ -940,8 +948,7 @@ impl Connection {
             let need = frames::wire_len(&ack)?;
             let tag_reserve = self.tag_reserve_1rtt();
             if out.len().saturating_sub(off) >= need.saturating_add(tag_reserve) {
-                let tail =
-                    out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+                let tail = out.get_mut(off..).ok_or_else(Self::buffer_too_short)?;
                 off += frames::to_bytes(&ack, tail)?;
                 let Frame::Ack { ranges, .. } = ack else {
                     return Err(crate::error::ConnectionError::InvalidState);
@@ -1441,23 +1448,21 @@ impl Connection {
         let pn_end =
             pn_off.checked_add(pn_len).ok_or(crate::error::ConnectionError::InvalidPacket)?;
         if pn_end > out.len() || off < pn_end || off > out.len() {
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         let sample_end = pn_off
             .checked_add(packet::MAX_PKT_NUM_LEN)
             .and_then(|offset| offset.checked_add(packet::SAMPLE_LEN))
             .ok_or(crate::error::ConnectionError::InvalidPacket)?;
         if sample_end > out.len() {
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         let minimum_plaintext_end = sample_end.saturating_sub(self.tag_reserve_1rtt());
         if off < minimum_plaintext_end {
             let padding_len = minimum_plaintext_end - off;
-            let padding_end = off
-                .checked_add(padding_len)
-                .ok_or(crate::error::ConnectionError::BufferTooShort)?;
+            let padding_end = off.checked_add(padding_len).ok_or_else(Self::buffer_too_short)?;
             if padding_end > out.len() {
-                return Err(crate::error::ConnectionError::BufferTooShort);
+                return Err(Self::buffer_too_short());
             }
             off += frames::write_padding(padding_len, &mut out[off..])?;
         }
@@ -1702,7 +1707,7 @@ impl Connection {
             4
         };
         if out.len() < hdr_len + pn_len {
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
 
         let pn_off = 1 + self.dcid.as_ref().len();
@@ -1714,9 +1719,9 @@ impl Connection {
         let need = frames::wire_len(frame)?;
         let tag_reserve = self.tag_reserve_1rtt();
         if out.len().saturating_sub(off) < need.saturating_add(tag_reserve) {
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
-        let tail = out.get_mut(off..).ok_or(crate::error::ConnectionError::BufferTooShort)?;
+        let tail = out.get_mut(off..).ok_or_else(Self::buffer_too_short)?;
         off += frames::to_bytes(frame, tail)?;
         off = self.seal_short_header_packet(out, pn, pn_off, pn_len, off)?;
 

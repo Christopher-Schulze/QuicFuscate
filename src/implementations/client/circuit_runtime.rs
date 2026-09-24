@@ -462,6 +462,11 @@ impl ClientDataPlane {
             }
             let mut sent_datagrams = 0usize;
             let mut sent_bytes = 0usize;
+            // When the link's live datagram budget grows again after a PTB
+            // cap, let the inner connection probe back up measured instead
+            // of pinning it at the old ceiling forever.
+            let link_budget = self.hops[link_index].next_hop_masque_payload_limit();
+            self.hops[hop_index].relax_inner_mtu_ceiling(link_budget);
             if let Some(payload) = self.pending_inner_egress[link_index].take() {
                 match self.hops[link_index].send_next_hop_masque_datagram(stream_id, &payload) {
                     Ok(()) => {
@@ -471,6 +476,9 @@ impl ClientDataPlane {
                     Err(crate::error::ConnectionError::DgramQueueFull) => {
                         self.pending_inner_egress[link_index] = Some(payload);
                         continue;
+                    }
+                    Err(crate::error::ConnectionError::BufferTooShort) => {
+                        self.apply_nested_ptb(link_index, hop_index, payload.len());
                     }
                     Err(error) => return Err(EngineError::Connection(error.to_string())),
                 }
@@ -493,11 +501,32 @@ impl ClientDataPlane {
                         self.pending_inner_egress[link_index] = Some(payload.to_vec());
                         break;
                     }
+                    Err(crate::error::ConnectionError::BufferTooShort) => {
+                        self.apply_nested_ptb(link_index, hop_index, written);
+                        break;
+                    }
                     Err(error) => return Err(EngineError::Connection(error.to_string())),
                 }
             }
         }
         Ok(())
+    }
+
+    /// Nested-carrier packet-too-big handling: the link connection rejected
+    /// an inner QUIC datagram, so the inner connection's confirmed MTU drops
+    /// to the live carrier budget. The rejected datagram is discarded like
+    /// an ICMP PTB loss — inner QUIC retransmits it fragmented to fit.
+    fn apply_nested_ptb(&mut self, link_index: usize, hop_index: usize, rejected: usize) {
+        let ceiling = self.hops[link_index].next_hop_masque_payload_limit();
+        let capped = self.hops[hop_index].apply_inner_mtu_ceiling(ceiling);
+        log::info!(
+            "nested carrier PTB: link={} hop={} rejected={}B budget={}B inner_mtu={}B",
+            link_index,
+            hop_index,
+            rejected,
+            ceiling,
+            capped
+        );
     }
 
     pub fn recv_physical(&mut self, payload: &[u8]) -> Result<usize, EngineError> {

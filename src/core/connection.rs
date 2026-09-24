@@ -237,6 +237,26 @@ impl Drop for QuicFuscateConnection {
 }
 
 impl QuicFuscateConnection {
+    /// `BufferTooShort` carries no site context and surfaces across the
+    /// whole datapath, so each raise reports its caller location under debug.
+    #[track_caller]
+    fn buffer_too_short() -> crate::error::ConnectionError {
+        log::debug!("BufferTooShort raised at {}", std::panic::Location::caller());
+        crate::error::ConnectionError::BufferTooShort
+    }
+
+    /// Cap the packetization MTU after a nested carrier reported the packet
+    /// too big; returns the confirmed MTU after the cap.
+    pub fn apply_inner_mtu_ceiling(&mut self, ceiling: usize) -> usize {
+        self.conn.apply_path_mtu_ceiling(ceiling)
+    }
+
+    /// Lift an earlier MTU cap when the carrier budget grew again; the
+    /// transport re-discovers the ceiling through measured probes.
+    pub fn relax_inner_mtu_ceiling(&mut self, ceiling: usize) {
+        self.conn.relax_path_mtu_ceiling(ceiling);
+    }
+
     /// Returns the clock shared by protocol-facing connection state.
     pub fn protocol_clock(&self) -> crate::time_source::ProtocolClock {
         self.clock.clone()
@@ -1046,7 +1066,7 @@ impl QuicFuscateConnection {
         if data.len() > block.len() {
             // Avoid silent truncation; return a clear error and recycle the block.
             self.optimization_manager.free_block(block);
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         let copy_len = data.len();
         block[..copy_len].copy_from_slice(&data[..copy_len]);
@@ -1205,7 +1225,7 @@ impl QuicFuscateConnection {
     ) -> Result<usize, crate::error::ConnectionError> {
         if len > block.len() {
             self.optimization_manager.free_block(block);
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
 
         if wire::is_framed(&block[..len]) {

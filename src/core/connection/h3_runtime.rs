@@ -945,7 +945,7 @@ impl QuicFuscateConnection {
                     head.join(" ")
                 );
             }
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         if self.private_required_payload_gate_closed() {
             return Err(crate::error::ConnectionError::PrivatePayloadGateClosed);
@@ -1002,8 +1002,7 @@ impl QuicFuscateConnection {
         &mut self,
         packet: &[u8],
     ) -> Result<(), crate::error::ConnectionError> {
-        let packet_len = u16::try_from(packet.len())
-            .map_err(|_| crate::error::ConnectionError::BufferTooShort)?;
+        let packet_len = u16::try_from(packet.len()).map_err(|_| Self::buffer_too_short())?;
         self.h3_tunnel_tx_frame.clear();
         self.h3_tunnel_tx_frame.reserve(H3_TUNNEL_FRAME_HEADER_LEN.saturating_add(packet.len()));
         self.h3_tunnel_tx_frame.extend_from_slice(H3_TUNNEL_FRAME_MAGIC);
@@ -1069,6 +1068,13 @@ impl QuicFuscateConnection {
         Ok(stream_id)
     }
 
+    /// Largest nested QUIC datagram this connection will accept as a
+    /// MASQUE carrier payload toward the next hop. Keeps the QUIC minimum
+    /// datagram guarantee even when the live path budget sits lower.
+    pub fn next_hop_masque_payload_limit(&self) -> usize {
+        self.effective_masque_mtu().max(crate::transport::MIN_CLIENT_INITIAL_LEN)
+    }
+
     /// Sends one opaque inner QUIC datagram without IP normalization.
     pub fn send_next_hop_masque_datagram(
         &mut self,
@@ -1079,12 +1085,8 @@ impl QuicFuscateConnection {
         let valid = self.masque_local_flows.get(&flow_id).is_some_and(|flow| {
             flow.stream_id == stream_id && flow.purpose == MasqueFlowPurpose::NextHopUdp
         });
-        if !valid
-            || payload.is_empty()
-            || payload.len()
-                > self.effective_masque_mtu().max(crate::transport::MIN_CLIENT_INITIAL_LEN)
-        {
-            return Err(crate::error::ConnectionError::BufferTooShort);
+        if !valid || payload.is_empty() || payload.len() > self.next_hop_masque_payload_limit() {
+            return Err(Self::buffer_too_short());
         }
         let h3 = self.h3_conn.as_mut().ok_or(crate::error::ConnectionError::Done)?;
         match h3.send_masque_datagram(&mut self.conn, stream_id, payload) {
@@ -1116,7 +1118,7 @@ impl QuicFuscateConnection {
                 payload.len(),
                 payload.first()
             );
-            return Err(crate::error::ConnectionError::BufferTooShort);
+            return Err(Self::buffer_too_short());
         }
         if self.private_required_payload_gate_closed() {
             return Err(crate::error::ConnectionError::PrivatePayloadGateClosed);

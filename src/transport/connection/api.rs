@@ -969,6 +969,20 @@ impl Connection {
         self.pmtu.effective_mtu().min(self.dgram_send_max_size)
     }
 
+    /// Apply an external packet-too-big report: a nested carrier rejected
+    /// one of this connection's datagrams, so the confirmed packetization
+    /// MTU drops to the carrier budget and DPLPMTUD may probe back up later.
+    /// Returns the confirmed MTU after the cap.
+    pub fn apply_path_mtu_ceiling(&mut self, ceiling: usize) -> usize {
+        self.pmtu.apply_ptb(ceiling)
+    }
+
+    /// Relax a previously applied MTU ceiling when the carrier budget grew
+    /// again; only the probe target moves so rediscovery stays measured.
+    pub fn relax_path_mtu_ceiling(&mut self, ceiling: usize) {
+        self.pmtu.relax_ptb(ceiling);
+    }
+
     /// Configured upper bound for one outgoing UDP payload.
     pub fn max_send_udp_payload_size(&self) -> usize {
         self.dgram_send_max_size
