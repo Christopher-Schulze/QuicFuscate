@@ -862,6 +862,10 @@ pub(super) async fn run_client(
 
     let exit_reason = 'runtime: loop {
         tokio::select! {
+            // Poll arms in declaration order: housekeeping must be checked
+            // before the hot arms so a permanently-ready sibling cannot keep
+            // an elapsed housekeeping tick permanently unwon.
+            biased;
             _ = &mut shutdown_signal => {
                 if let Err(e) = conn.conn.close(true, 0x0, b"shutdown") {
                     warn!("Client close on shutdown failed: {:?}", e);
@@ -877,274 +881,6 @@ pub(super) async fn run_client(
                     warn!("Client shutdown frame flush failed: {}", e);
                 }
                 break ExitReason::CleanShutdown;
-            }
-            recv_res = recv_connected_burst(&socket, &mut rx_bufs) => {
-                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
-                    break ExitReason::DataPlane(fault);
-                }
-                let branch_started = std::time::Instant::now();
-                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
-                if client_receive_diagnostics_enabled
-                    && scheduling_gap >= Duration::from_millis(250)
-                {
-                    info!(
-                        "Client runtime resumed: branch=udp-recv scheduling_gap_ms={}",
-                        scheduling_gap.as_millis()
-                    );
-                }
-                last_runtime_progress = branch_started;
-                match recv_res {
-                    Ok(slots) => {
-                        for slot in &slots {
-                            let len = slot.len;
-                            let buf = &mut rx_bufs[slot.buf_index];
-                            telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
-                            if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                diagnostics.record_socket_datagram(len);
-                            }
-                            // A UDP_GRO super-buffer holds `gso_size`-aligned
-                            // datagrams; `conn.recv` still consumes one wire
-                            // datagram at a time, so split before feeding. A
-                            // `gso_size` of 0 means no cmsg arrived: the buffer is
-                            // one plain datagram, not len 1-byte slices.
-                            let seg = if slot.gso_size > 0 { usize::from(slot.gso_size) } else { len };
-                            let mut seg_off = 0usize;
-                            while seg_off < len {
-                                let seg_end = (seg_off + seg).min(len);
-                                let activity_before = io_diagnostics
-                                    .as_ref()
-                                    .map(|_| conn.conn.last_activity_marker());
-                                let seg_result = conn.recv_mut(&mut buf[seg_off..seg_end]);
-                                seg_off = seg_end;
-                                match seg_result {
-                                    Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
-                                        | quicfuscate::error::ConnectionError::TlsAlert(_)
-                                        | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
-                                        if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                            diagnostics.record_core_recv_error();
-                                        }
-                                        error!("TLS handshake failed: {}", error);
-                                        break 'runtime ExitReason::SocketError(error.to_string());
-                                    }
-                                    Err(error) => {
-                                        if let Some(diagnostics) = io_diagnostics.as_mut() {
-                                            diagnostics.record_core_recv_error();
-                                        }
-                                        error!("QUIC recv failed: {:?}", error);
-                                    }
-                                    Ok(_) => {
-                                        if let (Some(diagnostics), Some(before)) =
-                                            (io_diagnostics.as_mut(), activity_before)
-                                        {
-                                            diagnostics.record_core_recv_success(
-                                                conn.conn.last_activity_marker() != before,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // conn.recv() only queues decoded H3/MASQUE
-                        // events internally. Drain them now so the
-                        // downlink payload reaches the TUN at wire
-                        // speed instead of waiting for the next
-                        // housekeeping tick (CLIENT_HOUSEKEEPING_IDLE).
-                        if tun_enable {
-                            if let Err(e) =
-                                conn.poll_http3_with(client_h3_downlink_body_cb(
-                                    &tun_writer,
-                                    &tun_reader_fault,
-                                    &tun_notify,
-                                    &tun_reader_shutdown,
-                                ))
-                            {
-                                warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
-                            }
-                        } else if let Err(e) = conn.poll_http3() {
-                            warn!("HTTP/3 error: {:?}", e);
-                        }
-                        if let Err(error) =
-                            flush_connected_outgoing(
-                                &socket,
-                                &mut conn,
-                                &mut out,
-                                io_diagnostics.as_mut(),
-                            )
-                            .await
-                        {
-                            break ExitReason::DataPlane(error);
-                        }
-                        // TUN uplink: forward frames from the TUN reader channel
-                        // to the MASQUE data plane. This is done here (in the recv
-                        // branch) rather than in the housekeeping branch because
-                        // tokio::select! is not fair: when the peer constantly sends
-                        // packets, the recv branch is always ready first and the
-                        // housekeeping tick may never fire, starving the TUN uplink.
-                        if tun_enable && conn.masque_tunnel_established() {
-                            if let Some(ref tun) = tun_writer {
-                                let more_tun = match drain_uplink_any(
-                                    &mut conn,
-                                    tun,
-                                    h3_stream_id,
-                                    &tun_rx,
-                                    &tun_read_end,
-                                    &mut tun_backpressure_frame,
-                                    io_diagnostics.as_mut(),
-                                ) {
-                                    Ok(more_tun) => more_tun,
-                                    Err(fault) => break ExitReason::DataPlane(fault),
-                                };
-                                if more_tun {
-                                    tun_notify.notify_one();
-                                }
-                            }
-                            // Flush any outgoing packets generated by the body chunk sends.
-                            let flush_started = std::time::Instant::now();
-                            if let Err(e) = flush_connected_outgoing(
-                                &socket,
-                                &mut conn,
-                                &mut out,
-                                io_diagnostics.as_mut(),
-                            )
-                            .await
-                            {
-                                break ExitReason::DataPlane(e);
-                            }
-                            let flush_elapsed = flush_started.elapsed();
-                            if client_receive_diagnostics_enabled
-                                && flush_elapsed >= Duration::from_millis(100)
-                            {
-                                info!(
-                                    "Client runtime slow phase: branch=udp-recv phase=flush duration_ms={}",
-                                    flush_elapsed.as_millis()
-                                );
-                            }
-                        }
-                        if conn.conn.is_closed() {
-                            info!("Server closed the connection");
-                            break ExitReason::RemoteClosed;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to read from socket: {}", e);
-                        break ExitReason::SocketError(e.to_string());
-                    }
-                }
-                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
-                    &conn,
-                    tun_writer.is_some(),
-                    request_sent,
-                    tun_backpressure_frame.is_some(),
-                    next_heartbeat_probe,
-                ));
-            }
-            _ = async {
-                match tun_read_end.as_ref() {
-                    Some(end) => end.readable().await,
-                    None => std::future::pending().await,
-                }
-            }, if tun_writer.is_some() && tun_read_end.is_some() => {
-                let branch_started = std::time::Instant::now();
-                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
-                if client_receive_diagnostics_enabled
-                    && scheduling_gap >= Duration::from_millis(250)
-                {
-                    info!(
-                        "Client runtime resumed: branch=tun-fd-ready scheduling_gap_ms={}",
-                        scheduling_gap.as_millis()
-                    );
-                }
-                last_runtime_progress = branch_started;
-                // The drain must run on every readiness fire, even before the
-                // MASQUE tunnel is established or `h3_stream_id` is known:
-                // skipping the read leaves the AsyncFd readiness bit set and
-                // the branch spins. Pre-carrier frames are parked in the
-                // backlog instead (same buffering the reader channel gave).
-                if let (Some(end), Some(ref tun)) = (&tun_read_end, &tun_writer) {
-                    let more_tun = match drain_client_tun_uplink_fd(
-                        &mut conn,
-                        tun,
-                        h3_stream_id,
-                        end,
-                        &mut tun_backpressure_frame,
-                        io_diagnostics.as_mut(),
-                    ) {
-                        Ok(more_tun) => more_tun,
-                        Err(fault) => break ExitReason::DataPlane(fault),
-                    };
-                    if more_tun {
-                        tun_notify.notify_one();
-                    }
-                    if let Err(error) = flush_connected_outgoing(
-                        &socket,
-                        &mut conn,
-                        &mut out,
-                        io_diagnostics.as_mut(),
-                    )
-                    .await
-                    {
-                        break ExitReason::DataPlane(error);
-                    }
-                }
-                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
-                    &conn,
-                    tun_writer.is_some(),
-                    request_sent,
-                    tun_backpressure_frame.is_some(),
-                    next_heartbeat_probe,
-                ));
-            }
-            _ = tun_notify.notified(), if tun_writer.is_some() => {
-                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
-                    break ExitReason::DataPlane(fault);
-                }
-                let branch_started = std::time::Instant::now();
-                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
-                if client_receive_diagnostics_enabled
-                    && scheduling_gap >= Duration::from_millis(250)
-                {
-                    info!(
-                        "Client runtime resumed: branch=tun-notify scheduling_gap_ms={}",
-                        scheduling_gap.as_millis()
-                    );
-                }
-                last_runtime_progress = branch_started;
-                if conn.masque_tunnel_established() {
-                    if let Some(ref tun) = tun_writer {
-                        let more_tun = match drain_uplink_any(
-                            &mut conn,
-                            tun,
-                            h3_stream_id,
-                            &tun_rx,
-                            &tun_read_end,
-                            &mut tun_backpressure_frame,
-                            io_diagnostics.as_mut(),
-                        ) {
-                            Ok(more_tun) => more_tun,
-                            Err(fault) => break ExitReason::DataPlane(fault),
-                        };
-                        if more_tun {
-                            tun_notify.notify_one();
-                        }
-                        if let Err(error) = flush_connected_outgoing(
-                            &socket,
-                            &mut conn,
-                            &mut out,
-                            io_diagnostics.as_mut(),
-                        )
-                        .await
-                        {
-                            break ExitReason::DataPlane(error);
-                        }
-                    }
-                }
-                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
-                    &conn,
-                    tun_writer.is_some(),
-                    request_sent,
-                    tun_backpressure_frame.is_some(),
-                    next_heartbeat_probe,
-                ));
             }
             _ = housekeeping.tick() => {
                 if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
@@ -1536,6 +1272,274 @@ pub(super) async fn run_client(
                 );
                 housekeeping.reset_after(housekeeping_delay);
                 housekeeping_deadline = tokio::time::Instant::now() + housekeeping_delay;
+            }
+            recv_res = recv_connected_burst(&socket, &mut rx_bufs) => {
+                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
+                    break ExitReason::DataPlane(fault);
+                }
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=udp-recv scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
+                match recv_res {
+                    Ok(slots) => {
+                        for slot in &slots {
+                            let len = slot.len;
+                            let buf = &mut rx_bufs[slot.buf_index];
+                            telemetry!(quicfuscate::telemetry::BYTES_RECEIVED.inc_by(len as u64));
+                            if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                diagnostics.record_socket_datagram(len);
+                            }
+                            // A UDP_GRO super-buffer holds `gso_size`-aligned
+                            // datagrams; `conn.recv` still consumes one wire
+                            // datagram at a time, so split before feeding. A
+                            // `gso_size` of 0 means no cmsg arrived: the buffer is
+                            // one plain datagram, not len 1-byte slices.
+                            let seg = if slot.gso_size > 0 { usize::from(slot.gso_size) } else { len };
+                            let mut seg_off = 0usize;
+                            while seg_off < len {
+                                let seg_end = (seg_off + seg).min(len);
+                                let activity_before = io_diagnostics
+                                    .as_ref()
+                                    .map(|_| conn.conn.last_activity_marker());
+                                let seg_result = conn.recv_mut(&mut buf[seg_off..seg_end]);
+                                seg_off = seg_end;
+                                match seg_result {
+                                    Err(error @ (quicfuscate::error::ConnectionError::TlsError(_)
+                                        | quicfuscate::error::ConnectionError::TlsAlert(_)
+                                        | quicfuscate::error::ConnectionError::PeerCertificateUnsupported)) => {
+                                        if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                            diagnostics.record_core_recv_error();
+                                        }
+                                        error!("TLS handshake failed: {}", error);
+                                        break 'runtime ExitReason::SocketError(error.to_string());
+                                    }
+                                    Err(error) => {
+                                        if let Some(diagnostics) = io_diagnostics.as_mut() {
+                                            diagnostics.record_core_recv_error();
+                                        }
+                                        error!("QUIC recv failed: {:?}", error);
+                                    }
+                                    Ok(_) => {
+                                        if let (Some(diagnostics), Some(before)) =
+                                            (io_diagnostics.as_mut(), activity_before)
+                                        {
+                                            diagnostics.record_core_recv_success(
+                                                conn.conn.last_activity_marker() != before,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // conn.recv() only queues decoded H3/MASQUE
+                        // events internally. Drain them now so the
+                        // downlink payload reaches the TUN at wire
+                        // speed instead of waiting for the next
+                        // housekeeping tick (CLIENT_HOUSEKEEPING_IDLE).
+                        if tun_enable {
+                            if let Err(e) =
+                                conn.poll_http3_with(client_h3_downlink_body_cb(
+                                    &tun_writer,
+                                    &tun_reader_fault,
+                                    &tun_notify,
+                                    &tun_reader_shutdown,
+                                ))
+                            {
+                                warn!("HTTP/3 poll in TUN mode failed: {:?}", e);
+                            }
+                        } else if let Err(e) = conn.poll_http3() {
+                            warn!("HTTP/3 error: {:?}", e);
+                        }
+                        if let Err(error) =
+                            flush_connected_outgoing(
+                                &socket,
+                                &mut conn,
+                                &mut out,
+                                io_diagnostics.as_mut(),
+                            )
+                            .await
+                        {
+                            break ExitReason::DataPlane(error);
+                        }
+                        // TUN uplink: forward frames from the TUN reader channel
+                        // to the MASQUE data plane. This is done here (in the recv
+                        // branch) rather than in the housekeeping branch because
+                        // tokio::select! is not fair: when the peer constantly sends
+                        // packets, the recv branch is always ready first and the
+                        // housekeeping tick may never fire, starving the TUN uplink.
+                        if tun_enable && conn.masque_tunnel_established() {
+                            if let Some(ref tun) = tun_writer {
+                                let more_tun = match drain_uplink_any(
+                                    &mut conn,
+                                    tun,
+                                    h3_stream_id,
+                                    &tun_rx,
+                                    &tun_read_end,
+                                    &mut tun_backpressure_frame,
+                                    io_diagnostics.as_mut(),
+                                ) {
+                                    Ok(more_tun) => more_tun,
+                                    Err(fault) => break ExitReason::DataPlane(fault),
+                                };
+                                if more_tun {
+                                    tun_notify.notify_one();
+                                }
+                            }
+                            // Flush any outgoing packets generated by the body chunk sends.
+                            let flush_started = std::time::Instant::now();
+                            if let Err(e) = flush_connected_outgoing(
+                                &socket,
+                                &mut conn,
+                                &mut out,
+                                io_diagnostics.as_mut(),
+                            )
+                            .await
+                            {
+                                break ExitReason::DataPlane(e);
+                            }
+                            let flush_elapsed = flush_started.elapsed();
+                            if client_receive_diagnostics_enabled
+                                && flush_elapsed >= Duration::from_millis(100)
+                            {
+                                info!(
+                                    "Client runtime slow phase: branch=udp-recv phase=flush duration_ms={}",
+                                    flush_elapsed.as_millis()
+                                );
+                            }
+                        }
+                        if conn.conn.is_closed() {
+                            info!("Server closed the connection");
+                            break ExitReason::RemoteClosed;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read from socket: {}", e);
+                        break ExitReason::SocketError(e.to_string());
+                    }
+                }
+                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
+            }
+            _ = async {
+                match tun_read_end.as_ref() {
+                    Some(end) => end.readable().await,
+                    None => std::future::pending().await,
+                }
+            }, if tun_writer.is_some() && tun_read_end.is_some() => {
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=tun-fd-ready scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
+                // The drain must run on every readiness fire, even before the
+                // MASQUE tunnel is established or `h3_stream_id` is known:
+                // skipping the read leaves the AsyncFd readiness bit set and
+                // the branch spins. Pre-carrier frames are parked in the
+                // backlog instead (same buffering the reader channel gave).
+                if let (Some(end), Some(ref tun)) = (&tun_read_end, &tun_writer) {
+                    let more_tun = match drain_client_tun_uplink_fd(
+                        &mut conn,
+                        tun,
+                        h3_stream_id,
+                        end,
+                        &mut tun_backpressure_frame,
+                        io_diagnostics.as_mut(),
+                    ) {
+                        Ok(more_tun) => more_tun,
+                        Err(fault) => break ExitReason::DataPlane(fault),
+                    };
+                    if more_tun {
+                        tun_notify.notify_one();
+                    }
+                    if let Err(error) = flush_connected_outgoing(
+                        &socket,
+                        &mut conn,
+                        &mut out,
+                        io_diagnostics.as_mut(),
+                    )
+                    .await
+                    {
+                        break ExitReason::DataPlane(error);
+                    }
+                }
+                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
+            }
+            _ = tun_notify.notified(), if tun_writer.is_some() => {
+                if let Some(fault) = tun_reader_fault.as_ref().and_then(|slot| slot.lock().clone()) {
+                    break ExitReason::DataPlane(fault);
+                }
+                let branch_started = std::time::Instant::now();
+                let scheduling_gap = branch_started.duration_since(last_runtime_progress);
+                if client_receive_diagnostics_enabled
+                    && scheduling_gap >= Duration::from_millis(250)
+                {
+                    info!(
+                        "Client runtime resumed: branch=tun-notify scheduling_gap_ms={}",
+                        scheduling_gap.as_millis()
+                    );
+                }
+                last_runtime_progress = branch_started;
+                if conn.masque_tunnel_established() {
+                    if let Some(ref tun) = tun_writer {
+                        let more_tun = match drain_uplink_any(
+                            &mut conn,
+                            tun,
+                            h3_stream_id,
+                            &tun_rx,
+                            &tun_read_end,
+                            &mut tun_backpressure_frame,
+                            io_diagnostics.as_mut(),
+                        ) {
+                            Ok(more_tun) => more_tun,
+                            Err(fault) => break ExitReason::DataPlane(fault),
+                        };
+                        if more_tun {
+                            tun_notify.notify_one();
+                        }
+                        if let Err(error) = flush_connected_outgoing(
+                            &socket,
+                            &mut conn,
+                            &mut out,
+                            io_diagnostics.as_mut(),
+                        )
+                        .await
+                        {
+                            break ExitReason::DataPlane(error);
+                        }
+                    }
+                }
+                rearm_client_housekeeping(&mut housekeeping, &mut housekeeping_deadline, client_housekeeping_delay(
+                    &conn,
+                    tun_writer.is_some(),
+                    request_sent,
+                    tun_backpressure_frame.is_some(),
+                    next_heartbeat_probe,
+                ));
             }
         }
         // A permanently-ready select arm starves the housekeeping timer:
