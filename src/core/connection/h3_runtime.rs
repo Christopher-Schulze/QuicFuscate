@@ -109,7 +109,7 @@ impl QuicFuscateConnection {
                 let Some(ref mut h3) = self.h3_conn else {
                     break;
                 };
-                Self::emit_due_cover_headers(h3, &mut self.conn, &self.stealth_manager);
+                let _ = Self::emit_due_cover_headers(h3, &mut self.conn, &self.stealth_manager);
                 Self::emit_webtransport_cover_session(h3, &mut self.conn, &self.stealth_manager);
                 match h3.poll(&mut self.conn) {
                     Ok(Some((sid, crate::transport::h3::Event::Headers { list, .. }))) => {
@@ -434,28 +434,38 @@ impl QuicFuscateConnection {
     /// `get_http3_header_list` (one code path) and the encoded delta is paid
     /// from the shared wire budget - a denied slot is consumed, never
     /// replayed (TODO-1055).
+    ///
+    /// Cover requests are client-side camouflage only: a server that emitted
+    /// one would open a peer-initiated bidirectional request stream, which
+    /// every H3 peer is required to reject. Mirrors the same role guard in
+    /// `emit_webtransport_cover_session`.
     fn emit_due_cover_headers(
         h3: &mut crate::transport::h3::Connection,
         conn: &mut crate::transport::Connection,
         stealth_manager: &StealthManager,
-    ) {
+    ) -> bool {
+        if conn.is_server() {
+            return false;
+        }
         let Some((authority, path)) = stealth_manager.cover_request_due() else {
-            return;
+            return false;
         };
         let Some(headers) = stealth_manager.get_http3_header_list(&authority, &path) else {
-            return;
+            return false;
         };
         let encoded_estimate: u64 =
             headers.iter().map(|h| h.name().len() as u64 + h.value().len() as u64 + 8).sum();
         if !conn.try_spend_wire_cover(encoded_estimate) {
-            return;
+            return false;
         }
         if let Err(e) = h3.send_request(conn, &headers, true) {
             crate::optimize::telemetry::STEALTH_SIGNAL_RST
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             warn!("Cover traffic send failed: {:?}", e);
+            false
         } else {
             debug!("Cover traffic request emitted");
+            true
         }
     }
 
@@ -1614,5 +1624,119 @@ impl QuicFuscateConnection {
     /// Returns true if a MASQUE CONNECT-UDP flow is currently registered.
     pub fn masque_flow_active(&self) -> bool {
         self.h3_conn.as_ref().map(|h| h.masque_flow_active()).unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod cover_emission_role_tests {
+    use super::*;
+    use crate::transport::connection::{bench_paired_1rtt_connections, BenchConnectionPair};
+    use qf_common::time_source::test_support::ManualTimeSource;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant, SystemTime};
+
+    fn pump_once(
+        client: &mut crate::transport::Connection,
+        server: &mut crate::transport::Connection,
+        recv_info: &crate::transport::RecvInfo,
+        packet: &mut [u8],
+    ) -> bool {
+        let mut progress = false;
+        match client.send(packet) {
+            Ok((len, _)) => {
+                server.recv(&mut packet[..len], recv_info).expect("server recv");
+                progress = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {}
+            Err(error) => panic!("client send failed: {error:?}"),
+        }
+        let reverse =
+            crate::transport::RecvInfo { from: recv_info.to, to: recv_info.from, ecn: None };
+        match server.send(packet) {
+            Ok((len, _)) => {
+                client.recv(&mut packet[..len], &reverse).expect("client recv");
+                progress = true;
+            }
+            Err(crate::error::ConnectionError::Done) => {}
+            Err(error) => panic!("server send failed: {error:?}"),
+        }
+        progress
+    }
+
+    fn drain(
+        h3: &mut crate::transport::h3::Connection,
+        conn: &mut crate::transport::Connection,
+        who: &str,
+    ) -> bool {
+        let mut saw_headers = false;
+        loop {
+            match h3.poll(conn) {
+                Ok(Some((_, crate::transport::h3::Event::Headers { .. }))) => {
+                    saw_headers = true;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(crate::transport::h3::Error::Done) => break,
+                Err(error) => panic!("{who} h3 poll failed: {error:?}"),
+            }
+        }
+        saw_headers
+    }
+
+    /// Cover requests are client-side camouflage: a server that emitted one
+    /// would open a peer-initiated bidirectional request stream, which every
+    /// H3 peer must reject. Regression test for the live-session teardown
+    /// where a server's masquerading scheduler fired `send_request` on the
+    /// server connection and the peer closed the session.
+    #[test]
+    fn server_cover_emit_never_reaches_peer() {
+        let clock = ManualTimeSource::new(Instant::now(), SystemTime::now());
+        let _clock_guard = crate::time_source::install_for_test(clock.clone());
+        let manager = StealthManager::new(
+            StealthConfig::stealth(),
+            Arc::new(crate::optimize::OptimizationManager::new()),
+            Arc::new(crate::crypto::CryptoManager::new()),
+        );
+        clock.advance(Duration::from_secs(6));
+
+        let BenchConnectionPair { mut client, mut server, recv_info } =
+            bench_paired_1rtt_connections();
+        let h3_config = crate::transport::h3::Config::new().expect("h3 config");
+        let mut client_h3 =
+            crate::transport::h3::Connection::with_transport(&mut client, &h3_config)
+                .expect("client h3");
+        let mut server_h3 =
+            crate::transport::h3::Connection::with_transport(&mut server, &h3_config)
+                .expect("server h3");
+        let mut packet = [0u8; 4096];
+
+        // Armed scheduler on the client emits a request on its own stream —
+        // the positive control proving the cover path was exercised.
+        assert!(
+            QuicFuscateConnection::emit_due_cover_headers(&mut client_h3, &mut client, &manager),
+            "armed client scheduler must emit"
+        );
+        for _ in 0..8 {
+            if !pump_once(&mut client, &mut server, &recv_info, &mut packet) {
+                break;
+            }
+            drain(&mut client_h3, &mut client, "client");
+            drain(&mut server_h3, &mut server, "server");
+        }
+
+        // Re-arm the scheduler and emit on the server conn: the role guard
+        // must drop it, so the peer never sees a request stream.
+        clock.advance(Duration::from_secs(6));
+        assert!(
+            !QuicFuscateConnection::emit_due_cover_headers(&mut server_h3, &mut server, &manager),
+            "server must never emit cover requests"
+        );
+        for _ in 0..8 {
+            if !pump_once(&mut client, &mut server, &recv_info, &mut packet) {
+                break;
+            }
+            drain(&mut client_h3, &mut client, "client");
+            drain(&mut server_h3, &mut server, "server");
+        }
+        drain(&mut client_h3, &mut client, "client");
     }
 }
