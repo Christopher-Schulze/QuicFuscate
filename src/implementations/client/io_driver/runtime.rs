@@ -1419,6 +1419,9 @@ impl IoDriver {
         ingress: &ClientTunnelIngress,
     ) -> Result<(), EngineError> {
         let mut drained = ingress.drain();
+        if masque_trace_enabled() && !drained.is_empty() {
+            log::info!("client ingress drain packets={}", drained.len());
+        }
         for (index, packet) in drained.iter().enumerate() {
             let mut tun_guard = tun.lock();
             if let Err(error) = tun_guard.write_packet(packet) {
@@ -1473,13 +1476,20 @@ impl IoDriver {
             {
                 let mut conn_guard = conn.lock();
                 if let Err(e) = conn_guard.recv_mut(payload) {
-                    log::debug!("Connection recv error: {:?}", e);
+                    if masque_trace_enabled() {
+                        log::info!("client conn.recv error bytes={} err={:?}", len, e);
+                    } else {
+                        log::debug!("Connection recv error: {:?}", e);
+                    }
                     self.stats.errors.fetch_add(1, Ordering::Relaxed);
                     flush_batch(batch_bytes, batch_packets);
                     return Err(EngineError::DataPlane(DataPlaneFault::TransportReceive {
                         component: "client QUIC receive".to_string(),
                         error: e.to_string(),
                     }));
+                }
+                if masque_trace_enabled() {
+                    log::info!("client conn.recv ok bytes={}", len);
                 }
             }
             if let Err(error) = self
