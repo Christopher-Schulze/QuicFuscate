@@ -21,6 +21,36 @@ use crate::interface::{TunConfig, TunDevice, TunError};
 use std::io;
 use std::sync::Arc;
 
+/// Process-wide Wintun receive-path counters for live datapath
+/// diagnostics: packets returned by `WintunReceivePacket`, entries into
+/// the empty-ring kernel wait, and receive errors. They let a live run
+/// distinguish "session ring stays empty" from "reader never reached the
+/// driver" without touching secret or packet contents.
+#[cfg(target_os = "windows")]
+static WINTUN_RECV_PACKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+static WINTUN_RECV_EMPTY_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+static WINTUN_RECV_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot of `(received_packets, empty_ring_waits, receive_errors)`.
+/// Always `(0, 0, 0)` on non-Windows builds.
+pub fn read_diagnostics() -> (u64, u64, u64) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::atomic::Ordering;
+        (
+            WINTUN_RECV_PACKETS.load(Ordering::Relaxed),
+            WINTUN_RECV_EMPTY_WAITS.load(Ordering::Relaxed),
+            WINTUN_RECV_ERRORS.load(Ordering::Relaxed),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        (0, 0, 0)
+    }
+}
+
 fn validate_config(config: &TunConfig) -> Result<(), TunError> {
     if config.mtu < 576 {
         return Err(TunError::Config("Wintun MTU must be >= 576"));
@@ -1080,11 +1110,13 @@ mod imp {
                         ptr::copy_nonoverlapping(pkt as *const u8, buf.as_mut_ptr(), packet_len);
                         (self.lib.release_receive_packet)(self.session, pkt);
                     }
+                    WINTUN_RECV_PACKETS.fetch_add(1, Ordering::Relaxed);
                     return Ok(packet_len);
                 }
 
                 match unsafe { GetLastError() } {
                     ERROR_NO_MORE_ITEMS => {
+                        WINTUN_RECV_EMPTY_WAITS.fetch_add(1, Ordering::Relaxed);
                         let wait = unsafe {
                             WaitForMultipleObjects(
                                 wait_handles.len() as u32,
@@ -1096,8 +1128,12 @@ mod imp {
                         match wait {
                             WAIT_OBJECT_0 => continue,
                             value if value == WAIT_OBJECT_0 + 1 => return Err(closed_error()),
-                            WAIT_FAILED => return Err(io::Error::last_os_error()),
+                            WAIT_FAILED => {
+                                WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                                return Err(io::Error::last_os_error());
+                            }
                             value => {
+                                WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
                                 return Err(io::Error::other(format!(
                                     "WaitForMultipleObjects returned unexpected status {value}"
                                 )));
@@ -1105,18 +1141,23 @@ mod imp {
                         }
                     }
                     ERROR_HANDLE_EOF => {
+                        WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
                         return Err(io::Error::new(
                             io::ErrorKind::BrokenPipe,
                             "Wintun adapter is terminating",
                         ));
                     }
                     ERROR_INVALID_DATA => {
+                        WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "Wintun receive ring is corrupt",
                         ));
                     }
-                    code => return Err(io::Error::from_raw_os_error(code as i32)),
+                    code => {
+                        WINTUN_RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        return Err(io::Error::from_raw_os_error(code as i32));
+                    }
                 }
             }
         }
