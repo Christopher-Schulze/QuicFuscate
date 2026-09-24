@@ -278,6 +278,10 @@ Development focuses on hardening and operational validation across all runtime s
 - Soak- and chaos-checked:
   - `scripts/tests/suites/test-runtime-soak-chaos.sh`
   - `scripts/tests/suites/test-fec-auto-controller-proof.sh`
+- Native end-to-end proven:
+  - `scripts/tests/tun-multihop-e2e-netns.sh` (privileged Linux namespaces, one/two/three hops)
+  - `scripts/tests/macos-utun-omega-e2e.sh` (macOS utun client -> Linux exit, authenticated CONNECT-IP)
+  - `scripts/tests/wintun-omega-e2e.ps1` (Windows Wintun client -> Linux exit via GitHub runner)
 - Bench-evidenced:
   - `scripts/benchmarks/suites/bench-retained-crypto-backends.sh`
 - Limits:
