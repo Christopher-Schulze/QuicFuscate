@@ -1043,10 +1043,21 @@ fn process_server_tun_packet(
     metrics: &Metrics,
 ) -> Result<(), DataPlaneFault> {
     let Some(tun) = tun_ctx.server_tun.as_ref() else {
+        if masque_trace_enabled() {
+            log::info!("server TUN downlink dropped: tun_ctx.server_tun is None");
+        }
         return Ok(());
     };
     let server_ips = tun_ctx.server_ips;
     let packet_slice: &[u8] = packet.as_slice();
+    if masque_trace_enabled() {
+        log::info!(
+            "server TUN downlink classify enter bytes={} server_v4={} server_v6={:?}",
+            packet_slice.len(),
+            server_ips.ipv4,
+            server_ips.ipv6
+        );
+    }
     let Some(ClassifiedDownlink { unicast, targets, source_profile }) =
         classify_server_tun_downlink(
             live_state,
@@ -1058,6 +1069,9 @@ fn process_server_tun_packet(
             metrics,
         )?
     else {
+        if masque_trace_enabled() {
+            log::info!("server TUN downlink classify returned None");
+        }
         return Ok(());
     };
 
@@ -1105,9 +1119,20 @@ fn route_server_tun_packet(
     metrics: &Metrics,
 ) -> Result<(), DataPlaneFault> {
     let Some(tun) = tun_ctx.server_tun.as_ref() else {
+        if masque_trace_enabled() {
+            log::info!("server TUN downlink dropped (router path): tun_ctx.server_tun is None");
+        }
         return Ok(());
     };
     let packet_slice: &[u8] = packet.as_slice();
+    if masque_trace_enabled() {
+        log::info!(
+            "server TUN downlink classify enter (router path) bytes={} server_v4={} server_v6={:?}",
+            packet_slice.len(),
+            tun_ctx.server_ips.ipv4,
+            tun_ctx.server_ips.ipv6
+        );
+    }
     let Some(ClassifiedDownlink { unicast, targets, source_profile }) =
         classify_server_tun_downlink(
             live_state,
@@ -1119,6 +1144,9 @@ fn route_server_tun_packet(
             metrics,
         )?
     else {
+        if masque_trace_enabled() {
+            log::info!("server TUN downlink classify returned None (router path)");
+        }
         return Ok(());
     };
 
