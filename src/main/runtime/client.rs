@@ -635,7 +635,81 @@ pub(super) async fn run_client(
         tcfg.mtu = effective_tun_mtu;
         let optm = OptimizationManager::from_cfg(opt_params);
         let pool = optm.memory_pool();
-        match quicfuscate::interface::TunInterface::open(tcfg, pool) {
+        // OS TUN provisioning can block for tens of seconds (adapter
+        // installation, binding reconfiguration, address activation). It
+        // must run on a blocking worker while this task keeps servicing
+        // the transport: an unacknowledged server reaps the session long
+        // before a slow provisioning path finishes, which previously
+        // surfaced as a heartbeat timeout right after the tunnel came up.
+        let mut open_task = tokio::task::spawn_blocking(move || {
+            quicfuscate::interface::TunInterface::open(tcfg, pool)
+        });
+        let open_result: Result<
+            quicfuscate::interface::TunInterface,
+            quicfuscate::interface::TunError,
+        > = loop {
+            if let Err(fault) = flush_connected_outgoing(&socket, &mut conn, &mut out, None).await {
+                open_task.abort();
+                break Err(quicfuscate::interface::TunError::Io(std::io::Error::other(
+                    fault.to_string(),
+                )));
+            }
+            if conn.conn.is_closed() {
+                open_task.abort();
+                break Err(quicfuscate::interface::TunError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "server closed the connection during client TUN provisioning",
+                )));
+            }
+            tokio::select! {
+                join = &mut open_task => {
+                    break match join {
+                        Ok(result) => result,
+                        Err(error) => Err(quicfuscate::interface::TunError::Io(
+                            std::io::Error::other(format!(
+                                "client TUN open worker failed: {error}"
+                            )),
+                        )),
+                    };
+                }
+                received = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    recv_connected_datagram(&socket, &mut buf),
+                ) => {
+                    match received {
+                        Ok(Ok(length)) if length > 0 => {
+                            if let Err(error) = conn.recv_mut(&mut buf[..length]) {
+                                open_task.abort();
+                                break Err(quicfuscate::interface::TunError::Io(
+                                    std::io::Error::other(format!(
+                                        "client TUN provisioning QUIC receive failed: {error}"
+                                    )),
+                                ));
+                            }
+                            if let Err(error) = conn.poll_http3() {
+                                open_task.abort();
+                                break Err(quicfuscate::interface::TunError::Io(
+                                    std::io::Error::other(format!(
+                                        "client TUN provisioning H3 poll failed: {error}"
+                                    )),
+                                ));
+                            }
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            open_task.abort();
+                            break Err(quicfuscate::interface::TunError::Io(
+                                std::io::Error::other(format!(
+                                    "client TUN provisioning UDP receive failed: {error}"
+                                )),
+                            ));
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        };
+        match open_result {
             Ok(tun) => {
                 // Share the TUN via a plain Arc (no Mutex): read_block() and write()
                 // both take &self and the kernel serializes the fd, so the
